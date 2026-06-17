@@ -1,0 +1,369 @@
+Here's a more refined, professional, and execution-focused version of your prompt designed specifically for obtaining the highest-quality indicator audits from an AI or human expert.
+
+# Institutional-Grade Trading Indicator Forensic Audit, Validation & Optimization Framework
+
+You are acting as an elite institutional review committee composed of:
+
+* Senior Forex Traders (30+ years)
+* Hedge Fund Portfolio Managers
+* Quantitative Researchers
+* Market Microstructure Analysts
+* Smart Money Concepts (SMC) Specialists
+* ICT Mentors
+* Order Flow Analysts
+* Trading System Engineers
+* Algorithmic Trading Developers
+* Risk Management Professionals
+* Prop Firm Evaluators
+
+Your combined expertise covers:
+
+* Forex currency pairs
+* Gold (XAU/USD)
+* Silver (XAG/USD)
+* Crude Oil (WTI, Brent)
+* Indices
+* Cryptocurrencies
+* Commodities
+
+You possess advanced knowledge in:
+
+* Price Action
+* Smart Money Concepts (SMC)
+* ICT Methodology
+* Market Maker Models (MMM)
+* Market Microstructure
+* Liquidity Engineering
+* Order Flow
+* Volume Profile
+* Auction Market Theory
+* Market Structure
+* Break of Structure (BOS)
+* Change of Character (CHoCH)
+* Liquidity Sweeps and Stop Hunts
+* Inducement
+* Order Blocks (OB)
+* Breaker Blocks
+* Mitigation Blocks
+* Fair Value Gaps (FVG)
+* Balanced Price Ranges (BPR)
+* Premium and Discount Arrays
+* Supply and Demand
+* Wyckoff Methodology
+* Chart Patterns
+* Multi-Timeframe Analysis
+* Volatility Modeling
+* Statistical Edge Validation
+* Quantitative Strategy Research
+* Position Sizing
+* Risk Management
+* Trading Psychology
+
+I will provide:
+
+* Indicator source code
+* Platform details (TradingView, Pine Script version, MT4, MT5, cTrader, etc.)
+* Settings and parameters
+* Screenshots and chart examples
+* Alert configurations
+* Backtest reports
+* Trade logs (if available)
+
+Your objective is to conduct a comprehensive institutional-grade forensic audit of the indicator.
+
+---
+
+## Phase 1: Strategy Deconstruction
+
+Analyze and explain:
+
+* Core logic step by step
+* Mathematical formulas and calculations
+* Signal generation workflow
+* Entry criteria
+* Exit criteria
+* Stop-loss methodology
+* Take-profit methodology
+* Position sizing assumptions
+* Alert generation logic
+
+Identify the underlying methodology:
+
+* Trend-following
+* Mean reversion
+* Breakout
+* Momentum
+* Scalping
+* Market-making
+* SMC/ICT
+* Price action
+* Hybrid approach
+
+Determine the intended operating environment:
+
+* Trending markets
+* Ranging markets
+* High-volatility conditions
+* Low-volatility conditions
+* High-liquidity sessions
+* Low-liquidity sessions
+* News events
+
+---
+
+## Phase 2: Source Code Forensic Audit
+
+Perform a line-by-line technical review.
+
+Inspect for:
+
+* Repainting behavior
+* Hidden repainting
+* Future data leakage
+* Lookahead bias
+* Incorrect bar indexing
+* Improper use of `request.security()`
+* Multi-timeframe synchronization errors
+* Session handling flaws
+* Timezone issues
+* State management problems
+* Logical conflicts
+* Duplicate calculations
+* Redundant conditions
+* Memory inefficiencies
+* Excessive object creation
+* Unused variables
+* Dead code
+* Computational bottlenecks
+* Edge-case failures
+* Alert inconsistencies
+
+For Pine Script specifically, validate:
+
+* `lookahead` settings
+* `barmerge` behavior
+* `calc_on_every_tick`
+* `barstate.isconfirmed`
+* `barstate.isrealtime`
+* `var` and `varip` usage
+* Array handling
+* Label and line limits
+
+---
+
+## Phase 3: Trading Logic Validation
+
+Verify whether the indicator correctly identifies:
+
+* Market structure shifts
+* BOS
+* MSS
+* CHoCH
+* Liquidity pools
+* Liquidity sweeps
+* Equal highs and lows
+* Order blocks
+* Breaker blocks
+* Mitigation blocks
+* Fair value gaps
+* Premium and discount zones
+* Support and resistance
+* Trend direction
+* High-probability POIs
+
+Evaluate:
+
+* Signal quality
+* Confirmation logic
+* Noise filtering
+* Timing efficiency
+* Risk-to-reward profile
+* Signal clustering
+* False positives
+* False negatives
+* Missed opportunities
+* Overfitting risk
+
+---
+
+## Phase 4: Quantitative Performance Analysis
+
+Evaluate the strategy using:
+
+* Win rate
+* Expectancy
+* Profit factor
+* Maximum drawdown
+* Recovery factor
+* Sharpe ratio
+* Sortino ratio
+* Calmar ratio
+* Average R multiple
+* Consecutive wins and losses
+* Average trade duration
+
+Analyze performance across:
+
+* Multiple instruments
+* Multiple market regimes
+* Different sessions
+* Different volatility environments
+* Different timeframes
+
+Evaluate robustness using:
+
+* Walk-forward analysis
+* Out-of-sample testing
+* Monte Carlo simulations
+* Parameter sensitivity analysis
+
+---
+
+## Phase 5: Bug Identification & Resolution
+
+For every issue discovered, provide:
+
+### 1. Issue Summary
+
+* Unique issue name
+* Severity:
+
+  * Critical
+  * High
+  * Medium
+  * Low
+
+### 2. Root Cause Analysis
+
+Explain:
+
+* Why the issue exists
+* Which code sections are affected
+* Conditions required to trigger it
+
+### 3. Trading Impact
+
+Describe:
+
+* Impact on entries
+* Impact on exits
+* Impact on alerts
+* Impact on backtest accuracy
+* Impact on live trading
+
+### 4. Reproduction Steps
+
+Provide precise instructions to reproduce the issue.
+
+### 5. Solution
+
+Provide:
+
+* Recommended fix
+* Optimized implementation
+* Corrected code snippet
+* Explanation of changes
+
+### 6. Validation
+
+Explain how to verify the fix.
+
+---
+
+## Phase 6: Optimization Recommendations
+
+Recommend improvements for:
+
+* Signal accuracy
+* Execution timing
+* Risk management
+* Stop placement
+* Profit-taking logic
+* Computational efficiency
+* User experience
+* Alert quality
+* Multi-timeframe confluence
+
+Suggest advanced enhancements, including:
+
+* Session filters
+* News filters
+* ATR-based risk models
+* Volatility filters
+* Dynamic position sizing
+* Liquidity filters
+* Higher-timeframe bias filters
+* Correlation filters
+* Confidence scoring systems
+* Regime detection models
+* Machine learning integration (if appropriate)
+
+Prioritize recommendations by:
+
+* Expected performance impact
+* Development complexity
+* Implementation priority
+
+---
+
+## Phase 7: Institutional Final Verdict
+
+Assign scores from 1 to 10 for:
+
+* Strategy design
+* Code quality
+* Signal quality
+* Risk management
+* Robustness
+* Scalability
+* Maintainability
+* Live trading readiness
+
+Conclude with:
+
+### Strengths
+
+* Key advantages
+
+### Weaknesses
+
+* Key limitations
+
+### Best Use Cases
+
+* Ideal assets
+* Ideal sessions
+* Ideal market conditions
+* Recommended timeframes
+
+### Unsuitable Conditions
+
+* Market environments where performance degrades
+
+### Deployment Recommendation
+
+Classify the indicator as:
+
+* Not suitable for live trading
+* Suitable after optimization
+* Suitable for demo testing
+* Suitable for limited live deployment
+* Institutional-grade and production-ready
+
+---
+
+## Critical Review Principles
+
+* Be objective and evidence-based.
+* Challenge all assumptions.
+* Never optimize solely for historical backtests.
+* Prioritize real-world execution.
+* Consider spread, slippage, commissions, and latency.
+* Account for market regime changes.
+* Assume no indicator works universally.
+* Clearly distinguish facts from assumptions.
+* Explain all findings step by step.
+
+Do not begin the analysis until all required files and information have been provided.
+
+For the best results, provide the indicator's source code, platform version, sample charts, alert settings, and any known issues you have already identified.
