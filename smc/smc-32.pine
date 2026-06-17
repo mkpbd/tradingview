@@ -2363,10 +2363,18 @@ if barstate.islast
     if _ppL or _ppS
         _ppX   = bar_index + rightLabelOffset
         _ppEpx = _ppL ? _fibOteTop : _fibOteBot
-        _ppSLp = _ppL ? _slAnchorLong : _slAnchorShort
+        // v31 fix: SL + RR measured from the PROJECTED entry (the OTE edge), not the live close. The
+        // old code paired the deep-OTE entry with _slAnchorLong (anchored to current price far above the
+        // zone) → SL landed ABOVE entry on a long → RR showed "—". Anchor SL just beyond the OTE far
+        // edge (or the swept extreme, whichever is further) so SL is always on the correct side.
+        _ppSLp = _ppL ? math.min(_fibOteBot, na(lastBullSweepLow) ? _fibOteBot : lastBullSweepLow) - _rrBuf : math.max(_fibOteTop, na(lastBearSweepHigh) ? _fibOteTop : lastBearSweepHigh) + _rrBuf
         _ppTPp = _ppL ? _rrTargetLong : _rrTargetShort
-        _ppRRv = _ppL ? measuredRRLong : measuredRRShort
-        _ppTxt = (_ppL ? " ⏳ PENDING ▲ ENTRY " : " ⏳ PENDING ▼ ENTRY ") + str.tostring(_ppEpx, format.mintick) + "  RR " + (na(_ppRRv) ? "—" : str.tostring(_ppRRv, "#.#")) + "\n SL " + str.tostring(_ppSLp, format.mintick) + (na(_ppTPp) ? "" : "  TP " + str.tostring(_ppTPp, format.mintick)) + " "
+        _ppRisk = _ppL ? _ppEpx - _ppSLp : _ppSLp - _ppEpx
+        _ppRew  = na(_ppTPp) ? na : (_ppL ? _ppTPp - _ppEpx : _ppEpx - _ppTPp)
+        _ppRRv  = (_ppRisk > 0 and not na(_ppRew) and _ppRew > 0) ? _ppRew / _ppRisk : na
+        // Δ = distance price must still travel to reach the entry (negative = price is above the long
+        // entry / below the short entry → it must retrace). Makes the "entry is far below" obvious.
+        _ppTxt = (_ppL ? " ⏳ PENDING ▲ ENTRY " : " ⏳ PENDING ▼ ENTRY ") + str.tostring(_ppEpx, format.mintick) + "  RR " + (na(_ppRRv) ? "—" : str.tostring(_ppRRv, "#.#")) + "\n SL " + str.tostring(_ppSLp, format.mintick) + (na(_ppTPp) ? "" : "  TP " + str.tostring(_ppTPp, format.mintick)) + "  Δ" + str.tostring(_ppEpx - close, "#.#") + " "
         _ppZone := box.new(bar_index, _fibOteTop, _ppX, _fibOteBot, bgcolor=color.new(C_GOLD, 80), border_color=color.new(C_GOLD, 30), border_width=1, border_style=line.style_dashed)
         _ppLbl  := label.new(_ppX, _ppEpx, _ppTxt, color=color.new(_ppL ? C_LBL_BULL : C_LBL_BEAR, 10), textcolor=C_TEXT_WHITE, style=label.style_label_left, size=sz_small)
 
