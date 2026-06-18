@@ -1,0 +1,2533 @@
+//@version=6
+// =====================================================================
+//  SNIPER SCALP — SMC / ICT  ·  STRATEGY EDITION  ·  V3 (backtest engine)
+//  NEW FILE — strategy() port of sniper_scalp_v2.pine. Identical SMC/ICT analysis;
+//  manual trade-tracker replaced by native strategy.* orders so the Strategy Tester
+//  produces real equity / PF / drawdown. Use the [Indicator] V3 file for live alerts.
+//  V2 CHANGES (forensic review fixes):
+//   P0-1 correct FX/instrument position sizing (pointvalue + quote->acct rate)
+//   P0-2 independent 0-100 quality engine (no score<->trigger double-count) + decay
+//   P0-3 BPR removed from directional zone gate (no dual-side green-light)
+//   P1-1 stale RSI-divergence removed from trigger floor (scores only)
+//   P1-3 graded HTF gate (blocks only strong opposition in Majority mode)
+//   P1-4 honest tracker TP fills (slippage buffer) — stats no longer inflated
+//   P2   sweep->reclaim sequencing gate + modeled-spread cap
+//  V4 CHANGES (forensic-audit remediation):
+//   FIX-1 score<->gate DOUBLE-COUNT removed: session (a hard gate) no longer scores;
+//         its weight now grades INDEPENDENT manipulation quality (sweep+reclaim disp)
+//   FIX-2 dead useTLBreak input wired into the orderflow score component
+//   FIX-3 exit scratch-bleed: break-even only AFTER the partial books; runner then
+//         trails (let-winners-run) instead of dying at +0
+//   FIX-4 position size + daily stop sized off LIVE strategy.equity (compounds), not
+//         a static acctSize -> prop-accurate
+//   FIX-5 sweep now requires a displacement reclaim to earn full manipulation credit
+//  V3 CHANGES (institutional refactor):
+//   P0-1 REAL partial TP — books partialFrac at +partialR, BE on remainder
+//   P0-2 cost model — entry+exit spread + commission charged; gross vs net R
+//   P0-3 sweep de-duplicated — sweep is TRIGGER ONLY, removed from score
+//   P0-4 news ON by default + single-event blackout (+/- pad) [no calendar feed]
+//   P0-5 ATR-percentile regime gate (skip dead tape + news-spike vol)
+//   P1   HTF dealing-range narrative (premium/discount location gate)
+//   P1   hard sweep->MSS->zone sequencing gate
+//   P1   dynamic risk engine: 0.5% risk, daily -R stop, consec halt, cooldown
+//   P2   relative (ATR-fraction) equal H/L tolerance option
+//   STAT realized-equity max drawdown, RoR proxy, walk-forward IS/OOS buckets
+//  V6 CHANGES (forensic-scorecard remediation):
+//   AF-1 MSS now requires a displacement BODY (>= mssDispMult x ATR) — a thin
+//        CHoCH-after-LL no longer counts as a market-structure shift (ICT/MS lift)
+//   AF-2 low-lag fast-break auto-enabled under the 1M/3M scalp presets to offset
+//        swingLen pivot lag on fast TFs (scalping-performance lift)
+//   AF-3 runner exit: structure trail (last HL/LH less buffer) ratchets the post-
+//        partial stop when tighter than the ATR trail — exit on a structure break,
+//        not an arbitrary ATR distance (exit-quality lift)
+//   AF-4 FX tick-volume order-flow credit down-weighted (0.8->0.4) so a proxy is
+//        not scored like true bid/ask delta (institutional-honesty lift)
+//   AF-5 TP2 second scale-out (3-stage scalp ladder: TP1 -> TP2 -> trailed runner)
+//        so a move that reverts after ~1.5R still books profit (exit-quality lift)
+//   AF-6 auto-NFP blackout (first Friday 0820-0940 ET) — the one high-impact event
+//        Pine can schedule with no calendar feed (news-readiness lift)
+//   AF-7 walk-forward IS/OOS default ON so overfit is always measured on every run
+//   AF-8 silent mis-size guard: warn when a trade used the 1-contract fallback size
+//   NOTE: true statistical edge + a live news calendar are NOT code-fixable in Pine.
+//        Edge needs a real OOS backtest (use the WF panel); only NFP is deterministic.
+//  V6.2 CHANGES (forensic-audit remediation, code-fixable items only):
+//   AR-1 OVER-FILTERING: useSoftGates — ext/ADX/regime/narrative/sequence stop HARD-blocking
+//        and instead haircut the 0-100 score (softGatePenalty each); qMin floor still governs.
+//        Lifts signal frequency so the trade sample is statistically evaluable. Default ON.
+//   AR-2 NARRATIVE CONTINUATION: useNarrContinuation — a strong HTF trend (|htfSum|>=2) now
+//        authorizes a continuation entry even when price retraced into the "wrong" PD half
+//        (long-in-premium / short-in-discount). Fixes the location gate vetoing valid pullbacks.
+//   AR-3 NFP DATE BUG: first-Friday rule shifted to the 2nd Friday (dom 8) when the 1st is a
+//        Friday (reference week not yet complete) — was blacking out the wrong day those months.
+//   AR-4 FILL OPTIMISM: useConsvFill — when one bar straddles BOTH the partial TP and the stop,
+//        assume the STOP filled first (worst case), cancel the stale favorable limit, exit at
+//        stop. Removes optimistic intrabar sequencing that flattered the equity curve.
+//   NOTE: AR fixes change behavior — RE-RUN the IS/OOS walk-forward panel before trusting stats.
+//  V7 CHANGES (hedge-fund committee forensic remediation — tradeability + risk integrity):
+//   V7-1 TRADEABILITY: useSoftGates default OFF->ON + qMin 80->74. The prior default (80 +
+//        ~22 hard gates) fired <30 trades/yr -> statistically empty WF buckets / no provable
+//        edge. Soft-gates grade context into the 0-100 score; qMin 74 yields an evaluable sample.
+//   V7-2 FIB BAND: useGolden AND useOTE now means Golden OR OTE (50-79% union) instead of the
+//        62-78.6% intersection -> captures sharp stop-hunt retraces that overshot the thin band.
+//   V7-3 SCORE-TIE (H-3): longScore==shortScore no longer drops BOTH signals; a tie resolves
+//        deterministically to long (>=), short stays strict (>). Exactly one side fires, never zero.
+//   V7-4 SWEEP QUALITY (H-1): the seq-gate sweep must have taken ENGINEERED liquidity
+//        (lastSweep*Eng) — pool/PDH-PDL/Asia/weekly — not an incidental single-pivot wick that
+//        made "manipulation precedes entry" near-always true in London/NY.
+//   V7-5 DAILY-STOP INTEGRITY (H-6/H-7): daily-loss limit sized off FROZEN day-start equity
+//        (was live shrinking equity -> drifting limit) + a persistent dayHalted latch so a breach
+//        blocks every further entry that day (was re-evaluated per bar, leaking one trade past).
+//   V7-6 RUNNER FILL HONESTY (MN-1): useConsvFill now also guards the runner's final TP/SL
+//        straddle bar (stop wins) — previously only the partial legs were protected, flattering
+//        the highest-variance exits.
+//   NOTE: V7 changes BEHAVIOR and FREQUENCY — compile in TradingView and RE-RUN IS/OOS before trusting any stat.
+//  V11 CHANGES (institutional forensic-audit remediation — code-fixable items):
+//   C-1 LTF SAFETY: request.security_lower_tf now uses an EFFECTIVE LTF that can never exceed the
+//        chart TF (ofLTFeff) — a 1m chart with default ofLTF="1" no longer errors / silently kills
+//        the order-flow feed. ofTFok still zeroes the score when no true lower TF exists.
+//   C-2 SL-CAP FREQUENCY DRAIN: useSoftSLcap (default OFF) lifts the HARD maxSLatr block. With
+//        risk-% sizing a wider stop = smaller lot = SAME $ risk, so the block was lost frequency,
+//        not safety. minSLdist floor + spread-cap still bound the trade. OFF = behavior unchanged.
+//   C-3 RISK-ADJUSTED STATS: stats panel adds Sharpe / Sortino (per-trade, honest per-entry R vs
+//        entry-time $ risk) + Recovery factor (netProfit / maxDrawdown). NOT annualized — TV's
+//        native tester gives annualized Sharpe; these complement the per-entry win%/expectancy.
+//   C-4 DEDUPE: riskMoney reuses riskMoneyEq (identical compute) — no double calculation.
+//   C-5 SCORE CLAMP: longScore/shortScore clamped to <=100 so a user-raised qX weight can't break
+//        the 0-100 qMin contract or the "/100" dashboard read.
+//   NOTE: C-1/C-4/C-5 are behavior-neutral at defaults. C-2/C-3 add an opt-in input + stats only.
+//        RE-RUN the IS/OOS walk-forward panel after enabling useSoftSLcap.
+// =====================================================================
+//  THIS FILE IS A strategy(), NOT an indicator (doc-rot fix V6.1).
+//  Same SMC/ICT analysis engine (BOS/CHoCH, OB, FVG, BPR, IFVG, breaker,
+//  liquidity, premium/discount, fib golden/OTE, Gann, confluence score),
+//  driving the NATIVE strategy.* order engine so the TradingView Strategy
+//  Tester produces real equity / PF / drawdown / walk-forward stats.
+//
+//  EXECUTION MODEL (no repaint):
+//   - entries gated barstate.isconfirmed + process_orders_on_close=true ->
+//     fill on the confirmed signal bar's close (market-on-close)
+//   - every request.security uses [1] history + lookahead_off -> no leak
+//   - 3-stage exit ladder: TP1 partial -> TP2 partial -> trailed runner
+//   - alert() still emits dynamic webhook text on entry/exit for automation
+//  For LIVE signal-only alerting use the [Indicator] edition file instead.
+// =====================================================================
+strategy("Sniper Scalp — SMC/ICT [Strategy] V3",
+     overlay                 = true,
+     pyramiding              = 8,
+     calc_on_every_tick      = false,
+     process_orders_on_close = true,
+     close_entries_rule      = "ANY",
+     initial_capital         = 2000,
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.0,
+     slippage                = 1,
+     max_boxes_count         = 200,
+     max_lines_count         = 200,
+     max_labels_count        = 200)
+// NOTE on costs (Stage 10 #1): COMMISSION DEFAULTS TO ZERO and slippage to a token
+// 1 tick — a zero-cost backtest is OPTIMISTIC. Before believing any equity curve you
+// MUST set realistic Commission + Slippage in Strategy Properties for your broker:
+//   FX majors  ~ 0.7-1.0 pip round-turn spread + commission per lot
+//   Indices    ~ 0.5-1.0 pt spread; Metals ~ 2-4 pip spread
+// Set commission_value to your broker's % or per-contract cost and slippage to a
+// realistic tick count for your TF/liquidity. SL/TP levels already carry the modeled
+// spread (V3). process_orders_on_close = true makes entries fill on the confirmed
+// signal bar's close = no repaint. Risk-based qty is passed per entry from the engine.
+
+// ---------------------------------------------------------------------
+// INPUTS
+// ---------------------------------------------------------------------
+grpStruct = "Market Structure"
+swingLen    = input.int(5,  "Swing pivot lookback (wick)", minval=2, maxval=50, group=grpStruct, tooltip="Bars left/right for swing high/low. Uses wicks not body.")
+useBOS      = input.bool(true, "Trade BOS (continuation)", group=grpStruct)
+useCHoCH    = input.bool(true, "Trade CHoCH (reversal)",   group=grpStruct)
+structWindow= input.int(15, "Arm window after break (bars)", minval=1, maxval=100, group=grpStruct, tooltip="A structure break arms the direction. Entry is allowed only within this many bars after the break, while price retraces into the zone.")
+showTrend   = input.bool(true,  "Draw structure trendlines", group=grpStruct)
+useTLBreak  = input.bool(false, "Trendline break adds confluence", group=grpStruct)
+requireRetrace = input.bool(true, "Require retrace (no entry on break bar)", group=grpStruct, tooltip="Block entry on the same candle that breaks structure. Forces a pull-back into the zone first.")
+useBreakDisp = input.bool(true, "Structure break needs displacement", group=grpStruct, tooltip="A real BOS/CHoCH is an impulsive close beyond the swing, not a 1-pip clip in chop. Require breaking candle range >= mult x ATR.")
+breakDispMult= input.float(1.0, "Break displacement (x ATR)", minval=0.1, step=0.1, group=grpStruct)
+// V6 AUDIT-FIX (Market-Structure / ICT accuracy): a true MSS is an IMPULSIVE close
+// beyond the last swing, not any CHoCH that happened after a lower low. Require the
+// breaking candle to print a real displacement BODY so chop-grade CHoCHs don't count.
+useMSSdisp   = input.bool(true, "MSS needs displacement body", group=grpStruct, tooltip="V6. MSS counts only when the breaking candle's BODY >= mult x ATR — an impulsive shift, not a 1-tick clip after a LL/HH. Lifts MSS quality (thin-MSS audit fix).")
+mssDispMult  = input.float(1.0, "MSS displacement (x ATR body)", minval=0.1, step=0.1, group=grpStruct)
+extSwingLen  = input.int(15, "External structure swing lookback", minval=3, maxval=120, group=grpStruct, tooltip="Major (external) structure that sets the protected-range bias. swingLen above = internal structure that arms entries.")
+useExtBias   = input.bool(true, "Require break to agree with external structure", group=grpStruct)
+useFastBreak = input.bool(false, "Low-lag break (no pivot-confirm wait)", group=grpStruct, tooltip="Adds an early arm: a displacement close beyond the most recent swingLen-bar extreme, confirmed same-bar. Default OFF.")
+
+grpHTF = "Higher-Timeframe Bias"
+useHTF  = input.bool(true, "Require HTF trend agreement", group=grpHTF)
+htfMode = input.string("All agree", "HTF gate mode", options=["Majority","All agree","HTF #2 only"], group=grpHTF, tooltip="SNIPER DEFAULT 'All agree': all 3 HTFs must agree with the trade direction (no counter-trend short). 'Majority' = net HTF must agree (htfSum>0 long / <0 short — also no counter-trend after the V-fix). 'HTF #2 only' = single anchor TF.")
+htf1TF  = input.timeframe("60",  "HTF #1", group=grpHTF)
+htf2TF  = input.timeframe("240", "HTF #2", group=grpHTF)
+htf3TF  = input.timeframe("D",   "HTF #3", group=grpHTF)
+useHTFstruct = input.bool(true, "HTF bias from market structure (not EMA)", group=grpHTF)
+
+grpMTFS = "MTF Structure (analyze HTF -> enter chart TF)"
+useMTFstruct = input.bool(true, "MTF: arm + entry band from a higher structure TF", group=grpMTFS, tooltip="ON = BOS/CHoCH arming AND the golden/OTE band are read from a higher structure timeframe ([1]-lagged, no repaint); the trigger fires on the chart TF.")
+structTF     = input.timeframe("15", "Structure timeframe", group=grpMTFS, tooltip="Run on your ENTRY timeframe; set this to your ANALYSIS timeframe. Must be >= chart TF.")
+useHTFimpulse = input.bool(true, "Dealing-range obeys bigger HTFs (#2 & #3)", group=grpMTFS, tooltip="FIX: when BOTH higher HTFs (e.g. 60m & 240m) are bearish, the premium/discount + OTE leg is drawn DOWN (premium=sell) even if the analysis structTF (e.g. 15m) still lags bullish. Stops a 'Discount Buy Zone' from showing while the dominant HTFs sell off.")
+
+grpFilter = "Volatility / Range Filter"
+useADX  = input.bool(true, "Skip chop: require trend strength (ADX)", group=grpFilter)
+adxLen  = input.int(14, "ADX / DMI length", minval=1, maxval=100, group=grpFilter)
+adxMin  = input.float(20, "Min ADX to trade", minval=0, maxval=100, step=1, group=grpFilter)
+adxTF   = input.timeframe("", "ADX timeframe (blank = chart)", group=grpFilter)
+
+grpZones = "Entry Zones (PD Arrays)"
+useFVG     = input.bool(true,  "Require Fair Value Gap (FVG)", group=grpZones)
+useOB      = input.bool(true,  "Show Order Blocks",            group=grpZones)
+fvgLookback= input.int(20, "FVG search lookback (bars)", minval=3, maxval=200, group=grpZones)
+obMaxAge   = input.int(40, "Order Block max age (bars)", minval=3, maxval=300, group=grpZones)
+maxZones   = input.int(8, "Max live zones tracked per side", minval=1, maxval=30, group=grpZones)
+useDisp    = input.bool(true, "Require displacement on FVG/OB", group=grpZones)
+dispMult   = input.float(1.3, "Displacement min (x ATR)", minval=0.3, maxval=5.0, step=0.1, group=grpZones)
+useOBorigin = input.bool(true, "OB must originate the displacement leg", group=grpZones, tooltip="Stage 10 #5. Register an order block only if the impulse from the OB candle to the structure break is a real displacement (>= mult x ATR), not just any opposing candle in the lookback.")
+obOriginMult= input.float(1.3, "OB origin displacement (x ATR)", minval=0.3, maxval=5.0, step=0.1, group=grpZones)
+
+grpFib = "Fibonacci / OTE / Premium-Discount"
+useGolden  = input.bool(true, "Require price in Golden Zone (50-78.6%)", group=grpFib)
+useOTE     = input.bool(true, "Require price in OTE (62-79%)", group=grpFib)
+fibLow     = input.float(0.5,   "Golden zone start", group=grpFib)
+fibHigh    = input.float(0.786, "Golden zone end",   group=grpFib)
+oteLow     = input.float(0.62,  "OTE start", group=grpFib)
+oteHigh    = input.float(0.79,  "OTE end",   group=grpFib)
+showFibLevels = input.bool(false,  "Draw full fib retracement ladder", group=grpFib)
+useFibExtTP   = input.bool(false, "TP at fib extension (overrides R:R)", group=grpFib)
+fibExt        = input.float(1.272, "Fib extension target", minval=1.0, step=0.05, group=grpFib)
+showPDZones   = input.bool(true, "Draw Premium / Discount zones", group=grpFib)
+zoneRightBars = input.int(40, "Zone right extension (bars)", minval=5, maxval=300, group=grpFib)
+
+grpLiq = "Liquidity Mapping"
+showLiq    = input.bool(true,  "Draw PDH/PDL + equal-H/L liquidity", group=grpLiq)
+useEqualHL = input.bool(true,  "Detect equal highs/lows (liquidity pools)", group=grpLiq)
+eqHLtol    = input.float(5.0,  "Equal H/L tolerance (pips)", minval=0.0, step=0.5, group=grpLiq)
+useLiqTP   = input.bool(false, "TP targets nearest liquidity (overrides R:R)", group=grpLiq, tooltip="Scalp default OFF (was ON): liquidity draws are often too far for a scalp and lower the hit rate. ON for swing/position context.")
+liqScore   = input.bool(true,  "Sweep of mapped liquidity adds confluence", group=grpLiq)
+useHTFliq  = input.bool(true,  "Map HTF draw-on-liquidity (prior week/period)", group=grpLiq)
+htfLiqTF   = input.timeframe("W", "HTF liquidity timeframe", group=grpLiq)
+
+grpAdv = "Advanced ICT (Breaker / IFVG / SMT / News)"
+useBreaker = input.bool(true,  "Breaker blocks (failed OB flips polarity)", group=grpAdv)
+useIFVG    = input.bool(true,  "Inverse FVG (failed FVG flips polarity)", group=grpAdv)
+useInducement = input.bool(true, "Inducement (sweep before the OB)", group=grpAdv)
+useEngInduce= input.bool(true, "Inducement requires engineered (pooled) liquidity", group=grpAdv, tooltip="Stage 10 #8. Count inducement only when the prior sweep took MAPPED/pooled liquidity (equal H/L, pivot pool, PDH/PDL, Asia, weekly) — engineered liquidity — not an incidental single-pivot sweep.")
+useRejBlock = input.bool(true, "Rejection blocks (wick-rejection zones)", group=grpAdv, tooltip="Stage 10 #9. A swept swing closed back with a large rejection wick leaves a tradable demand/supply block (candle body -> wick). A later tap of that block is a valid entry zone.")
+rejWickFrac = input.float(0.5, "Rejection wick min (fraction of range)", minval=0.1, maxval=1.0, step=0.05, group=grpAdv)
+flipMaxAge = input.int(60, "Breaker/IFVG/Rejection max age (bars)", minval=5, maxval=400, group=grpAdv)
+useSMT     = input.bool(false, "SMT divergence filter", group=grpAdv)
+smtSym     = input.symbol("", "SMT correlated symbol", group=grpAdv)
+smtInverse = input.bool(false, "Correlated symbol is inverse (e.g. DXY)", group=grpAdv)
+smtLook    = input.int(10, "SMT swing lookback (bars)", minval=3, maxval=50, group=grpAdv)
+useNews    = input.bool(true, "News blackout windows (no entries)", group=grpAdv)
+news1      = input.session("1230-1330", "News blackout 1", group=grpAdv)
+news2      = input.session("1400-1430", "News blackout 2", group=grpAdv)
+news3      = input.session("0830-0900", "News blackout 3", group=grpAdv)
+news4      = input.session("1000-1015", "News blackout 4", group=grpAdv)
+
+grpPO3 = "Power of Three / Judas (AMD)"
+usePO3     = input.bool(false, "Judas-swing / Power-of-3 confluence", group=grpPO3)
+usePO3gate = input.bool(false, "Require Judas swing (hard gate)", group=grpPO3)
+
+grpTrig = "Trigger"
+useEngulf  = input.bool(true, "Require engulfing trigger candle", group=grpTrig)
+useZoneTap = input.bool(false, "Zone-tap entry (institutional fill, no displacement-candle chase)", group=grpTrig, tooltip="SNIPER DEFAULT OFF: require a CLOSED displacement trigger candle (zone tap + MSS + displacement) instead of firing on a bare tap. ON = fire entry the moment price taps the armed OTE/zone (close-confirmed) with one quality read — looser/earlier but lower precision. OFF = legacy displacement-candle trigger (sniper).")
+
+grpFake = "Fake Breakout (Stop Hunt)"
+useFakeout = input.bool(true,  "Allow fakeout / sweep as trigger", group=grpFake)
+fakeWickFrac = input.float(0.33, "Min wick fraction of range", minval=0.0, maxval=1.0, step=0.05, group=grpFake)
+useSweepReclaim = input.bool(false, "P2: Require liquidity sweep+reclaim before entry", group=grpFake, tooltip="V9: DEFAULT OFF. This is a STRICT SUBSET of the Sweep->MSS->Zone sequence gate (V3 group), which now hard-blocks and enforces an ENGINEERED sweep THEN an MSS after it. With both ON, this added no edge and cut frequency. Re-enable only if you run with useSeqGate OFF.")
+sweepReclaimBars = input.int(5, "Sweep->entry max bars", minval=1, maxval=30, group=grpFake)
+
+grpEMA = "EMA Trend Filter"
+showEMA      = input.bool(true,  "Show EMAs (20/50/200)", group=grpEMA)
+emaLen1      = input.int(20,  "EMA fast",   minval=1, maxval=400, group=grpEMA)
+emaLen2      = input.int(50, "EMA medium", minval=1, maxval=400, group=grpEMA)
+emaLen3      = input.int(200, "EMA slow",   minval=1, maxval=400, group=grpEMA)
+useEMAfilter = input.bool(false, "Require EMA stack alignment (gate)", group=grpEMA)
+useEMAscore  = input.bool(true,  "EMA alignment adds confluence", group=grpEMA)
+
+grpRSI = "RSI Confirmation"
+useRSIfilter = input.bool(false, "Require RSI momentum agreement (gate)", group=grpRSI)
+useRSIscore  = input.bool(true,  "RSI momentum adds confluence", group=grpRSI)
+useRSIdiv    = input.bool(true,  "RSI divergence adds orderflow confluence", group=grpRSI)
+rsiLen       = input.int(14, "RSI length", minval=2, maxval=50, group=grpRSI)
+rsiLong      = input.float(45, "RSI long threshold (>= to allow long)", minval=1, maxval=99, step=1, group=grpRSI)
+rsiShort     = input.float(55, "RSI short threshold (<= to allow short)", minval=1, maxval=99, step=1, group=grpRSI)
+
+grpVWAP = "VWAP"
+useVWAP      = input.bool(true,  "Show session VWAP", group=grpVWAP)
+useVWAPscore = input.bool(false,  "VWAP side adds confluence", group=grpVWAP, tooltip="OFF by default for FX (tick-volume VWAP is noisy). ON for futures/indices/crypto.")
+colVwap      = input.color(color.new(color.fuchsia,0), "VWAP color", group=grpVWAP)
+
+grpGann = "Gann Box"
+showGann    = input.bool(true, "Draw Gann Box on last swing leg", group=grpGann)
+showGannFib = input.bool(true, "Gann box uses fib price divisions", group=grpGann)
+
+grpStyle = "Style / Colors / Dashboard"
+dashSize   = input.string("Normal", "Dashboard text size", options=["Tiny","Small","Normal","Large"], group=grpStyle)
+dashPos    = input.string("Top Right", "Dashboard position", options=["Top Right","Top Left","Bottom Right","Bottom Left","Middle Right"], group=grpStyle)
+zoneTxtBig = input.bool(true, "Large zone labels", group=grpStyle)
+colBull    = input.color(color.rgb(33, 160, 90),  "Bull / Buy / Discount", group=grpStyle)
+colBear    = input.color(color.rgb(214, 56, 56),  "Bear / Sell / Premium", group=grpStyle)
+colGold    = input.color(color.rgb(214, 158, 46), "Accent / Golden zone",  group=grpStyle)
+colOTECol  = input.color(color.rgb(190, 70, 210), "OTE band",              group=grpStyle)
+colText    = input.color(color.rgb(235, 240, 248),"Dashboard text",        group=grpStyle)
+colPanel   = input.color(color.rgb(18, 22, 31),   "Dashboard background",  group=grpStyle)
+zoneTransp = input.int(85, "Zone fill transparency", minval=60, maxval=95, step=1, group=grpStyle)
+colEma9    = input.color(color.aqua,   "EMA 20 color",  group=grpStyle)
+colEma21   = input.color(color.orange, "EMA 50 color", group=grpStyle)
+colEma50   = input.color(color.black,  "EMA 200 color", group=grpStyle)
+colAvg     = input.color(color.blue,   "Entry / Avg line color", group=grpStyle)
+
+grpRisk = "Risk Management (display + tracker)"
+bufferPips = input.float(2.0, "SL buffer (pips)", minval=0, group=grpRisk)
+rr         = input.float(3.0, "Take Profit R:R", minval=0.5, step=0.5, group=grpRisk, tooltip="SNIPER DEFAULT 3. Tight OTE entry -> small stop -> reach for a 3R runner. TP1/TP2 partials book the move; runner aims here. Reverts to 2 for looser scalping.")
+maxTPr     = input.float(4.0, "Max TP R:R cap (fib/liquidity)", minval=1.0, step=0.5, group=grpRisk, tooltip="Scalp default 4 (was 6). A far liquidity/fib target rarely fills on a scalp; cap keeps the runner realistic.")
+spreadPips = input.float(0.5, "Spread + slippage cost (pips)", minval=0.0, step=0.1, group=grpRisk)
+maxSLatr   = input.float(2.0, "Max SL distance (x ATR, 0 = off)", minval=0.0, step=0.5, group=grpRisk)
+minSLatr   = input.float(0.6, "Min SL distance (x ATR, 0 = off)", minval=0.0, step=0.1, group=grpRisk)
+// (legacy 0-10 minScore removed in V2 — replaced by the 0-100 qMin below)
+acctSize   = input.float(2000, "Account size (for lot suggestion)", minval=1, group=grpRisk, tooltip="Indicator has no equity engine. This is used only to suggest a position size on the signal label (risk% / SL distance).")
+riskPerc   = input.float(0.5, "Risk per trade (% account)", minval=0.1, maxval=10, step=0.1, group=grpRisk)
+// P0-1 FX SIZING: quote currency -> account currency conversion. Pine can't reliably
+// build the conversion ticker, so it is a manual rate. EURUSD/XAUUSD/NAS100 (quote=USD,
+// acct=USD)=1. USDJPY (quote=JPY,acct=USD)~0.0067. Cross pairs need the real rate.
+quoteToAcct = input.float(1.0, "FX: Quote->Account rate (acct ccy per 1 quote ccy)", minval=0.0001, step=0.0001, group=grpRisk)
+useAutoQuote = input.bool(true, "Auto Quote->Acct = 1.0 when quote ccy is USD", group=grpRisk, tooltip="V5: when the symbol's quote currency is USD (EURUSD/GBPUSD/XAUUSD/NAS100), the rate IS 1.0 — set it automatically so a stale manual value can't mis-size. Non-USD quote (JPY/cross) still uses the manual rate above and is warned below.")
+useQuoteWarn= input.bool(true, "Warn if Quote->Acct rate likely mis-set", group=grpRisk, tooltip="Stage 10 #7. Draws a chart warning when the symbol's quote currency is not USD but the rate is still left at 1.0 — a silent position-size error on JPY/cross/metal instruments.")
+
+// P0-2 QUALITY ENGINE 0-100 — confluence weights (independent of hard gates/trigger)
+qHTF   = input.int(20, "Q: HTF alignment weight",   minval=0, maxval=100, group=grpRisk)
+qSweep = input.int(15, "Q: order-flow confirmation weight (SMT/div/TL/OF)",  minval=0, maxval=100, group=grpRisk, tooltip="Carries SMT / RSI-divergence / trendline-break / order-flow-delta credit. NOT the sweep itself (sweep is a TRIGGER, not a score term) — name corrected in V5.")
+qMSS   = input.int(15, "Q: MSS / CHoCH weight",      minval=0, maxval=100, group=grpRisk)
+qFVGw  = input.int(10, "Q: FVG weight",              minval=0, maxval=100, group=grpRisk)
+qOBw   = input.int(10, "Q: order block weight",      minval=0, maxval=100, group=grpRisk)
+qDispw = input.int(10, "Q: displacement weight",     minval=0, maxval=100, group=grpRisk)
+qSessw = input.int(10, "Q: PD-location depth weight", minval=0, maxval=100, group=grpRisk, tooltip="V5 FIX: was mislabeled 'manipulation-quality' and re-counted the sweep (already a TRIGGER) -> ~10pt double-count. Now grades DEPTH inside the HTF dealing-range discount/premium — an INDEPENDENT institutional location read used by no gate/trigger.")
+qVolw  = input.int(10, "Q: ADX trend-strength weight", minval=0, maxval=100, group=grpRisk, tooltip="V5 FIX: was mislabeled 'volatility regime'. The credit (volCredit) measures ADX margin above adxMin = trend strength. The actual ATR-percentile regime is a separate GATE (regimeOk), not this score.")
+qMin   = input.int(74, "Min quality score to signal (0-100)", minval=0, maxval=100, group=grpRisk, tooltip="AUDIT V7: default 80->74. With soft-gates ON (default) the contextual filters grade the score instead of hard-blocking, so 74 yields a statistically EVALUABLE trade sample (the prior 80+hard-gates combo fired <30 trades/yr -> empty WF buckets). Raise to 80-85 for ultra-selective once an OOS edge is confirmed.")
+qDecay = input.float(1.5, "Quality decay per bar since arm (pts)", minval=0.0, step=0.5, group=grpRisk, tooltip="Late retraces lose quality each bar after the structure break -> favors fresh fills. Default eased 2.0->1.5 (Stage 10 #6) so a 2-3 bar retrace isn't killed before it can tap the zone.")
+
+grpManage = "Trade Tracker (visual)"
+useBE        = input.bool(true,  "Move SL to break-even at +R", group=grpManage)
+beTrigR      = input.float(1.0,  "Break-even trigger (R)", minval=0.1, step=0.1, group=grpManage)
+beOffPips    = input.float(1.0,  "Break-even offset (pips)", minval=0, group=grpManage)
+useTrail     = input.bool(false, "ATR trailing stop", group=grpManage)
+atrLen       = input.int(14, "ATR length", minval=1, maxval=200, group=grpManage)
+atrMult      = input.float(2.0, "ATR trail multiplier", minval=0.1, step=0.1, group=grpManage)
+runnerTrailMult = input.float(3.0, "Runner trail x ATR (post-partial)", minval=0.5, step=0.1, group=grpManage, tooltip="V5: after TP1 books, trail the runner WIDER than the base ATR stop so it can breathe and ride the move instead of choking at 2x. Higher = let winners run further.")
+// V6 AUDIT-FIX (Exit Quality): pure ATR trail gives back trend profit. After TP1 books, also
+// ratchet the runner stop to the last confirmed swing (HL for longs / LH for shorts) minus the
+// SL buffer — exit on a real structure break (CHoCH) instead of an arbitrary ATR distance. Takes
+// the MORE protective of the ATR trail vs structure trail, and never loosens.
+useStructTrail = input.bool(true, "Structure trail runner (last HL/LH)", group=grpManage, tooltip="V6. Post-partial, trail to the last swing low (long) / swing high (short) less buffer when that is tighter than the ATR trail. Locks gains in a strong leg and exits on a structure break.")
+usePartial   = input.bool(true, "Mark partial TP1 at +R", group=grpManage)
+partialR     = input.float(1.5,  "TP1 trigger (R)", minval=0.1, step=0.1, group=grpManage, tooltip="SNIPER DEFAULT 1.5. Let the trade clear cost+spread and reach a real institutional milestone before booking TP1, so the average winner is not capped at 1R.")
+useMaxHold   = input.bool(true, "Time-stop: close tracker after N bars", group=grpManage)
+maxHoldBars  = input.int(60, "Max hold (bars from entry)", minval=1, maxval=2000, group=grpManage)
+tpSlipPips   = input.float(0.3, "P1: Tracker TP slippage (pips, honest fill)", minval=0, step=0.1, group=grpManage, tooltip="TP only books if price trades tpSlipPips BEYOND the level. Removes exact-fill optimism so tracker stats aren't inflated.")
+
+grpV2 = "Pro Filters"
+useTrigDisp  = input.bool(true, "Trigger candle must show displacement", group=grpV2)
+trigDispMult = input.float(0.8, "Trigger displacement (x ATR)", minval=0.1, step=0.1, group=grpV2, tooltip="SNIPER DEFAULT 0.8. Applies when Zone-tap entry is OFF (sniper mode): the trigger candle BODY/range must show real displacement, so a weak engulf in chop cannot fire the short. Higher = more impulsive confirmation required.")
+useFVGce     = input.bool(true, "FVG entry needs consequent encroachment (50%)", group=grpV2)
+useOBbody    = input.bool(true, "Refine OB to candle body (tighter stop)", group=grpV2)
+useSessLiq   = input.bool(true, "Map Asia-range liquidity (sweep + draw)", group=grpV2)
+useCooldown  = input.bool(true, "Cooldown after a tracked loss", group=grpV2)
+coolBars     = input.int(3, "Cooldown bars after loss", minval=0, maxval=100, group=grpV2)
+useSessSpread= input.bool(true, "Widen modeled spread in Asia session", group=grpV2)
+spreadAsiaMult = input.float(1.6, "Asia spread multiplier", minval=1.0, step=0.1, group=grpV2)
+useRollSpread = input.bool(true, "Widen modeled spread at rollover (2200-2300)", group=grpV2, tooltip="FIX #7. Broker spreads blow out around the 22:00-23:00 daily rollover / low-liquidity window. Multiply modeled spread there so a tight scalp target isn't priced on best-case spread.")
+rollSpreadMult = input.float(2.5, "Rollover spread multiplier", minval=1.0, step=0.1, group=grpV2)
+useVolFilter = input.bool(false, "Require above-average volume (hard gate)", group=grpV2)
+volLen       = input.int(20, "Volume SMA length", minval=2, group=grpV2)
+volMult      = input.float(1.2, "Volume multiple", minval=0.5, step=0.1, group=grpV2)
+useSpreadCap = input.bool(true, "P2: Skip if modeled spread > fraction of SL", group=grpV2, tooltip="Pine has no live spread feed; uses the modeled spread (Asia/rollover multiplied). If spread eats more than the fraction of stop distance, skip the scalp.")
+spreadCapFrac= input.float(0.25, "Max spread / SL fraction", minval=0.05, maxval=1.0, step=0.05, group=grpV2)
+
+// =====================================================================
+// V3 INSTITUTIONAL UPGRADES — inputs
+// =====================================================================
+// V3 P0-2 COST MODEL: in the STRATEGY edition, set Commission + Slippage in the
+// Strategy Properties tab (broker-accurate). SL/TP levels already carry modeled
+// spread. So the indicator's manual cost inputs are not needed here.
+
+grpV3part = "V3 · Real Partial TP"
+partialFrac = input.float(0.5, "TP1 close fraction (0.1-0.9)", minval=0.1, maxval=0.9, step=0.05, group=grpV3part, tooltip="P0-1. Fraction booked at TP1 (+partialR). Remainder runs to TP with SL at break-even. Realized R is BOOKED, not faked. Needs 'Mark partial TP1' ON.")
+// V6 AUDIT-FIX (Exit Quality): second scale-out. After TP1 books, take a further partial at
+// +tp2R before letting the runner ride to the fixed/structure-trailed target. Turns the binary
+// "1 partial + runner" into a 3-stage scalp ladder so a move that reverts after 1.5R still books.
+useTP2       = input.bool(true, "TP2 second scale-out", group=grpV3part, tooltip="V6. After TP1, book partial2Frac of the REMAINDER at +tp2R, then the runner trails to TP. Needs 'Mark partial TP1' ON.")
+tp2R         = input.float(2.5, "TP2 trigger (R)", minval=0.2, step=0.1, group=grpV3part, tooltip="SNIPER DEFAULT 2.5. Sits between TP1 (1.5R) and the 3R runner target. Books the bulk of the move at a strong R milestone before the runner trails.")
+partial2Frac = input.float(0.5, "TP2 close fraction (of remainder)", minval=0.1, maxval=0.9, step=0.05, group=grpV3part, tooltip="V6. Fraction of the post-TP1 remainder booked at TP2 (percent of the then-open position).")
+
+grpV3reg = "V3 · ATR Regime Filter"
+useATRregime = input.bool(true, "ATR-percentile regime gate", group=grpV3reg, tooltip="P0-5. Trade only when ATR percentile is mid-band. Skips dead tape (too low) and news-spike volatility (too high).")
+atrPctLen = input.int(100, "ATR percentile lookback", minval=20, maxval=500, group=grpV3reg)
+atrPctLo  = input.float(30, "ATR percentile min", minval=0, maxval=100, step=1, group=grpV3reg)
+atrPctHi  = input.float(80, "ATR percentile max", minval=0, maxval=100, step=1, group=grpV3reg)
+
+grpV3news = "V3 · News Protection (no calendar feed in Pine)"
+useEventBlackout = input.bool(true, "Event blackout list (+/- pad)", group=grpV3news, tooltip="P0-4 / V5. Pine has NO economic-calendar feed. Set up to 4 high-impact event timestamps manually (CPI/NFP/FOMC + the week's reds) each + a shared pad. Recurring HH-MM windows live in the Advanced ICT group (ON by default).")
+newsEvent  = input.time(timestamp("01 Jan 2020 00:00 +0000"), "News event 1", group=grpV3news)
+newsEvent2 = input.time(timestamp("01 Jan 2020 00:00 +0000"), "News event 2", group=grpV3news)
+newsEvent3 = input.time(timestamp("01 Jan 2020 00:00 +0000"), "News event 3", group=grpV3news)
+newsEvent4 = input.time(timestamp("01 Jan 2020 00:00 +0000"), "News event 4", group=grpV3news)
+newsPadMin = input.int(30, "Blackout pad (minutes each side)", minval=0, maxval=240, group=grpV3news)
+// V6 AUDIT-FIX (News readiness): the one high-impact event Pine CAN schedule deterministically
+// without a calendar feed — US Non-Farm Payrolls = first Friday of the month, 08:30 ET. FOMC/CPI
+// dates are irregular, so they still go in the manual event slots above.
+useAutoNFP = input.bool(true, "Auto NFP blackout (1st Friday 0820-0940 ET)", group=grpV3news, tooltip="V6. Blacks out 08:20-09:40 New York time on the first Friday of each month (NFP). Deterministic, no feed needed. Irregular events (FOMC/CPI) still need manual timestamps.")
+
+grpV3narr = "V3 · HTF Narrative Bias"
+useNarrative = input.bool(true, "Require dealing-range narrative (premium/discount)", group=grpV3narr, tooltip="P1. Longs only in DISCOUNT of the weekly+external dealing range, shorts only in PREMIUM. HTF structure sets bias; this adds institutional LOCATION.")
+
+grpV3seq = "V3 · Sweep->MSS->Zone Sequencing"
+useSeqGate = input.bool(true, "Hard sequence: sweep -> MSS -> zone entry", group=grpV3seq, tooltip="P1. Entry only if a liquidity sweep printed, THEN a same-direction MSS/CHoCH/BOS printed AFTER it within the window. Pure retrace with no manipulation is blocked.")
+
+grpV3risk = "V3 · Dynamic Risk Engine"
+useDailyStop  = input.bool(true,  "Daily stop (halt at -R)", group=grpV3risk)
+dailyStopR    = input.float(2.0,  "Daily loss limit (R)", minval=0.5, step=0.5, group=grpV3risk)
+useConsecHalt = input.bool(true,  "Halt after N consecutive losses", group=grpV3risk)
+consecMax     = input.int(3,      "Max consecutive losses", minval=1, maxval=20, group=grpV3risk)
+coolHours     = input.float(24,   "Cooldown after consec halt (hours)", minval=0, step=1, group=grpV3risk)
+// V9 AUDIT FIX (prop max-DD): the engine had a DAILY stop but NO overall account drawdown guard.
+// A string of losing days each under the daily limit silently blows the FTMO/FundingPips/The5ers
+// account-level max-DD (typically 8-10%). This adds a peak-equity trailing-DD latch that flattens
+// and permanently halts when total drawdown from the equity high-water breaches the limit.
+useMaxDD      = input.bool(true,  "Overall max-drawdown halt (prop rule)", group=grpV3risk, tooltip="V9. Flatten + permanently halt for the run when equity drawdown from its peak breaches maxDDperc. This is the account-level rule prop firms enforce IN ADDITION to the daily loss limit. Peak is trailing (worst-case prop accounting), not fixed initial-balance.")
+maxDDperc     = input.float(10.0, "Max drawdown % (from peak equity)", minval=1.0, maxval=50.0, step=0.5, group=grpV3risk)
+
+grpV3p2 = "V3 · Relative Equal H/L"
+useRelEq  = input.bool(true, "Relative equal H/L (ATR-fraction tolerance)", group=grpV3p2, tooltip="P2. Equal-high/low tolerance scales with ATR instead of a fixed pip count -> adapts across pairs and volatility regimes.")
+relEqFrac = input.float(0.15, "Equal H/L tolerance (x ATR)", minval=0.02, maxval=1.0, step=0.01, group=grpV3p2)
+
+// =====================================================================
+// V6.2 AUDIT REMEDIATION — over-filtering, narrative continuation, fill realism
+// =====================================================================
+grpAudit = "V6.2 · Audit Remediation"
+useSoftGates = input.bool(true, "Soft contextual gates (grade score, don't hard-block)", group=grpAudit, tooltip="AUDIT FIX (over-filtering): the contextual gates ext-structure / ADX / ATR-regime / narrative / sequence STOP hard-blocking and instead subtract softGatePenalty from the 0-100 quality score per failed gate. A high-quality setup that misses ONE context gate can still fire; missing several still cannot (qMin floor). Hard SAFETY gates (cost/risk/session/news/SL/armed/zone/fib/trigger) stay hard. Lifts signal frequency so the sample is statistically evaluable.")
+softGatePenalty = input.int(8, "Soft-gate penalty (score pts each)", minval=1, maxval=40, group=grpAudit, tooltip="Points removed from the 0-100 score per failed soft gate. 5 soft gates x 8 = up to 40pt haircut. With qMin 75 a ~A+ setup survives ~1 missed gate, not 3+.")
+useNarrContinuation = input.bool(false, "Narrative: allow continuation in strong HTF trend", group=grpAudit, tooltip="AUDIT FIX (continuation): the discount-only-long / premium-only-short location gate blocked valid trend pullbacks that retrace into premium (long) / discount (short). When the HTF stack STRONGLY agrees (|htfSum| >= 2) allow the continuation entry regardless of dealing-range half.")
+useConsvFill = input.bool(true, "Conservative intrabar fill (stop wins ambiguous bar)", group=grpAudit, tooltip="AUDIT FIX (fill optimism): when a single bar's range straddles BOTH the partial TP and the protective stop, assume the STOP filled first (worst case) instead of booking the favorable TP. Removes optimistic intrabar sequencing during the partial-pending phase so the equity curve is not flattered.")
+// AUDIT-FIX C-2 (silent frequency drain): the maxSLatr cap is a HARD gate that silently drops every
+// wide-stop setup, contributing to the <30 trades/yr / empty-WF problem the V7 notes fought. With
+// risk-% sizing a wider stop simply means a SMALLER position (same $ risk), so blocking the trade is
+// NOT a risk control — it just discards setups. When ON, the SL cap no longer hard-blocks; risk stays
+// bounded by the % sizing + minSLdist floor + spread-cap. Default OFF = original behavior unchanged.
+useSoftSLcap = input.bool(false, "Soft SL-cap (allow wide-stop setups; risk-% sizing keeps $ risk fixed)", group=grpAudit, tooltip="AUDIT FIX C-2. maxSLatr as a HARD gate silently drops wide-stop trades. Because position size scales inversely with stop distance, a wider stop = smaller lot = SAME dollar risk, so the block adds no safety — only lost frequency. ON = the cap stops hard-blocking (oversized stops still floor/spread-capped). Re-run the WF panel after enabling.")
+
+// =====================================================================
+// V4 INSTITUTIONAL UPGRADES — order-flow proxy, walk-forward split, cost honesty
+// =====================================================================
+grpOF = "V4 · Order-Flow Proxy (LTF volume delta)"
+useOFdelta = input.bool(true, "Lower-TF volume-delta confirmation (score)", group=grpOF, tooltip="Closest institutional footprint base Pine allows for FX. Pulls intrabar volume from a lower TF and SIGNS it by intrabar candle direction to approximate buy/sell pressure. NOTE: FX 'volume' is TICK volume = a PROXY, not true bid/ask delta. Real on indices/futures/crypto.")
+useOFgate  = input.bool(false, "Order-flow delta as a HARD gate", group=grpOF, tooltip="ON = block longs unless net delta > 0 and shorts unless net delta < 0. Default OFF (score-only) — tick-volume is a proxy, too strict as a gate on FX.")
+ofLTF      = input.timeframe("1", "Order-flow lower timeframe", group=grpOF, tooltip="Must be LOWER than the chart TF. 1 = 1-minute intrabars.")
+
+grpWF = "V4 · Walk-Forward (IS / OOS split)"
+useWF    = input.bool(true, "Split stats: In-Sample vs Out-of-Sample", group=grpWF, tooltip="V6: default ON so overfit is ALWAYS measured. Trades entered BEFORE the OOS start are In-Sample (where you tuned); trades AFTER are Out-of-Sample (honest forward proof). If OOS expectancy collapses vs IS -> the edge was overfit. Code can MEASURE overfit; only an honest OOS gap can DISPROVE it. Set OOS start to where your tuning window ends.")
+oosStart = input.time(timestamp("01 Jan 2025 00:00 +0000"), "OOS start (trades before = IS)", group=grpWF)
+
+grpCost = "V4 · Cost Honesty Guard"
+ackCosts = input.bool(false, "I have set realistic Commission + Slippage in Strategy Properties", group=grpCost, tooltip="A zero-cost backtest is FICTION. The engine cannot read your broker's spread/commission. Tick this only AFTER you set Commission + Slippage in the Strategy Tester 'Properties' tab. While unticked, a chart warning is drawn so no equity curve is trusted by accident.")
+costBlock = input.bool(true, "BLOCK entries until costs acknowledged", group=grpCost, tooltip="V5: structural honesty. While 'I have set...' is unticked, no orders fire — so a zero-cost equity curve can never be produced by accident. Untick to run a costs-off diagnostic on purpose. Validation Mode bypasses this.")
+
+// V3 WALK-FORWARD: in the STRATEGY edition, run In-Sample vs Out-of-Sample using
+// the Strategy Tester "Date Range" / Deep Backtest — no manual buckets needed.
+
+grpDay = "Daily Guards"
+maxTrades     = input.int(0, "Max signals per day (0 = unlimited)", minval=0, maxval=50, group=grpDay)
+
+grpVal = "Validation Mode (measure setup count)"
+useValMode = input.bool(false, "VALIDATION MODE — loosen contextual gates to surface raw setup count", group=grpVal, tooltip="Diagnostic. Forces quality floor to 50/100 and bypasses HTF/ext/ADX/session/news/volume/sweep/spread gates. Core SMC logic (armed + zone + fib + trigger + SL) stays intact.")
+
+grpSess = "Session Filter (Kill Zone)"
+sessTZ     = input.string("America/New_York", "Session / killzone timezone", options=["America/New_York","Europe/London","UTC","Asia/Tokyo","Australia/Sydney","exchange"], group=grpSess)
+useSession = input.bool(false, "Restrict to custom session", group=grpSess)
+sessTime   = input.session("0930-1600", "Session (in chosen TZ)", group=grpSess)
+useKZAsia   = input.bool(false, "Asia killzone (2000-0000 NY)",      group=grpSess)
+useKZLondon = input.bool(true,  "London killzone (0200-0500 NY)",    group=grpSess)
+useKZNY     = input.bool(true,  "New York AM killzone (0700-1000 NY)", group=grpSess)
+
+grpTime = "Signal Window (Date / Time)"
+useDateFilter = input.bool(false, "Limit signals to date range", group=grpTime)
+startTime = input.time(timestamp("01 Jan 2020 00:00 +0000"), "Start date", group=grpTime)
+endTime   = input.time(timestamp("01 Jan 2099 00:00 +0000"), "End date",   group=grpTime)
+
+// ---------------------------------------------------------------------
+// SCALP PRESET — retune swing/EMA/RSI lengths per entry TF
+// ---------------------------------------------------------------------
+grpPreset = "Scalp Preset (auto-tune lengths per TF)"
+scalpPreset = input.string("Off (manual)", "Scalp preset", options=["Off (manual)","1M","3M","5M"], group=grpPreset, tooltip="1M=swing3/EMA9-21-50/RSI7 - 3M=swing4/EMA13-34-89/RSI9 - 5M=swing5/EMA20-50-200/RSI14.")
+swingLenEff = scalpPreset == "1M" ? 3  : scalpPreset == "3M" ? 4  : scalpPreset == "5M" ? 5   : swingLen
+emaLen1Eff  = scalpPreset == "1M" ? 9  : scalpPreset == "3M" ? 13 : scalpPreset == "5M" ? 20  : emaLen1
+emaLen2Eff  = scalpPreset == "1M" ? 21 : scalpPreset == "3M" ? 34 : scalpPreset == "5M" ? 50  : emaLen2
+emaLen3Eff  = scalpPreset == "1M" ? 50 : scalpPreset == "3M" ? 89 : scalpPreset == "5M" ? 200 : emaLen3
+rsiLenEff   = scalpPreset == "1M" ? 7  : scalpPreset == "3M" ? 9  : scalpPreset == "5M" ? 14  : rsiLen
+// V6 AUDIT-FIX (pivot-lag / Scalping Performance): swing pivots confirm swingLen bars late,
+// so on fast scalp TFs a real break is invisible until confirmation. Auto-enable the low-lag
+// displacement break under the 1M/3M presets (still gated by brkDisp), without forcing it on
+// manual/5M users who set useFastBreak themselves.
+useFastBreakEff = useFastBreak or scalpPreset == "1M" or scalpPreset == "3M"
+
+// pip size for FX (5/3 digit aware)
+pip = syminfo.mintick * (syminfo.type == "forex" ? 10 : 1)
+
+// timezone for all session/killzone/news windows
+tzArg = sessTZ == "exchange" ? syminfo.timezone : sessTZ
+inSession = not useSession or not na(time(timeframe.period, sessTime, tzArg))
+
+kzAsia   = not na(time(timeframe.period, "2000-0000", tzArg))
+kzLondon = not na(time(timeframe.period, "0200-0500", tzArg))
+kzNY     = not na(time(timeframe.period, "0700-1000", tzArg))
+kzRoll   = not na(time(timeframe.period, "2200-2300", tzArg))   // FIX #7: rollover wide-spread window
+anyKZ    = useKZAsia or useKZLondon or useKZNY
+inKZ     = not anyKZ or (useKZAsia and kzAsia) or (useKZLondon and kzLondon) or (useKZNY and kzNY)
+
+inDateRange = not useDateFilter or (time >= startTime and time <= endTime)
+
+inNewsWin = useNews and (not na(time(timeframe.period, news1, tzArg)) or not na(time(timeframe.period, news2, tzArg)) or not na(time(timeframe.period, news3, tzArg)) or not na(time(timeframe.period, news4, tzArg)))
+// V3 P0-4: manual single-event blackout (+/- pad). Pine has no calendar feed.
+newsPadMs   = newsPadMin * 60 * 1000
+inNewsEvent = useEventBlackout and (math.abs(time - newsEvent) <= newsPadMs or math.abs(time - newsEvent2) <= newsPadMs or math.abs(time - newsEvent3) <= newsPadMs or math.abs(time - newsEvent4) <= newsPadMs)
+// V6: deterministic NFP auto-blackout — first Friday of the month, 08:20-09:40 ET window.
+// V6.2 AUDIT FIX (NFP date bug): NFP is the first Friday, BUT when the 1st of the month is
+// itself a Friday the BLS release shifts to the 2nd Friday (the 8th) — the reference/survey
+// week has not yet completed. A Friday landing on dom==8 implies the 1st was also a Friday
+// (8 == 1 mod 7); in any month whose first Friday is dom 2-7, dom 8 is never a Friday, so this
+// catches exactly the shift case without false-flagging a normal second Friday.
+nfpDom    = dayofmonth(time, "America/New_York")
+nfpIsFri  = dayofweek(time, "America/New_York") == dayofweek.friday
+isNFPdate = nfpIsFri and ((nfpDom >= 2 and nfpDom <= 7) or nfpDom == 8)
+inNFP = useAutoNFP and isNFPdate and not na(time(timeframe.period, "0820-0940", "America/New_York"))
+inNews = inNewsWin or inNewsEvent or inNFP
+
+// daily guard: count signals per trading day
+var int dayTrades = 0
+// AUDIT FIX (day-guard TZ): time("D") with no TZ rolls at exchange/UTC midnight, not the user's
+// session TZ — on a UTC FX chart the daily trade-cap + daily-loss baseline reset ~5h before the
+// NY day. Detect the calendar-day change in tzArg (dayofmonth is TZ-aware; time()'s 2nd arg is a
+// session string, NOT a timezone, so it can't be used here) so the guards align with sessTZ.
+newDay = ta.change(dayofmonth(time, tzArg)) != 0
+if newDay
+    dayTrades := 0
+tradesLeft = maxTrades == 0 or dayTrades < maxTrades
+
+// single signal-permission gate
+tradeOk = inSession and inKZ and inDateRange and tradesLeft and not inNews
+
+// ---------------------------------------------------------------------
+// EMA TREND FILTER
+// ---------------------------------------------------------------------
+emaFast = ta.ema(close, emaLen1Eff)
+emaMed  = ta.ema(close, emaLen2Eff)
+emaSlow = ta.ema(close, emaLen3Eff)
+emaBull = emaFast > emaMed and emaMed > emaSlow
+emaBear = emaFast < emaMed and emaMed < emaSlow
+
+plot(showEMA ? emaFast : na, "EMA 20",  color=colEma9,  linewidth=1)
+plot(showEMA ? emaMed  : na, "EMA 50",  color=colEma21, linewidth=1)
+plot(showEMA ? emaSlow : na, "EMA 200", color=colEma50, linewidth=2)
+
+atr = ta.atr(atrLen)
+// V3 P0-5: ATR-percentile regime gate. Trade only in the mid volatility band.
+atrPct   = ta.percentrank(atr, atrPctLen)
+regimeOk = not useATRregime or (not na(atrPct) and atrPct >= atrPctLo and atrPct <= atrPctHi)
+
+rsiVal  = ta.rsi(close, rsiLenEff)
+// V10 AUDIT (D-2): na(rsiVal) made BOTH gates pass on warm-up bars (rsiLen un-primed) — if
+// useRSIfilter is ON, long AND short RSI gates were simultaneously true. Block on undefined RSI.
+rsiBull = not na(rsiVal) and rsiVal >= rsiLong
+rsiBear = not na(rsiVal) and rsiVal <= rsiShort
+vwapVal = ta.vwap(hlc3)
+vwapBull = not na(vwapVal) and close > vwapVal
+vwapBear = not na(vwapVal) and close < vwapVal
+plot(useVWAP ? vwapVal : na, "VWAP", color=colVwap, linewidth=1)
+
+// ---------------------------------------------------------------------
+// MULTI-TIMEFRAME BIAS
+// ---------------------------------------------------------------------
+f_htfBias() =>
+    float e   = ta.ema(close, emaLen3Eff)
+    int   emaB = na(e) ? 0 : close > e ? 1 : close < e ? -1 : 0
+    phH = ta.pivothigh(high, swingLenEff, swingLenEff)
+    plL = ta.pivotlow(low,  swingLenEff, swingLenEff)
+    var float lH = na
+    var float lL = na
+    var int   sB = 0
+    if not na(phH)
+        lH := phH
+    if not na(plL)
+        lL := plL
+    if not na(lH) and close > lH and close[1] <= lH
+        sB := 1
+    if not na(lL) and close < lL and close[1] >= lL
+        sB := -1
+    useHTFstruct ? sB : emaB
+
+htfBias(simple string tf) =>
+    request.security(syminfo.tickerid, tf, f_htfBias()[1], lookahead=barmerge.lookahead_off)
+
+curTrend  = close > emaSlow ? 1 : close < emaSlow ? -1 : 0
+htf1Bias  = htfBias(htf1TF)
+htf2Bias  = htfBias(htf2TF)
+htf3Bias  = htfBias(htf3TF)
+
+htfSum     = htf1Bias + htf2Bias + htf3Bias
+htfAllBull = htf1Bias == 1  and htf2Bias == 1  and htf3Bias == 1
+htfAllBear = htf1Bias == -1 and htf2Bias == -1 and htf3Bias == -1
+mtfBias    = htfAllBull ? 1 : htfAllBear ? -1 : 0
+
+longBiasOk  = htfMode == "All agree" ? htfAllBull : htfMode == "HTF #2 only" ? htf2Bias == 1  : htfSum > 0
+shortBiasOk = htfMode == "All agree" ? htfAllBear : htfMode == "HTF #2 only" ? htf2Bias == -1 : htfSum < 0
+// SNIPER FIX (no counter-trend): in Majority mode the hard gate now requires the NET HTF
+// bias to AGREE with the trade (htfSum > 0 for longs, htfSum < 0 for shorts) — the prior
+// htfSum > -2 / < 2 thresholds allowed shorts while HTF was net bullish (htfSum=+1) and
+// vice-versa. "All agree" / "HTF #2 only" stay strict. Soft strength is still carried by
+// the 0-100 quality engine via longHTFgrade / shortHTFgrade.
+htfLongOk   = not useHTF or (htfMode == "Majority" ? htfSum > 0 : longBiasOk)
+htfShortOk  = not useHTF or (htfMode == "Majority" ? htfSum < 0 : shortBiasOk)
+
+// ---------------------------------------------------------------------
+// MTF STRUCTURE FEED — analyze HTF, enter chart TF
+// ---------------------------------------------------------------------
+f_mtfStruct() =>
+    ph = ta.pivothigh(high, swingLenEff, swingLenEff)
+    pl = ta.pivotlow(low,  swingLenEff, swingLenEff)
+    var float lH = na
+    var float lL = na
+    var int   lHb = na
+    var int   lLb = na
+    var float pH2 = na
+    var float pL2 = na
+    var int   b = 0
+    if not na(ph)
+        pH2 := lH
+        lH  := ph
+        lHb := bar_index - swingLenEff
+    if not na(pl)
+        pL2 := lL
+        lL  := pl
+        lLb := bar_index - swingLenEff
+    bull = not na(lH) and close > lH and close[1] <= lH
+    bear = not na(lL) and close < lL and close[1] >= lL
+    int dir = 0
+    if bull
+        b   := 1
+        dir := 1
+    if bear
+        b   := -1
+        dir := -1
+    bool up = b == 1
+    float lgHi = na
+    float lgLo = na
+    if up
+        lgHi := lH
+        lgLo := (not na(lLb) and not na(lHb) and lLb < lHb) ? lL : nz(pL2, lL)
+    else
+        lgLo := lL
+        lgHi := (not na(lHb) and not na(lLb) and lHb < lLb) ? lH : nz(pH2, lH)
+    [dir[1], b[1], lgHi[1], lgLo[1]]
+
+[mtfBreakDir, mtfBias2, mtfLegHi, mtfLegLo] = request.security(syminfo.tickerid, structTF, f_mtfStruct(), lookahead=barmerge.lookahead_off)
+mtfOn = useMTFstruct and timeframe.in_seconds(structTF) >= timeframe.in_seconds(timeframe.period)
+
+// ---------------------------------------------------------------------
+// ADX RANGE FILTER
+// ---------------------------------------------------------------------
+f_adx() =>
+    [_dp, _dm, _a] = ta.dmi(adxLen, adxLen)
+    _a
+[diPlus, diMinus, adxChart] = ta.dmi(adxLen, adxLen)
+adxTFres = adxTF == "" ? timeframe.period : adxTF
+adxHTF = request.security(syminfo.tickerid, adxTFres, f_adx()[1], lookahead=barmerge.lookahead_off)
+adxVal = adxTF == "" ? adxChart : adxHTF
+adxOk = not useADX or (not na(adxVal) and adxVal >= adxMin)
+
+// ---------------------------------------------------------------------
+// SWING STRUCTURE — BOS / CHoCH
+// ---------------------------------------------------------------------
+ph = ta.pivothigh(high, swingLenEff, swingLenEff)
+pl = ta.pivotlow(low,  swingLenEff, swingLenEff)
+
+var float lastPH    = na
+var float lastPL    = na
+var int   lastPHbar = na
+var int   lastPLbar = na
+var float prevPH    = na
+var float prevPL    = na
+var int   prevPHbar = na
+var int   prevPLbar = na
+
+if not na(ph)
+    prevPH    := lastPH
+    prevPHbar := lastPHbar
+    lastPH    := ph
+    lastPHbar := bar_index - swingLenEff
+if not na(pl)
+    prevPL    := lastPL
+    prevPLbar := lastPLbar
+    lastPL    := pl
+    lastPLbar := bar_index - swingLenEff
+
+var int phCls = 0
+var int plCls = 0
+if not na(ph)
+    phCls := not na(prevPH) ? (ph > prevPH ? 1 : -1) : 0
+if not na(pl)
+    plCls := not na(prevPL) ? (pl > prevPL ? 1 : -1) : 0
+
+var float lastPLrsi = na
+var float prevPLrsi = na
+var float lastPHrsi = na
+var float prevPHrsi = na
+if not na(pl)
+    prevPLrsi := lastPLrsi
+    lastPLrsi := rsiVal[swingLenEff]
+if not na(ph)
+    prevPHrsi := lastPHrsi
+    lastPHrsi := rsiVal[swingLenEff]
+rsiBullDiv = useRSIdiv and not na(prevPL) and not na(lastPL) and lastPL < prevPL and not na(prevPLrsi) and not na(lastPLrsi) and lastPLrsi > prevPLrsi
+rsiBearDiv = useRSIdiv and not na(prevPH) and not na(lastPH) and lastPH > prevPH and not na(prevPHrsi) and not na(lastPHrsi) and lastPHrsi < prevPHrsi
+rsiHidBullDiv = useRSIdiv and not na(prevPL) and not na(lastPL) and lastPL > prevPL and not na(prevPLrsi) and not na(lastPLrsi) and lastPLrsi < prevPLrsi
+rsiHidBearDiv = useRSIdiv and not na(prevPH) and not na(lastPH) and lastPH < prevPH and not na(prevPHrsi) and not na(lastPHrsi) and lastPHrsi > prevPHrsi
+
+var float[] poolHi    = array.new_float()
+var int[]   poolHiBar = array.new_int()
+var float[] poolLo    = array.new_float()
+var int[]   poolLoBar = array.new_int()
+maxPools = 24
+if not na(ph)
+    array.push(poolHi, ph)
+    array.push(poolHiBar, bar_index - swingLenEff)
+    if array.size(poolHi) > maxPools
+        array.shift(poolHi)
+        array.shift(poolHiBar)
+if not na(pl)
+    array.push(poolLo, pl)
+    array.push(poolLoBar, bar_index - swingLenEff)
+    if array.size(poolLo) > maxPools
+        array.shift(poolLo)
+        array.shift(poolLoBar)
+plotshape(not na(ph) and phCls== 1, title="HH", style=shape.labeldown, location=location.abovebar, color=color.new(color.green,55), textcolor=color.white, text="HH", size=size.tiny, offset=-swingLenEff)
+plotshape(not na(ph) and phCls==-1, title="LH", style=shape.labeldown, location=location.abovebar, color=color.new(color.red,55), textcolor=color.white, text="LH", size=size.tiny, offset=-swingLenEff)
+plotshape(not na(pl) and plCls== 1, title="HL", style=shape.labelup,   location=location.belowbar, color=color.new(color.green,55), textcolor=color.white, text="HL", size=size.tiny, offset=-swingLenEff)
+plotshape(not na(pl) and plCls==-1, title="LL", style=shape.labelup,   location=location.belowbar, color=color.new(color.red,55), textcolor=color.white, text="LL", size=size.tiny, offset=-swingLenEff)
+
+var int bias = 0
+
+brkDispOk = not useBreakDisp or (not na(atr) and (high - low) >= atr * breakDispMult)
+bosBull = not na(lastPH) and close > lastPH and close[1] <= lastPH and brkDispOk
+bosBear = not na(lastPL) and close < lastPL and close[1] >= lastPL and brkDispOk
+
+fbBullRaw = useFastBreakEff and close > ta.highest(high, swingLenEff)[1] and brkDispOk
+fbBearRaw = useFastBreakEff and close < ta.lowest(low,  swingLenEff)[1] and brkDispOk
+fastBreakBull = fbBullRaw and not fbBullRaw[1]
+fastBreakBear = fbBearRaw and not fbBearRaw[1]
+plotshape(fastBreakBull, title="FastBrk up", style=shape.triangleup,   location=location.belowbar, color=color.new(color.green,30), size=size.tiny)
+plotshape(fastBreakBear, title="FastBrk dn", style=shape.triangledown, location=location.abovebar, color=color.new(color.red,30), size=size.tiny)
+
+chochBull  = false
+chochBear  = false
+newBosBull = false
+newBosBear = false
+// V10 AUDIT (S-1): on a cold start bias==0 (no prior structure) the first break was classed as a
+// continuation BOS (bias>=0) and earned arm + 0.6 score with zero context. Strict: BOS only on a
+// confirmed same-direction prior bias (bias>0/<0); a flip is a CHoCH; bias==0 sets structure with
+// no signal credit.
+if bosBull
+    chochBull  := bias < 0
+    newBosBull := bias > 0
+    bias := 1
+if bosBear
+    chochBear  := bias > 0
+    newBosBear := bias < 0
+    bias := -1
+
+mssDispOk = not useMSSdisp or (not na(atr) and math.abs(close - open) >= atr * mssDispMult)
+// V9 AUDIT FIX (MSS over-restriction): the prior pivot-sequence constraint (plCls==-1 / phCls==1)
+// demanded the last completed pivot be a *lower low* (bull) / *higher high* (bear) for an MSS to
+// count. But the highest-quality sniper reversal is sweep -> HIGHER-low -> displacement up, where
+// plCls is +1 -> mssBull never fired and the reversal only earned continuation (0.6) score, not the
+// full MSS (1.0) credit. CHoCH (bias flip) + displacement body already define an MSS; drop the
+// pivot-class gate. Displacement (mssDispOk) keeps thin chop CHoCHs from qualifying.
+mssBull = chochBull and mssDispOk
+mssBear = chochBear and mssDispOk
+plotshape(mssBull, title="MSS up", style=shape.flag, location=location.belowbar, color=colBull, size=size.tiny, text="MSS")
+plotshape(mssBear, title="MSS dn", style=shape.flag, location=location.abovebar, color=colBear, size=size.tiny, text="MSS")
+plotshape(newBosBull, title="BOS up", style=shape.triangleup,   location=location.belowbar, color=colBull, size=size.tiny, text="BOS")
+plotshape(newBosBear, title="BOS dn", style=shape.triangledown, location=location.abovebar, color=colBear, size=size.tiny, text="BOS")
+plotshape(chochBull,  title="CHoCH up", style=shape.labelup,   location=location.belowbar, color=colBull, size=size.tiny, text="CHoCH", textcolor=color.white)
+plotshape(chochBear,  title="CHoCH dn", style=shape.labeldown, location=location.abovebar, color=colBear, size=size.tiny, text="CHoCH", textcolor=color.white)
+
+// ---------------------------------------------------------------------
+// EXTERNAL STRUCTURE
+// ---------------------------------------------------------------------
+phExt = ta.pivothigh(high, extSwingLen, extSwingLen)
+plExt = ta.pivotlow(low,  extSwingLen, extSwingLen)
+var float extLastPH = na
+var float extLastPL = na
+var int extBias = 0
+if not na(phExt)
+    if extBias == 1 and not na(extLastPH) and phExt < extLastPH
+        extBias := 0
+    extLastPH := phExt
+if not na(plExt)
+    if extBias == -1 and not na(extLastPL) and plExt > extLastPL
+        extBias := 0
+    extLastPL := plExt
+if not na(extLastPH) and close > extLastPH and close[1] <= extLastPH
+    extBias := 1
+if not na(extLastPL) and close < extLastPL and close[1] >= extLastPL
+    extBias := -1
+// V10 AUDIT (S-2/D-1): extBias>=0 / <=0 BOTH passed when extBias==0 (cold start / extended range)
+// — the external-structure filter green-lit longs AND shorts at once and did nothing for the first
+// ~2*extSwingLen bars and through every sideways stretch. Require a confirmed directional external
+// bias to agree. extLE2 stays soft (score haircut), so a flat external read no longer hard-blocks.
+extLongOk  = not useExtBias or extBias == 1
+extShortOk = not useExtBias or extBias == -1
+plotshape(not na(phExt), title="Ext H", style=shape.circle, location=location.abovebar, color=color.new(color.gray,40), size=size.tiny, offset=-extSwingLen)
+plotshape(not na(plExt), title="Ext L", style=shape.circle, location=location.belowbar, color=color.new(color.gray,40), size=size.tiny, offset=-extSwingLen)
+
+// ---------------------------------------------------------------------
+// TRENDLINES
+// ---------------------------------------------------------------------
+resSlope = (not na(prevPH) and not na(lastPHbar) and lastPHbar != prevPHbar) ? (lastPH - prevPH) / (lastPHbar - prevPHbar) : na
+supSlope = (not na(prevPL) and not na(lastPLbar) and lastPLbar != prevPLbar) ? (lastPL - prevPL) / (lastPLbar - prevPLbar) : na
+resVal   = not na(resSlope) ? lastPH + resSlope * (bar_index - lastPHbar) : na
+supVal   = not na(supSlope) ? lastPL + supSlope * (bar_index - lastPLbar) : na
+
+tlBreakBull = not na(resVal) and not na(resVal[1]) and close > resVal and close[1] <= resVal[1]
+tlBreakBear = not na(supVal) and not na(supVal[1]) and close < supVal and close[1] >= supVal[1]
+
+var line tlRes = na
+var line tlSup = na
+if showTrend and not na(ph) and not na(prevPH)
+    line.delete(tlRes)
+    tlRes := line.new(prevPHbar, prevPH, lastPHbar, lastPH, color=color.new(color.red,20),   width=1, extend=extend.right)
+if showTrend and not na(pl) and not na(prevPL)
+    line.delete(tlSup)
+    tlSup := line.new(prevPLbar, prevPL, lastPLbar, lastPL, color=color.new(color.green,20), width=1, extend=extend.right)
+
+plotshape(showTrend and tlBreakBull, title="TL break up", style=shape.diamond, location=location.belowbar, color=colBull, size=size.tiny)
+plotshape(showTrend and tlBreakBear, title="TL break dn", style=shape.diamond, location=location.abovebar, color=colBear, size=size.tiny)
+
+// ---------------------------------------------------------------------
+// FAIR VALUE GAP + FLIP ZONES (IFVG / breaker)
+// ---------------------------------------------------------------------
+var float[] iBu_top = array.new_float()
+var float[] iBu_bot = array.new_float()
+var int[]   iBu_bar = array.new_int()
+var float[] iBe_top = array.new_float()
+var float[] iBe_bot = array.new_float()
+var int[]   iBe_bar = array.new_int()
+var float[] brBu_top = array.new_float()
+var float[] brBu_bot = array.new_float()
+var int[]   brBu_bar = array.new_int()
+var float[] brBe_top = array.new_float()
+var float[] brBe_bot = array.new_float()
+var int[]   brBe_bar = array.new_int()
+
+// V10 AUDIT (Z-1): displacement was a single shared, direction-blind gate — a large BEAR middle
+// candle could satisfy the displacement of a BULL FVG on the next bar (wrong-side impulse credit).
+// The gap-creating candle [1] must itself move in the gap's direction.
+dispOk   = not na(atr) and (high[1] - low[1]) >= atr * dispMult
+bullDisp = dispOk and close[1] >= open[1]
+bearDisp = dispOk and close[1] <= open[1]
+bullFVG = low > high[2] and (not useDisp or bullDisp)
+bearFVG = high < low[2] and (not useDisp or bearDisp)
+
+var float[] bF_top = array.new_float()
+var float[] bF_bot = array.new_float()
+var int[]   bF_bar = array.new_int()
+var box[]   bF_box = array.new_box()
+var float[] sF_top = array.new_float()
+var float[] sF_bot = array.new_float()
+var int[]   sF_bar = array.new_int()
+var box[]   sF_box = array.new_box()
+
+if bullFVG
+    array.push(bF_top, low)
+    array.push(bF_bot, high[2])
+    array.push(bF_bar, bar_index)
+    array.push(bF_box, useFVG ? box.new(bar_index-2, low, bar_index, high[2], border_color=color.new(color.teal,40), bgcolor=color.new(color.teal,85)) : na)
+    if array.size(bF_top) > maxZones
+        bx = array.shift(bF_box)
+        if not na(bx)
+            box.delete(bx)
+        array.shift(bF_top)
+        array.shift(bF_bot)
+        array.shift(bF_bar)
+if bearFVG
+    array.push(sF_top, low[2])
+    array.push(sF_bot, high)
+    array.push(sF_bar, bar_index)
+    array.push(sF_box, useFVG ? box.new(bar_index-2, low[2], bar_index, high, border_color=color.new(color.maroon,40), bgcolor=color.new(color.maroon,85)) : na)
+    if array.size(sF_top) > maxZones
+        bx = array.shift(sF_box)
+        if not na(bx)
+            box.delete(bx)
+        array.shift(sF_top)
+        array.shift(sF_bot)
+        array.shift(sF_bar)
+
+if array.size(bF_top) > 0
+    for i = array.size(bF_top) - 1 to 0
+        bMit = close < array.get(bF_bot, i)
+        bOld = (bar_index - array.get(bF_bar, i)) > fvgLookback
+        if bMit or bOld
+            if useIFVG and bMit
+                array.push(iBe_top, array.get(bF_top, i))
+                array.push(iBe_bot, array.get(bF_bot, i))
+                array.push(iBe_bar, bar_index)
+            bx = array.get(bF_box, i)
+            if not na(bx)
+                box.delete(bx)
+            array.remove(bF_top, i)
+            array.remove(bF_bot, i)
+            array.remove(bF_bar, i)
+            array.remove(bF_box, i)
+if array.size(sF_top) > 0
+    for i = array.size(sF_top) - 1 to 0
+        sMit = close > array.get(sF_top, i)
+        sOld = (bar_index - array.get(sF_bar, i)) > fvgLookback
+        if sMit or sOld
+            if useIFVG and sMit
+                array.push(iBu_top, array.get(sF_top, i))
+                array.push(iBu_bot, array.get(sF_bot, i))
+                array.push(iBu_bar, bar_index)
+            bx = array.get(sF_box, i)
+            if not na(bx)
+                box.delete(bx)
+            array.remove(sF_top, i)
+            array.remove(sF_bot, i)
+            array.remove(sF_bar, i)
+            array.remove(sF_box, i)
+
+inBullFVG = false
+inBearFVG = false
+if array.size(bF_top) > 0
+    for i = 0 to array.size(bF_top) - 1
+        ceB = (array.get(bF_top, i) + array.get(bF_bot, i)) / 2
+        proxB = useFVGce ? ceB : array.get(bF_top, i)
+        if (bar_index - array.get(bF_bar, i)) <= fvgLookback and low <= proxB and close >= array.get(bF_bot, i)
+            inBullFVG := true
+if array.size(sF_top) > 0
+    for i = 0 to array.size(sF_top) - 1
+        ceS = (array.get(sF_top, i) + array.get(sF_bot, i)) / 2
+        proxS = useFVGce ? ceS : array.get(sF_bot, i)
+        if (bar_index - array.get(sF_bar, i)) <= fvgLookback and high >= proxS and close <= array.get(sF_top, i)
+            inBearFVG := true
+
+// ---------------------------------------------------------------------
+// ORDER BLOCK
+// ---------------------------------------------------------------------
+var float[] bO_top = array.new_float()
+var float[] bO_bot = array.new_float()
+var int[]   bO_bar = array.new_int()
+var box[]   bO_box = array.new_box()
+var float[] sO_top = array.new_float()
+var float[] sO_bot = array.new_float()
+var int[]   sO_bar = array.new_int()
+var box[]   sO_box = array.new_box()
+
+if bosBull
+    obLookBull = na(lastPLbar) ? 10 : math.max(1, math.min(50, bar_index - lastPLbar))
+    for i = 1 to obLookBull
+        if close[i] < open[i]
+            // Stage 10 #5: OB must have ORIGINATED the displacement leg into the break.
+            // AUDIT FIX: measure the impulse OUT of the OB candle (OB low -> next bar close),
+            // not OB-low -> current BOS-bar close which accumulated drift over i bars and let any
+            // far OB pass. close[i-1] is the first displacement bar after the OB candle at index i.
+            obOriginOk = not useOBorigin or (not na(atr) and (close[i-1] - low[i]) >= atr * obOriginMult)
+            if obOriginOk
+                obTop = useOBbody ? open[i] : high[i]
+                array.push(bO_top, obTop)
+                array.push(bO_bot, low[i])
+                array.push(bO_bar, bar_index - i)
+                array.push(bO_box, useOB ? box.new(bar_index - i, obTop, bar_index, low[i], border_color=color.green, bgcolor=color.new(color.green,80), text="OB", text_color=color.green, text_size=size.tiny) : na)
+            break
+    if array.size(bO_top) > maxZones
+        bx = array.shift(bO_box)
+        if not na(bx)
+            box.delete(bx)
+        array.shift(bO_top)
+        array.shift(bO_bot)
+        array.shift(bO_bar)
+if bosBear
+    obLookBear = na(lastPHbar) ? 10 : math.max(1, math.min(50, bar_index - lastPHbar))
+    for i = 1 to obLookBear
+        if close[i] > open[i]
+            // Stage 10 #5: OB must have ORIGINATED the displacement leg into the break.
+            // AUDIT FIX: mirror of bull side — impulse DOWN out of the OB candle (OB high -> next
+            // bar close) instead of OB-high -> current BOS-bar close (which trivially passed).
+            obOriginOk = not useOBorigin or (not na(atr) and (high[i] - close[i-1]) >= atr * obOriginMult)
+            if obOriginOk
+                obBot = useOBbody ? open[i] : low[i]
+                array.push(sO_top, high[i])
+                array.push(sO_bot, obBot)
+                array.push(sO_bar, bar_index - i)
+                array.push(sO_box, useOB ? box.new(bar_index - i, high[i], bar_index, obBot, border_color=color.red, bgcolor=color.new(color.red,80), text="OB", text_color=color.red, text_size=size.tiny) : na)
+            break
+    if array.size(sO_top) > maxZones
+        bx = array.shift(sO_box)
+        if not na(bx)
+            box.delete(bx)
+        array.shift(sO_top)
+        array.shift(sO_bot)
+        array.shift(sO_bar)
+
+if array.size(bO_top) > 0
+    for i = array.size(bO_top) - 1 to 0
+        bMit = close < array.get(bO_bot, i)
+        bOld = (bar_index - array.get(bO_bar, i)) > obMaxAge
+        if bMit or bOld
+            if useBreaker and bMit
+                array.push(brBe_top, array.get(bO_top, i))
+                array.push(brBe_bot, array.get(bO_bot, i))
+                array.push(brBe_bar, bar_index)
+            bx = array.get(bO_box, i)
+            if not na(bx)
+                box.delete(bx)
+            array.remove(bO_top, i)
+            array.remove(bO_bot, i)
+            array.remove(bO_bar, i)
+            array.remove(bO_box, i)
+if array.size(sO_top) > 0
+    for i = array.size(sO_top) - 1 to 0
+        sMit = close > array.get(sO_top, i)
+        sOld = (bar_index - array.get(sO_bar, i)) > obMaxAge
+        if sMit or sOld
+            if useBreaker and sMit
+                array.push(brBu_top, array.get(sO_top, i))
+                array.push(brBu_bot, array.get(sO_bot, i))
+                array.push(brBu_bar, bar_index)
+            bx = array.get(sO_box, i)
+            if not na(bx)
+                box.delete(bx)
+            array.remove(sO_top, i)
+            array.remove(sO_bot, i)
+            array.remove(sO_bar, i)
+            array.remove(sO_box, i)
+
+inBullOB = false
+inBearOB = false
+if array.size(bO_top) > 0
+    for i = 0 to array.size(bO_top) - 1
+        if low <= array.get(bO_top, i) and close >= array.get(bO_bot, i)
+            inBullOB := true
+if array.size(sO_top) > 0
+    for i = 0 to array.size(sO_top) - 1
+        if high >= array.get(sO_bot, i) and close <= array.get(sO_top, i)
+            inBearOB := true
+
+// ---- FLIP-ZONE TAPS + PRUNE ----
+inBullIFVG    = false
+inBearIFVG    = false
+inBullBreaker = false
+inBearBreaker = false
+if array.size(iBu_top) > 0
+    for i = 0 to array.size(iBu_top) - 1
+        if low <= array.get(iBu_top, i) and close >= array.get(iBu_bot, i)
+            inBullIFVG := true
+if array.size(brBu_top) > 0
+    for i = 0 to array.size(brBu_top) - 1
+        if low <= array.get(brBu_top, i) and close >= array.get(brBu_bot, i)
+            inBullBreaker := true
+if array.size(iBe_top) > 0
+    for i = 0 to array.size(iBe_top) - 1
+        if high >= array.get(iBe_bot, i) and close <= array.get(iBe_top, i)
+            inBearIFVG := true
+if array.size(brBe_top) > 0
+    for i = 0 to array.size(brBe_top) - 1
+        if high >= array.get(brBe_bot, i) and close <= array.get(brBe_top, i)
+            inBearBreaker := true
+if array.size(iBu_top) > 0
+    for i = array.size(iBu_top) - 1 to 0
+        if close < array.get(iBu_bot, i) or (bar_index - array.get(iBu_bar, i)) > flipMaxAge
+            array.remove(iBu_top, i)
+            array.remove(iBu_bot, i)
+            array.remove(iBu_bar, i)
+if array.size(iBe_top) > 0
+    for i = array.size(iBe_top) - 1 to 0
+        if close > array.get(iBe_top, i) or (bar_index - array.get(iBe_bar, i)) > flipMaxAge
+            array.remove(iBe_top, i)
+            array.remove(iBe_bot, i)
+            array.remove(iBe_bar, i)
+if array.size(brBu_top) > 0
+    for i = array.size(brBu_top) - 1 to 0
+        if close < array.get(brBu_bot, i) or (bar_index - array.get(brBu_bar, i)) > flipMaxAge
+            array.remove(brBu_top, i)
+            array.remove(brBu_bot, i)
+            array.remove(brBu_bar, i)
+if array.size(brBe_top) > 0
+    for i = array.size(brBe_top) - 1 to 0
+        if close > array.get(brBe_top, i) or (bar_index - array.get(brBe_bar, i)) > flipMaxAge
+            array.remove(brBe_top, i)
+            array.remove(brBe_bot, i)
+            array.remove(brBe_bar, i)
+
+flipCap = 12
+while array.size(iBu_top) > flipCap
+    array.shift(iBu_top)
+    array.shift(iBu_bot)
+    array.shift(iBu_bar)
+while array.size(iBe_top) > flipCap
+    array.shift(iBe_top)
+    array.shift(iBe_bot)
+    array.shift(iBe_bar)
+while array.size(brBu_top) > flipCap
+    array.shift(brBu_top)
+    array.shift(brBu_bot)
+    array.shift(brBu_bar)
+while array.size(brBe_top) > flipCap
+    array.shift(brBe_top)
+    array.shift(brBe_bot)
+    array.shift(brBe_bar)
+
+// ---------------------------------------------------------------------
+// REJECTION BLOCKS (wick-based) — Stage 10 #9
+//   A candle that sweeps the prior swing (takes liquidity) but CLOSES back
+//   inside it with a large rejection wick leaves a demand/supply block from
+//   the candle body to the wick extreme. A later tap of that block is a valid
+//   zone. Distinct from a fakeout (one-bar trigger): this persists as a zone.
+// ---------------------------------------------------------------------
+var float[] rjBu_top = array.new_float()
+var float[] rjBu_bot = array.new_float()
+var int[]   rjBu_bar = array.new_int()
+var float[] rjBe_top = array.new_float()
+var float[] rjBe_bot = array.new_float()
+var int[]   rjBe_bar = array.new_int()
+rjRange  = math.max(high - low, syminfo.mintick)
+rjLoWick = math.min(open, close) - low
+rjHiWick = high - math.max(open, close)
+bullRejNew = useRejBlock and not na(lastPL) and low < lastPL and close > lastPL and (rjLoWick / rjRange) >= rejWickFrac
+bearRejNew = useRejBlock and not na(lastPH) and high > lastPH and close < lastPH and (rjHiWick / rjRange) >= rejWickFrac
+if bullRejNew
+    array.push(rjBu_top, math.min(open, close))
+    array.push(rjBu_bot, low)
+    array.push(rjBu_bar, bar_index)
+if bearRejNew
+    array.push(rjBe_top, high)
+    array.push(rjBe_bot, math.max(open, close))
+    array.push(rjBe_bar, bar_index)
+inBullRej = false
+inBearRej = false
+if array.size(rjBu_top) > 0
+    for i = 0 to array.size(rjBu_top) - 1
+        if (bar_index - array.get(rjBu_bar, i)) >= 1 and low <= array.get(rjBu_top, i) and close >= array.get(rjBu_bot, i)
+            inBullRej := true
+if array.size(rjBe_top) > 0
+    for i = 0 to array.size(rjBe_top) - 1
+        if (bar_index - array.get(rjBe_bar, i)) >= 1 and high >= array.get(rjBe_bot, i) and close <= array.get(rjBe_top, i)
+            inBearRej := true
+if array.size(rjBu_top) > 0
+    for i = array.size(rjBu_top) - 1 to 0
+        if close < array.get(rjBu_bot, i) or (bar_index - array.get(rjBu_bar, i)) > flipMaxAge
+            array.remove(rjBu_top, i)
+            array.remove(rjBu_bot, i)
+            array.remove(rjBu_bar, i)
+if array.size(rjBe_top) > 0
+    for i = array.size(rjBe_top) - 1 to 0
+        if close > array.get(rjBe_top, i) or (bar_index - array.get(rjBe_bar, i)) > flipMaxAge
+            array.remove(rjBe_top, i)
+            array.remove(rjBe_bot, i)
+            array.remove(rjBe_bar, i)
+rejCap = 12
+while array.size(rjBu_top) > rejCap
+    array.shift(rjBu_top)
+    array.shift(rjBu_bot)
+    array.shift(rjBu_bar)
+while array.size(rjBe_top) > rejCap
+    array.shift(rjBe_top)
+    array.shift(rjBe_bot)
+    array.shift(rjBe_bar)
+
+bprActive = inBullFVG and inBearFVG
+
+// ---------------------------------------------------------------------
+// LIQUIDITY MAPPING
+// ---------------------------------------------------------------------
+// V10 AUDIT (PERF-1): one tuple call instead of two separate D feeds.
+[pdh, pdl] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead=barmerge.lookahead_off)
+
+[pwhRaw, pwlRaw] = request.security(syminfo.tickerid, htfLiqTF, [high[1], low[1]], lookahead=barmerge.lookahead_off)
+pwh = useHTFliq ? pwhRaw : na
+pwl = useHTFliq ? pwlRaw : na
+
+var float asiaHi    = na
+var float asiaLo    = na
+var float asiaHiCur = na
+var float asiaLoCur = na
+if kzAsia
+    asiaHiCur := na(asiaHiCur) ? high : math.max(asiaHiCur, high)
+    asiaLoCur := na(asiaLoCur) ? low  : math.min(asiaLoCur, low)
+if not kzAsia and kzAsia[1]
+    asiaHi    := asiaHiCur
+    asiaLo    := asiaLoCur
+    asiaHiCur := na
+    asiaLoCur := na
+
+eqTolPrice = (useRelEq and not na(atr)) ? atr * relEqFrac : eqHLtol * pip   // V3 P2: relative tolerance
+equalHighs = useEqualHL and not na(lastPH) and not na(prevPH) and math.abs(lastPH - prevPH) <= eqTolPrice
+equalLows  = useEqualHL and not na(lastPL) and not na(prevPL) and math.abs(lastPL - prevPL) <= eqTolPrice
+bslLevel   = equalHighs ? math.max(lastPH, prevPH) : na
+sslLevel   = equalLows  ? math.min(lastPL, prevPL) : na
+
+f_minAbove(_p, _a, _b) =>
+    float r = na
+    if not na(_a) and _a > _p
+        r := na(r) ? _a : math.min(r, _a)
+    if not na(_b) and _b > _p
+        r := na(r) ? _b : math.min(r, _b)
+    r
+f_maxBelow(_p, _a, _b) =>
+    float r = na
+    if not na(_a) and _a < _p
+        r := na(r) ? _a : math.max(r, _a)
+    if not na(_b) and _b < _p
+        r := na(r) ? _b : math.max(r, _b)
+    r
+f_poolAbove(_arr, _p, _tol) =>
+    float best = na
+    int n = array.size(_arr)
+    if n > 0
+        for i = 0 to n - 1
+            lvl = array.get(_arr, i)
+            if lvl > _p
+                int touches = 0
+                for j = 0 to n - 1
+                    if math.abs(array.get(_arr, j) - lvl) <= _tol
+                        touches += 1
+                if touches >= 2 and (na(best) or lvl < best)
+                    best := lvl
+    best
+f_poolBelow(_arr, _p, _tol) =>
+    float best = na
+    int n = array.size(_arr)
+    if n > 0
+        for i = 0 to n - 1
+            lvl = array.get(_arr, i)
+            if lvl < _p
+                int touches = 0
+                for j = 0 to n - 1
+                    if math.abs(array.get(_arr, j) - lvl) <= _tol
+                        touches += 1
+                if touches >= 2 and (na(best) or lvl > best)
+                    best := lvl
+    best
+bslPool = f_poolAbove(poolHi, close, eqTolPrice)
+sslPool = f_poolBelow(poolLo, close, eqTolPrice)
+// AUDIT-FIX (Liquidity Detection): a 2-adjacent-pivot equal-H/L is the MINIMUM read. A
+// multi-touch pool (>=2 touches within tolerance, f_poolAbove/Below) is STRONGER engineered
+// liquidity. When no adjacent equal exists but a pool does, promote the pool to the BSL/SSL
+// level so the drawn line, sweep detection and TP draw aren't limited to the last two pivots.
+if useEqualHL and na(bslLevel) and not na(bslPool)
+    bslLevel := bslPool
+if useEqualHL and na(sslLevel) and not na(sslPool)
+    sslLevel := sslPool
+
+liqLongTP  = f_minAbove(close, bslLevel, pdh)
+liqShortTP = f_maxBelow(close, sslLevel, pdl)
+if not na(bslPool)
+    liqLongTP := na(liqLongTP) ? bslPool : math.min(liqLongTP, bslPool)
+if not na(sslPool)
+    liqShortTP := na(liqShortTP) ? sslPool : math.max(liqShortTP, sslPool)
+if useSessLiq and not na(asiaHi) and asiaHi > close
+    liqLongTP := na(liqLongTP) ? asiaHi : math.min(liqLongTP, asiaHi)
+if useSessLiq and not na(asiaLo) and asiaLo < close
+    liqShortTP := na(liqShortTP) ? asiaLo : math.max(liqShortTP, asiaLo)
+if useHTFliq and not na(pwh) and pwh > close
+    liqLongTP := na(liqLongTP) ? pwh : math.min(liqLongTP, pwh)
+if useHTFliq and not na(pwl) and pwl < close
+    liqShortTP := na(liqShortTP) ? pwl : math.max(liqShortTP, pwl)
+
+liqSweepBull = not na(sslLevel) and low < sslLevel and close > sslLevel
+liqSweepBear = not na(bslLevel) and high > bslLevel and close < bslLevel
+liqSweepBull := liqSweepBull or (not na(sslPool) and low < sslPool and close > sslPool)
+liqSweepBear := liqSweepBear or (not na(bslPool) and high > bslPool and close < bslPool)
+liqSweepBull := liqSweepBull or (not na(pdl) and low < pdl and close > pdl)
+liqSweepBear := liqSweepBear or (not na(pdh) and high > pdh and close < pdh)
+liqSweepBull := liqSweepBull or (useSessLiq and not na(asiaLo) and low  < asiaLo and close > asiaLo)
+liqSweepBear := liqSweepBear or (useSessLiq and not na(asiaHi) and high > asiaHi and close < asiaHi)
+liqSweepBull := liqSweepBull or (useHTFliq and not na(pwl) and low  < pwl and close > pwl)
+liqSweepBear := liqSweepBear or (useHTFliq and not na(pwh) and high > pwh and close < pwh)
+
+var line lnPDH = na
+var line lnPDL = na
+var line lnBSL = na
+var line lnSSL = na
+var line lnAsiaHi = na
+var line lnAsiaLo = na
+var line lnPWH = na
+var line lnPWL = na
+var label lbPDH = na
+var label lbPDL = na
+var label lbAsiaHi = na
+var label lbAsiaLo = na
+var label lbPWH = na
+var label lbPWL = na
+if barstate.islast and showLiq
+    line.delete(lnPDH)
+    line.delete(lnPDL)
+    line.delete(lnBSL)
+    line.delete(lnSSL)
+    line.delete(lnAsiaHi)
+    line.delete(lnAsiaLo)
+    line.delete(lnPWH)
+    line.delete(lnPWL)
+    label.delete(lbPDH)
+    label.delete(lbPDL)
+    label.delete(lbAsiaHi)
+    label.delete(lbAsiaLo)
+    label.delete(lbPWH)
+    label.delete(lbPWL)
+    int xRliq = bar_index + zoneRightBars
+    if not na(pdh)
+        lnPDH := line.new(bar_index - 50, pdh, xRliq, pdh, color=color.new(colBear,30), width=1, style=line.style_dashed)
+        lbPDH := label.new(xRliq, pdh, "PDH (BSL)", style=label.style_label_left, color=color.new(colBear,20), textcolor=color.white, size=size.small)
+    if not na(pdl)
+        lnPDL := line.new(bar_index - 50, pdl, xRliq, pdl, color=color.new(colBull,30), width=1, style=line.style_dashed)
+        lbPDL := label.new(xRliq, pdl, "PDL (SSL)", style=label.style_label_left, color=color.new(colBull,20), textcolor=color.white, size=size.small)
+    if not na(bslLevel)
+        lnBSL := line.new(bar_index - 50, bslLevel, xRliq, bslLevel, color=color.new(colBear,0), width=2)
+    if not na(sslLevel)
+        lnSSL := line.new(bar_index - 50, sslLevel, xRliq, sslLevel, color=color.new(colBull,0), width=2)
+    if useSessLiq and not na(asiaHi)
+        lnAsiaHi := line.new(bar_index - 50, asiaHi, xRliq, asiaHi, color=color.new(colBear,45), width=1, style=line.style_dotted)
+        lbAsiaHi := label.new(xRliq, asiaHi, "Asia Hi (BSL)", style=label.style_label_left, color=color.new(colBear,40), textcolor=color.white, size=size.small)
+    if useSessLiq and not na(asiaLo)
+        lnAsiaLo := line.new(bar_index - 50, asiaLo, xRliq, asiaLo, color=color.new(colBull,45), width=1, style=line.style_dotted)
+        lbAsiaLo := label.new(xRliq, asiaLo, "Asia Lo (SSL)", style=label.style_label_left, color=color.new(colBull,40), textcolor=color.white, size=size.small)
+    if useHTFliq and not na(pwh)
+        lnPWH := line.new(bar_index - 50, pwh, xRliq, pwh, color=color.new(colBear,10), width=2, style=line.style_solid)
+        lbPWH := label.new(xRliq, pwh, "HTF Hi (BSL)", style=label.style_label_left, color=color.new(colBear,0), textcolor=color.white, size=size.small)
+    if useHTFliq and not na(pwl)
+        lnPWL := line.new(bar_index - 50, pwl, xRliq, pwl, color=color.new(colBull,10), width=2, style=line.style_solid)
+        lbPWL := label.new(xRliq, pwl, "HTF Lo (SSL)", style=label.style_label_left, color=color.new(colBull,0), textcolor=color.white, size=size.small)
+
+// ---------------------------------------------------------------------
+// V3 P1 — HTF NARRATIVE BIAS (dealing-range premium / discount LOCATION)
+//   Dealing range = external protected swing range, falling back to the
+//   prior-week range. Longs only in discount, shorts only in premium.
+//   Bias direction still comes from HTF structure; this gates LOCATION.
+// ---------------------------------------------------------------------
+float drHi = not na(extLastPH) ? extLastPH : pwh
+float drLo = not na(extLastPL) ? extLastPL : pwl
+float drMid = (not na(drHi) and not na(drLo) and drHi > drLo) ? (drHi + drLo) / 2 : na
+inDiscountDR = not na(drMid) and close <= drMid
+inPremiumDR  = not na(drMid) and close >= drMid
+// V6.2 AUDIT FIX (continuation): a strong HTF trend (|htfSum| >= 2) authorizes a continuation
+// entry even when price has retraced into the "wrong" dealing-range half (long pullback in
+// premium / short pullback in discount). Without this the location gate vetoed valid trend trades.
+narrLongOk   = not useNarrative or na(drMid) or inDiscountDR or (useNarrContinuation and htfSum >= 2)
+narrShortOk  = not useNarrative or na(drMid) or inPremiumDR or (useNarrContinuation and htfSum <= -2)
+
+// ---------------------------------------------------------------------
+// SMT DIVERGENCE
+// ---------------------------------------------------------------------
+smtOn     = useSMT and smtSym != ""
+smtTicker = smtSym == "" ? syminfo.tickerid : smtSym
+[corrHigh, corrLow] = request.security(smtTicker, timeframe.period, [high[1], low[1]], lookahead=barmerge.lookahead_off)
+ourNewLow   = low  <= ta.lowest(low,  smtLook)[1]
+ourNewHigh  = high >= ta.highest(high, smtLook)[1]
+corrNewLow  = not na(corrLow)  and corrLow  <= ta.lowest(corrLow,  smtLook)[1]
+corrNewHigh = not na(corrHigh) and corrHigh >= ta.highest(corrHigh, smtLook)[1]
+smtBull = smtOn and ourNewLow  and (smtInverse ? not corrNewHigh : not corrNewLow)
+smtBear = smtOn and ourNewHigh and (smtInverse ? not corrNewLow  : not corrNewHigh)
+smtLongOk  = not smtOn or smtBull
+smtShortOk = not smtOn or smtBear
+
+// ---------------------------------------------------------------------
+// FIB GOLDEN ZONE / OTE / PREMIUM-DISCOUNT
+// ---------------------------------------------------------------------
+legValid = not na(lastPH) and not na(lastPL)
+isUpImpulseRaw = mtfOn ? (mtfBias2 == 1 ? true : mtfBias2 == -1 ? false : (legValid and lastPHbar >= lastPLbar)) : (legValid and (bias != 0 ? bias == 1 : close > emaSlow))
+// FIX: when the two bigger HTFs both oppose the structTF leg, draw the dealing
+// range for the dominant side (no bullish discount-buy zone during an HTF sell-off).
+bigHTFbear = htf2Bias == -1 and htf3Bias == -1
+bigHTFbull = htf2Bias ==  1 and htf3Bias ==  1
+isUpImpulse = (useHTFimpulse and mtfOn) ? (bigHTFbear ? false : bigHTFbull ? true : isUpImpulseRaw) : isUpImpulseRaw
+
+float cLegHi = na
+float cLegLo = na
+if isUpImpulse
+    cLegHi := lastPH
+    cLegLo := (not na(lastPLbar) and not na(lastPHbar) and lastPLbar < lastPHbar) ? lastPL : nz(prevPL, lastPL)
+else
+    cLegLo := lastPL
+    cLegHi := (not na(lastPHbar) and not na(lastPLbar) and lastPHbar < lastPLbar) ? lastPH : nz(prevPH, lastPH)
+
+float legHi = mtfOn ? mtfLegHi : cLegHi
+float legLo = mtfOn ? mtfLegLo : cLegLo
+
+legValid := not na(legHi) and not na(legLo) and legHi > legLo
+swHi = legHi
+swLo = legLo
+rng  = swHi - swLo
+// FIX: dealing range is dead once price CLOSES fully beyond it (breakout, not a
+// retrace). A stale OTE/discount on a broken leg must not arm an entry.
+// V10 AUDIT (F-2): a 0.5-ATR cushion so a valid post-BOS retest that briefly closed back outside
+// the dealing range still qualifies for the premium/discount fib gate instead of being silently killed.
+rangeValid = legValid and close <= swHi + nz(atr, 0.0) * 0.5 and close >= swLo - nz(atr, 0.0) * 0.5
+
+f50  = (swHi + swLo) / 2
+
+// DIRECTIONAL FIB BANDS (root-cause fix for "wrong / one-direction" entry zone):
+// the zone must follow the TRADE side, not a single isUpImpulse bias. A LONG
+// retraces DOWN into the discount of the up-leg; a SHORT retraces UP into the
+// premium of the down-leg. Build both independently so a short is never gated or
+// drawn against a buy-side discount zone (and vice-versa).
+fGZs_L  = swHi - rng*fibLow      // long golden start (50%)
+fGZe_L  = swHi - rng*fibHigh     // long golden end (78.6%)
+fOTEs_L = swHi - rng*oteLow      // long OTE start
+fOTEe_L = swHi - rng*oteHigh     // long OTE end
+fGZs_S  = swLo + rng*fibLow      // short golden start (premium)
+fGZe_S  = swLo + rng*fibHigh
+fOTEs_S = swLo + rng*oteLow
+fOTEe_S = swLo + rng*oteHigh
+
+inDiscount = legValid and close < f50
+inPremium  = legValid and close > f50
+
+// Per-side tap tests — long taps discount band (low in band), short taps premium band (high in band).
+priceInGoldenL = rangeValid and low  <= fGZs_L  and low  >= fGZe_L
+priceInGoldenS = rangeValid and high >= fGZs_S  and high <= fGZe_S
+priceInOTEL    = rangeValid and low  <= fOTEs_L and low  >= fOTEe_L
+priceInOTES    = rangeValid and high >= fOTEs_S and high <= fOTEe_S
+
+// ---------------------------------------------------------------------
+// STRUCTURE ARMING
+// ---------------------------------------------------------------------
+longBreak  = mtfOn ? (mtfBreakDir == 1)  : ((useCHoCH and chochBull) or (useBOS and newBosBull) or fastBreakBull)
+shortBreak = mtfOn ? (mtfBreakDir == -1) : ((useCHoCH and chochBear) or (useBOS and newBosBear) or fastBreakBear)
+longBreakEdge  = mtfOn ? (mtfBreakDir == 1  and mtfBreakDir[1] != 1)  : longBreak
+shortBreakEdge = mtfOn ? (mtfBreakDir == -1 and mtfBreakDir[1] != -1) : shortBreak
+
+var int longArmBar  = na
+var int shortArmBar = na
+if longBreakEdge
+    longArmBar  := bar_index
+    shortArmBar := na
+if shortBreakEdge
+    shortArmBar := bar_index
+    longArmBar  := na
+
+tfRatio      = mtfOn ? math.max(1, int(timeframe.in_seconds(structTF) / timeframe.in_seconds(timeframe.period))) : 1
+structWinEff = structWindow * tfRatio
+armMin     = requireRetrace ? 1 : 0
+longArmed  = not na(longArmBar)  and (bar_index - longArmBar)  >= armMin and (bar_index - longArmBar)  <= structWinEff
+shortArmed = not na(shortArmBar) and (bar_index - shortArmBar) >= armMin and (bar_index - shortArmBar) <= structWinEff
+
+// ---------------------------------------------------------------------
+// PREMIUM / DISCOUNT ZONES + EQ + GOLDEN + OTE + fib tags
+// ---------------------------------------------------------------------
+eq50 = (swHi + swLo) / 2
+szZone   = zoneTxtBig ? size.normal : size.small
+goldTransp = math.max(zoneTransp - 5, 60)
+
+var box  bxPrem  = na
+var box  bxDisc  = na
+var box  bxGold  = na
+var box  bxOTE   = na
+var line lnEQ    = na
+var label lbEQ   = na
+var label lbPrem = na
+var label lbDisc = na
+var label lbOTE  = na
+var label lbNext = na
+var line[]  fibLn = array.new_line()
+var label[] fibLb = array.new_label()
+
+if barstate.islast and legValid and showPDZones
+    int xL = math.min(lastPHbar, lastPLbar)
+    int xR = bar_index + zoneRightBars
+    box.delete(bxPrem)
+    box.delete(bxDisc)
+    box.delete(bxGold)
+    box.delete(bxOTE)
+    line.delete(lnEQ)
+    label.delete(lbEQ)
+    label.delete(lbPrem)
+    label.delete(lbDisc)
+    label.delete(lbOTE)
+    label.delete(lbNext)
+    for l in fibLn
+        line.delete(l)
+    for lb in fibLb
+        label.delete(lb)
+    array.clear(fibLn)
+    array.clear(fibLb)
+    bxPrem := box.new(xL, swHi, xR, eq50, border_color=color.new(colBear,60),  bgcolor=color.new(colBear,zoneTransp))
+    bxDisc := box.new(xL, eq50, xR, swLo, border_color=color.new(colBull,60),  bgcolor=color.new(colBull,zoneTransp))
+    // Draw the entry zone for the ARMED side (structure break), falling back to the
+    // impulse bias only when nothing is armed. longArmed/shortArmed are mutually
+    // exclusive, so the drawn box now matches the "NEXT: BUY/SELL" label below.
+    bool drawLong = longArmed ? true : shortArmed ? false : isUpImpulse
+    gGZs = drawLong ? fGZs_L  : fGZs_S
+    gGZe = drawLong ? fGZe_L  : fGZe_S
+    gOTs = drawLong ? fOTEs_L : fOTEs_S
+    gOTe = drawLong ? fOTEe_L : fOTEe_S
+    if useGolden
+        gTop = math.max(gGZs, gGZe)
+        gBot = math.min(gGZs, gGZe)
+        bxGold := box.new(xL, gTop, xR, gBot, border_color=color.new(colGold,50), bgcolor=color.new(colGold,goldTransp))
+    if useOTE
+        oTop = math.max(gOTs, gOTe)
+        oBot = math.min(gOTs, gOTe)
+        bxOTE := box.new(xL, oTop, xR, oBot, border_color=color.new(colOTECol,40), bgcolor=color.new(colOTECol,zoneTransp))
+        lbOTE := label.new(xL, (oTop+oBot)/2, "OTE", style=label.style_label_right, color=color.new(colOTECol,0), textcolor=color.white, size=szZone)
+    lnEQ := line.new(xL, eq50, xR, eq50, color=color.new(colGold,0), width=1, style=line.style_dashed)
+    lbEQ := label.new(xL, eq50, "EQ 50%", style=label.style_label_right, color=color.new(color.gray,0), textcolor=color.white, size=size.small)
+    // FIX: bias-aware labels — only the side that matches the impulse is the trade
+    // side. A bearish leg shows PREMIUM=Sell, DISCOUNT=take-profit (no "Buy Zone").
+    premTxt = isUpImpulse ? "PREMIUM\n(target)" : "PREMIUM\nSell Zone"
+    discTxt = isUpImpulse ? "DISCOUNT\nBuy Zone" : "DISCOUNT\n(target)"
+    lbPrem := label.new(xL, (swHi+eq50)/2, premTxt, style=label.style_label_right, color=color.new(colBear,0), textcolor=color.white, size=szZone)
+    lbDisc := label.new(xL, (eq50+swLo)/2, discTxt, style=label.style_label_right, color=color.new(colBull,0), textcolor=color.white, size=szZone)
+    keyRatios = array.from(0.5, 0.618, 0.786)
+    for kr in keyRatios
+        yk  = swLo + rng * kr
+        isStar = kr == 0.618
+        kc  = isStar ? colGold : kr == 0.786 ? color.new(colGold,15) : color.new(color.yellow,0)
+        array.push(fibLn, line.new(bar_index, yk, xR, yk, color=color.new(kc,30), style=line.style_solid, width=1))
+        txt = str.tostring(kr*100, "0.#") + "% " + str.tostring(yk, format.mintick)
+        array.push(fibLb, label.new(xR, yk, txt, style=label.style_label_left, color=kc, textcolor=color.black, size=size.small))
+    if (longArmed or shortArmed)
+        ez   = (math.max(gGZs, gGZe) + math.min(gGZs, gGZe)) / 2
+        nTxt = longArmed ? "NEXT: BUY zone" : "NEXT: SELL zone"
+        nCol = longArmed ? color.new(colBull,0) : color.new(colBear,0)
+        nSty = longArmed ? label.style_label_up : label.style_label_down
+        lbNext := label.new(int(math.avg(bar_index, xR)), ez, nTxt, style=nSty, color=nCol, textcolor=color.white, size=szZone)
+
+// ---------------------------------------------------------------------
+// FULL FIB RETRACEMENT LADDER (optional)
+// ---------------------------------------------------------------------
+var line[] fibLines = array.new_line()
+var label[] fibLabs = array.new_label()
+if barstate.islast and legValid and showFibLevels
+    for ln in fibLines
+        line.delete(ln)
+    for lb in fibLabs
+        label.delete(lb)
+    array.clear(fibLines)
+    array.clear(fibLabs)
+    fibRatios = array.from(0.0, 0.236, 0.382, 0.5, 0.618, 0.705, 0.786, 1.0)
+    for r in fibRatios
+        yf = isUpImpulse ? swHi - rng * r : swLo + rng * r
+        col = (r >= 0.5 and r <= 0.786) ? color.new(color.yellow, 40) : color.new(color.orange, 65)
+        array.push(fibLines, line.new(bar_index - 30, yf, bar_index, yf, color=col, style=line.style_dotted))
+        array.push(fibLabs,  label.new(bar_index, yf, str.tostring(r, "0.###"), style=label.style_none, textcolor=color.new(color.orange,0), size=size.tiny))
+
+fibExtTarget = legValid ? (isUpImpulse ? swLo + rng * fibExt : swHi - rng * fibExt) : na
+
+// ---------------------------------------------------------------------
+// GANN BOX
+// ---------------------------------------------------------------------
+var box    gannB    = na
+var line   gd1      = na
+var line   gd2      = na
+var line[] gannDiv  = array.new_line()
+if showGann and barstate.islast and legValid
+    box.delete(gannB)
+    line.delete(gd1)
+    line.delete(gd2)
+    for gl in gannDiv
+        line.delete(gl)
+    array.clear(gannDiv)
+    int x1 = math.min(lastPHbar, lastPLbar)
+    int x2 = math.max(lastPHbar, lastPLbar)
+    float yTop = swHi
+    float yBot = swLo
+    float gRng = yTop - yBot
+    gannB := box.new(x1, yTop, x2, yBot, border_color=color.new(color.blue,40), bgcolor=color.new(color.blue,93))
+    gd1 := line.new(x1, yBot, x2, yTop, color=color.new(color.blue,30), width=1)
+    gd2 := line.new(x1, yTop, x2, yBot, color=color.new(color.blue,30), width=1)
+    gannRatios = showGannFib ? array.from(0.382, 0.5, 0.618, 0.786) : array.from(0.25, 0.5, 0.75)
+    for gr in gannRatios
+        yg = yBot + gRng * gr
+        array.push(gannDiv, line.new(x1, yg, x2, yg, color=color.new(color.blue,70), style=line.style_dotted))
+
+// ---------------------------------------------------------------------
+// TRIGGERS — engulfing + liquidity sweep + fakeout
+// ---------------------------------------------------------------------
+bullEngulf = close > open and close[1] < open[1] and close >= open[1] and open <= close[1]
+bearEngulf = close < open and close[1] > open[1] and close <= open[1] and open >= close[1]
+
+sweepBull = not na(lastPL) and low < lastPL and close > lastPL
+sweepBear = not na(lastPH) and high > lastPH and close < lastPH
+
+barRange   = math.max(high - low, syminfo.mintick)
+lowerWick  = math.min(open, close) - low
+upperWick  = high - math.max(open, close)
+fakeoutBull = sweepBull and close > open and (lowerWick / barRange) >= fakeWickFrac
+fakeoutBear = sweepBear and close < open and (upperWick / barRange) >= fakeWickFrac
+
+var int  lastSweepBullBar = na
+var int  lastSweepBearBar = na
+var bool lastSweepBullEng = false   // Stage 10 #8: was the last sweep ENGINEERED (mapped/pooled liquidity)?
+var bool lastSweepBearEng = false
+// AUDIT FIX (sweep multi-fire): a price camped below a swept level re-fired sweepBull every bar,
+// continuously refreshing lastSweepBullBar (resetting the seq/recency window) AND overwriting the
+// engineered flag with a later incidental sweep. Register only a NEW sweep (rising edge) so the
+// timestamp + engineered flag reflect the actual manipulation event.
+// V9 AUDIT FIX (engineered-flag overwrite): a later INCIDENTAL single-pivot sweep was
+// overwriting lastSweep*Eng back to false, erasing a still-in-window ENGINEERED sweep that
+// the seq-gate (H-1) requires. In London/NY an incidental sweepBull rising-edge fires almost
+// every bar, so the engineered qualification was being silently downgraded. Fix: an engineered
+// sweep latches eng=true; an incidental sweep may only refresh the timestamp when no engineered,
+// in-window sweep is already held (never downgrade a live engineered sweep).
+newEngBull = liqSweepBull and not liqSweepBull[1]
+newIncBull = (sweepBull and not sweepBull[1]) or (fakeoutBull and not fakeoutBull[1])
+engHeldBull = not na(lastSweepBullBar) and lastSweepBullEng and (bar_index - lastSweepBullBar) <= structWinEff
+if newEngBull
+    lastSweepBullBar := bar_index
+    lastSweepBullEng := true
+else if newIncBull and not engHeldBull
+    lastSweepBullBar := bar_index
+    lastSweepBullEng := false
+newEngBear = liqSweepBear and not liqSweepBear[1]
+newIncBear = (sweepBear and not sweepBear[1]) or (fakeoutBear and not fakeoutBear[1])
+engHeldBear = not na(lastSweepBearBar) and lastSweepBearEng and (bar_index - lastSweepBearBar) <= structWinEff
+if newEngBear
+    lastSweepBearBar := bar_index
+    lastSweepBearEng := true
+else if newIncBear and not engHeldBear
+    lastSweepBearBar := bar_index
+    lastSweepBearEng := false
+// Stage 10 #8: when useEngInduce, only an engineered (pooled-liquidity) sweep counts as
+// inducement — an incidental single-pivot sweep does not. Rejection block added to zone set (#9).
+inducementBull = useInducement and not na(lastSweepBullBar) and (bar_index - lastSweepBullBar) <= structWinEff and (not useEngInduce or lastSweepBullEng) and (inBullFVG or inBullOB or inBullBreaker or inBullIFVG or inBullRej)
+inducementBear = useInducement and not na(lastSweepBearBar) and (bar_index - lastSweepBearBar) <= structWinEff and (not useEngInduce or lastSweepBearEng) and (inBearFVG or inBearOB or inBearBreaker or inBearIFVG or inBearRej)
+
+inManipKZ = (useKZLondon and kzLondon) or (useKZNY and kzNY)
+judasBull = usePO3 and useSessLiq and inManipKZ and not na(asiaLo) and low  < asiaLo and close > asiaLo
+judasBear = usePO3 and useSessLiq and inManipKZ and not na(asiaHi) and high > asiaHi and close < asiaHi
+var int lastJudasBullBar = na
+var int lastJudasBearBar = na
+if judasBull
+    lastJudasBullBar := bar_index
+if judasBear
+    lastJudasBearBar := bar_index
+judasLongOk  = not usePO3gate or (not na(lastJudasBullBar) and (bar_index - lastJudasBullBar) <= structWinEff)
+judasShortOk = not usePO3gate or (not na(lastJudasBearBar) and (bar_index - lastJudasBearBar) <= structWinEff)
+plotshape(judasBull, title="Judas up", style=shape.cross, location=location.belowbar, color=color.new(color.green,10), size=size.tiny, text="J")
+plotshape(judasBear, title="Judas dn", style=shape.cross, location=location.abovebar, color=color.new(color.red,10), size=size.tiny, text="J")
+plotshape(useFakeout and fakeoutBull, title="Fakeout up", style=shape.xcross, location=location.belowbar, color=colBull, size=size.tiny)
+plotshape(useFakeout and fakeoutBear, title="Fakeout dn", style=shape.xcross, location=location.abovebar, color=colBear, size=size.tiny)
+
+// V3 P1 — SWEEP -> MSS -> ZONE SEQUENCING. An MSS/CHoCH/BOS must print AFTER the
+// sweep (manipulation) and within the arm window before entry is authorized.
+var int lastMssBullBar = na
+var int lastMssBearBar = na
+if mssBull or newBosBull or chochBull
+    lastMssBullBar := bar_index
+if mssBear or newBosBear or chochBear
+    lastMssBearBar := bar_index
+// AUDIT FIX (sequence integrity): require MSS STRICTLY AFTER the sweep (> not >=) so a single
+// spike candle that both sweeps liquidity and CHoCHs in the same bar cannot satisfy the
+// sweep->MSS sniper sequence. Also bound the MSS age so a stale MSS can't authorize a late entry.
+// AUDIT V7 (H-1): the sweep that arms the sniper sequence must have taken ENGINEERED
+// (mapped/pooled) liquidity — equal-H/L pool, PDH/PDL, Asia, weekly — not an incidental
+// single-pivot wick. In London/NY price crosses *some* reference level almost every bar, so
+// the un-qualified sweep made "manipulation must precede entry" near-always true, admitting
+// ordinary pullbacks as swept setups. Require lastSweepBullEng/lastSweepBearEng (already
+// tracked at registration). Under soft-gates (default ON) a failed seq is a score haircut,
+// not a hard block, so this tightens QUALITY without zeroing frequency.
+seqLongOk  = not useSeqGate or (not na(lastSweepBullBar) and lastSweepBullEng and not na(lastMssBullBar) and lastMssBullBar > lastSweepBullBar and (bar_index - lastSweepBullBar) <= structWinEff and (bar_index - lastMssBullBar) <= structWinEff)
+seqShortOk = not useSeqGate or (not na(lastSweepBearBar) and lastSweepBearEng and not na(lastMssBearBar) and lastMssBearBar > lastSweepBearBar and (bar_index - lastSweepBearBar) <= structWinEff and (bar_index - lastMssBearBar) <= structWinEff)
+
+// ---------------------------------------------------------------------
+// V4 ORDER-FLOW PROXY — lower-TF tick-volume delta
+//   Buy pressure  = sum of intrabar volume on up-closing intrabars
+//   Sell pressure = sum on down-closing intrabars; net = signed delta.
+//   This is the closest institutional footprint base Pine exposes for FX.
+//   HONESTY: FX volume is TICK volume -> a PROXY, not true bid/ask delta.
+// ---------------------------------------------------------------------
+// request.* must be called UNCONDITIONALLY (no ternary/if) in Pine — call always, gate
+// the math. ofLTF MUST be lower than the chart TF (tooltip warns); a higher TF errors.
+ofTFok = timeframe.in_seconds(ofLTF) < timeframe.in_seconds(timeframe.period)
+// V10 AUDIT (PERF-5): merge three lower-TF feeds into one tuple request.
+// AUDIT-FIX C-1 (runtime safety): request.security_lower_tf is called UNCONDITIONALLY, but if
+// ofLTF is >= the chart TF (e.g. 1m chart with default ofLTF="1") TradingView errors / empty-warns
+// and silently kills the feed. Pass an EFFECTIVE LTF that can never exceed the chart TF; ofTFok
+// still zeroes the score when no true lower TF exists. No behavior change when ofLTF is genuinely lower.
+ofLTFeff = ofTFok ? ofLTF : timeframe.period
+[ltfC, ltfO, ltfV] = request.security_lower_tf(syminfo.tickerid, ofLTFeff, [close, open, volume])
+float ofDelta = na
+ofN = array.size(ltfV)
+if useOFdelta and ofTFok and ofN > 0 and array.size(ltfC) == ofN and array.size(ltfO) == ofN
+    float s = 0.0
+    for i = 0 to ofN - 1
+        v = array.get(ltfV, i)
+        c = array.get(ltfC, i)
+        o = array.get(ltfO, i)
+        s += c > o ? v : c < o ? -v : 0.0
+    ofDelta := s
+ofBull   = useOFdelta and not na(ofDelta) and ofDelta > 0
+ofBear   = useOFdelta and not na(ofDelta) and ofDelta < 0
+ofLongOk  = not (useOFdelta and useOFgate) or ofBull
+ofShortOk = not (useOFdelta and useOFgate) or ofBear
+// V6 AUDIT-FIX (Institutional readiness / honesty): on FX, "volume" is TICK volume, so the
+// order-flow delta is a weaker proxy than on real-volume instruments. Down-weight its score
+// credit on forex so a tick-vol proxy can't masquerade as true bid/ask delta confirmation.
+ofCredit = syminfo.type == "forex" ? 0.4 : 0.8
+
+// ---------------------------------------------------------------------
+// CONFLUENCE SCORING & SIGNAL DECISION
+// FIX #2/#3: two trigger modes. Zone-tap (default) fires on the armed-zone
+// tap with a QUALITY FLOOR (one orderflow/engulf read) — institutional OTE
+// fill, no chasing a displacement-candle close. Legacy mode keeps the hard
+// displacement-trigger gate (set useZoneTap=OFF). armed+zone+fib still gate.
+// ---------------------------------------------------------------------
+// P0-3 BPR FIX: bprActive REMOVED from the directional zone gate (one 2-sided
+// structure must not green-light both sides). BPR is kept only as score credit below.
+longZone  = (not useFVG and not useOB) or (useFVG and inBullFVG) or (useOB and inBullOB) or (useIFVG and inBullIFVG) or (useBreaker and inBullBreaker) or (useRejBlock and inBullRej)
+longFib   = (not useGolden and not useOTE) or (useGolden and useOTE and (priceInGoldenL or priceInOTEL)) or (useGolden and not useOTE and priceInGoldenL) or (useOTE and not useGolden and priceInOTEL)
+trigBody   = math.abs(close - open)
+trigDispOk = not useTrigDisp or (not na(atr) and trigBody >= atr * trigDispMult)
+// V5 ENTRY-QUALITY FIX: a bare sweep was a free trigger -> loose floor. Require the
+// reclaim candle to carry displacement (>= 0.5x ATR body) so only a sweep that ACTUALLY
+// reclaimed with intent fires. Stops single-wick sweeps in chop from arming the zone-tap.
+sweepRclDisp = not na(atr) and atr > 0 and trigBody >= atr * 0.5
+// P1-1 STALE-DIV FIX: rsiBullDiv / rsiHidBullDiv REMOVED from the trigger floor
+// (they lag swingLen bars and can fire with no live momentum). Div now scores only.
+longQualFloor  = bullEngulf or fakeoutBull or (liqScore and liqSweepBull and sweepRclDisp) or (smtOn and smtBull) or inducementBull or judasBull
+longCandle = useZoneTap ? longQualFloor : ((useEngulf and bullEngulf and trigDispOk) or (useFakeout and fakeoutBull and trigDispOk) or (not useEngulf and not useFakeout and trigDispOk))
+longTrig  = longCandle and (not useEMAfilter or emaBull) and (not useRSIfilter or rsiBull)
+
+shortZone  = (not useFVG and not useOB) or (useFVG and inBearFVG) or (useOB and inBearOB) or (useIFVG and inBearIFVG) or (useBreaker and inBearBreaker) or (useRejBlock and inBearRej)
+shortFib   = (not useGolden and not useOTE) or (useGolden and useOTE and (priceInGoldenS or priceInOTES)) or (useGolden and not useOTE and priceInGoldenS) or (useOTE and not useGolden and priceInOTES)
+shortQualFloor = bearEngulf or fakeoutBear or (liqScore and liqSweepBear and sweepRclDisp) or (smtOn and smtBear) or inducementBear or judasBear
+shortCandle = useZoneTap ? shortQualFloor : ((useEngulf and bearEngulf and trigDispOk) or (useFakeout and fakeoutBear and trigDispOk) or (not useEngulf and not useFakeout and trigDispOk))
+shortTrig  = shortCandle and (not useEMAfilter or emaBear) and (not useRSIfilter or rsiBear)
+
+// =====================================================================
+// P0-2 SIGNAL QUALITY ENGINE 0-100 (independent of hard gates & trigger)
+//   Weights: HTF20 Sweep15 MSS15 FVG10 OB10 Disp10 Sess10 Vol10 (= 100).
+//   Each component is graded 0..1 then weighted. Score DECAYS qDecay pts per
+//   bar since the structure break -> punishes late retraces. Signal fires when
+//   score >= qMin (default 80). No gate term is reused here (no double-count).
+// =====================================================================
+barDispRatio = (na(atr) or atr <= 0) ? 0.0 : (high - low) / atr
+dispCredit   = math.min(1.0, barDispRatio / 1.5)                                   // 1.5x ATR = full credit
+volCredit    = na(adxVal) ? 0.0 : math.min(1.0, math.max(0.0, (adxVal - adxMin) / 15.0))
+htfSumZ      = nz(htfSum, 0)
+longHTFgrade  = math.max(0.0, htfSumZ / 3.0)
+shortHTFgrade = math.max(0.0, -htfSumZ / 3.0)
+// V4 FIX-1 DOUBLE-COUNT: session is already a HARD GATE (tradeOk via inKZ) — scoring it
+// too inflated the 0-100 engine. Replaced by an INDEPENDENT manipulation-quality read
+// (sweep + reclaim DISPLACEMENT, FIX-5). ADX margin (volCredit) and HTF margin grade
+// STRENGTH ABOVE the gate floor, not pass/fail reuse, so they stay.
+// V5 DE-DUP (true fix): sweep already gates the TRIGGER (qual floor, now displacement-
+// tightened). Scoring sweep again under this weight was a residual ~10pt double-count.
+// Replace with an INDEPENDENT institutional read — DEPTH inside the HTF dealing-range
+// discount/premium. drMid/drHi/drLo come from the external+weekly range (set above) and
+// are reused by NO gate and NO trigger, so this is a clean, non-overlapping score term.
+locQualL = (not na(drMid) and not na(drLo) and drMid > drLo) ? math.min(1.0, math.max(0.0, (drMid - close) / (drMid - drLo))) : 0.0
+locQualS = (not na(drMid) and not na(drHi) and drHi > drMid) ? math.min(1.0, math.max(0.0, (close - drMid) / (drHi - drMid))) : 0.0
+// V4 FIX-2: wire the previously-DEAD useTLBreak input into the orderflow component.
+tlCreditL  = (useTLBreak and tlBreakBull) ? 1.0 : 0.0
+tlCreditS  = (useTLBreak and tlBreakBear) ? 1.0 : 0.0
+divCreditL   = (rsiBullDiv or rsiHidBullDiv) ? 1.0 : 0.0
+divCreditS   = (rsiBearDiv or rsiHidBearDiv) ? 1.0 : 0.0
+
+// LONG components (0..1 each)
+lMSS   = mssBull ? 1.0 : (newBosBull ? 0.6 : 0.0)
+// AUDIT FIX (dead BPR credit): bprActive REQUIRES inBullFVG, so the old `: (bprActive?0.5:0)`
+// fallback branch (reached only when inBullFVG is false) was unreachable — BPR added 0 pts.
+// A BPR is an overlapping bull+bear FVG, i.e. the strongest FVG state, so credit it at full 1.0
+// and a plain directional FVG at 1.0 too (component is capped at 1.0; BPR cannot exceed it here).
+lFVG   = inBullFVG ? 1.0 : 0.0
+lOB    = inBullOB ? 1.0 : (inBullBreaker ? 0.7 : (inBullIFVG ? 0.6 : (inBullRej ? 0.5 : 0.0)))
+// P0-3 SWEEP DE-DUP: liqSweep is a TRIGGER (longQualFloor) only — REMOVED from score.
+// The "sweep" weight now carries orderflow confirmation (SMT / RSI-div) exclusively,
+// so a sweep can never be counted as both a gate and a score contributor.
+lSweepC = math.max(math.max(math.max((smtOn and smtBull) ? 1.0 : 0.0, divCreditL * 0.6), tlCreditL * 0.5), ofBull ? ofCredit : 0.0)
+longQ0 = qHTF*longHTFgrade + qSweep*lSweepC + qMSS*lMSS + qFVGw*lFVG + qOBw*lOB + qDispw*dispCredit + qSessw*locQualL + qVolw*volCredit
+longBarsArm = na(longArmBar) ? 999 : (bar_index - longArmBar)
+// V6.2 AUDIT FIX (over-filtering): in soft-gate mode the contextual gates grade the score
+// instead of hard-blocking. Each failed gate (ext / ADX / regime / narrative / sequence) is a
+// softGatePenalty haircut; the qMin floor then governs whether the graded setup still fires.
+longCtxFails = (extLongOk?0:1) + (adxOk?0:1) + (regimeOk?0:1) + (narrLongOk?0:1)   // seq now hard-gates (V9) — not double-penalized here
+longSoftPen  = useSoftGates ? softGatePenalty * longCtxFails : 0
+// AUDIT-FIX C-5 (score clamp): weights are user inputs that sum to 100 only at defaults. If a user
+// raises any qX weight the raw score can exceed 100, breaking the qMin semantics and the "/100"
+// dashboard read. Clamp the upper bound so the 0-100 contract always holds.
+longScore = math.min(100.0, math.max(0.0, longQ0 - qDecay * math.max(0, longBarsArm) - longSoftPen))
+
+// SHORT components
+sMSS   = mssBear ? 1.0 : (newBosBear ? 0.6 : 0.0)
+// AUDIT FIX (dead BPR credit): mirror of long side — bprActive requires inBearFVG, so the
+// fallback was unreachable. Collapse to the directional-FVG read (no behavior change vs the
+// dead branch; removes the misleading dead code).
+sFVG   = inBearFVG ? 1.0 : 0.0
+sOB    = inBearOB ? 1.0 : (inBearBreaker ? 0.7 : (inBearIFVG ? 0.6 : (inBearRej ? 0.5 : 0.0)))
+// P0-3 SWEEP DE-DUP (see long side): sweep is trigger-only; orderflow only here.
+sSweepC = math.max(math.max(math.max((smtOn and smtBear) ? 1.0 : 0.0, divCreditS * 0.6), tlCreditS * 0.5), ofBear ? ofCredit : 0.0)
+shortQ0 = qHTF*shortHTFgrade + qSweep*sSweepC + qMSS*sMSS + qFVGw*sFVG + qOBw*sOB + qDispw*dispCredit + qSessw*locQualS + qVolw*volCredit
+shortBarsArm = na(shortArmBar) ? 999 : (bar_index - shortArmBar)
+// V6.2 AUDIT FIX (over-filtering): soft-gate score haircut (mirror of long side).
+shortCtxFails = (extShortOk?0:1) + (adxOk?0:1) + (regimeOk?0:1) + (narrShortOk?0:1)   // seq now hard-gates (V9) — not double-penalized here
+shortSoftPen  = useSoftGates ? softGatePenalty * shortCtxFails : 0
+// AUDIT-FIX C-5 (score clamp): mirror of long side — keep the 0-100 contract intact when weights change.
+shortScore = math.min(100.0, math.max(0.0, shortQ0 - qDecay * math.max(0, shortBarsArm) - shortSoftPen))
+
+// ---------------------------------------------------------------------
+// SL / TP (market-on-close basis)
+// ---------------------------------------------------------------------
+spreadPipsEff = spreadPips * (useSessSpread and kzAsia ? spreadAsiaMult : 1.0) * (useRollSpread and kzRoll ? rollSpreadMult : 1.0)
+spreadPrice = spreadPipsEff * pip
+// V10 AUDIT (CRITICAL, SL-floor): with minSLatr=0 the floor was 0.0, so a cold-start bar (lastPL=na)
+// or a tight wick anchor could yield a ~1-pip SL → riskMoney/tinySL = an outsized lot that a single
+// adverse tick liquidates at full 1R. Guarantee a hard minimum clearance even when minSLatr=0.
+minSLdist = (minSLatr > 0 and not na(atr)) ? atr * minSLatr : (not na(atr) ? atr * 0.15 : 2 * pip)
+slLongAnchor  = (mtfOn and not na(mtfLegLo)) ? math.min(mtfLegLo, low)  : (na(lastPL) ? low  : math.min(lastPL, low))
+slShortAnchor = (mtfOn and not na(mtfLegHi)) ? math.max(mtfLegHi, high) : (na(lastPH) ? high : math.max(lastPH, high))
+longSL  = math.min(slLongAnchor  - bufferPips * pip - spreadPrice, close - minSLdist)
+shortSL = math.max(slShortAnchor + bufferPips * pip + spreadPrice, close + minSLdist)
+
+longRisk  = close - longSL
+shortRisk = shortSL - close
+
+// AUDIT-FIX C-2: useSoftSLcap ON lifts the hard SL-distance block (risk-% sizing keeps $ risk fixed).
+longSLok  = useSoftSLcap or maxSLatr == 0 or (not na(atr) and longRisk  <= atr * maxSLatr)
+shortSLok = useSoftSLcap or maxSLatr == 0 or (not na(atr) and shortRisk <= atr * maxSLatr)
+
+// P2 SPREAD CAP: skip the scalp when modeled spread (Asia/rollover multiplied) eats
+// more than spreadCapFrac of the stop distance.
+spreadOkLong  = not useSpreadCap or longRisk  <= 0 or (spreadPrice / longRisk)  <= spreadCapFrac
+spreadOkShort = not useSpreadCap or shortRisk <= 0 or (spreadPrice / shortRisk) <= spreadCapFrac
+
+// P2 SWEEP->RECLAIM sequencing: require a sweep/fakeout printed within the last
+// sweepReclaimBars bars before allowing entry (manipulation -> distribution).
+swRecLong  = not useSweepReclaim or (not na(lastSweepBullBar) and (bar_index - lastSweepBullBar) <= sweepReclaimBars)
+swRecShort = not useSweepReclaim or (not na(lastSweepBearBar) and (bar_index - lastSweepBearBar) <= sweepReclaimBars)
+
+// cooldown after a tracked loss + volume gate
+var int lastLossBar = na
+
+// ---------------------------------------------------------------------
+// STRATEGY EXECUTION STATE + POST-TRADE BOOKKEEPING (runs BEFORE signal)
+//   Native strategy.* order engine drives equity / PF / drawdown (Strategy
+//   Tester). This block mirrors SL/TP levels and derives daily-stop /
+//   consecutive-loss-halt / cooldown state. Order placement is after the
+//   signal decision; exit management is placed each bar after entry.
+// ---------------------------------------------------------------------
+var float curSL    = na
+var float curTP    = na
+var float initRisk = na
+var int   entryBar = na
+var bool  partialDone = false
+var bool  partial2Done = false    // V6: TP2 second scale-out booked
+var bool  sizeFallback = false    // V6: last entry fell back to 1 contract (units na) -> mis-size flag
+var int   haltUntil = na          // ms timestamp; entries blocked until then
+
+// daily equity baseline for the daily-loss stop
+var float dayStartEq = na
+// AUDIT V7 (H-6/H-7): freeze the day's risk unit + a persistent halt latch at the day boundary.
+var float dayRiskMoney = na   // H-6: daily-loss limit sized off DAY-START equity (fixed), not live shrinking equity
+var bool  dayHalted    = false // H-7: once the daily stop trips, block ALL further entries until the next day
+if newDay
+    dayStartEq := strategy.equity
+    dayRiskMoney := strategy.equity * riskPerc / 100.0
+    dayHalted := false
+// V4 FIX-4: size + daily-stop off LIVE equity (compounds, prop-accurate), not static acctSize.
+acctEq       = math.max(strategy.equity, 1.0)
+riskMoneyEq  = acctEq * riskPerc / 100.0
+dayLossMoney = strategy.equity - nz(dayStartEq, strategy.equity)
+
+// consecutive-loss tracking from the native closed-trade log
+var int consec = 0
+var int maxConsec = 0
+// Stage 10 #2: per-ENTRY accounting. TV logs the TP1 partial and the runner as TWO
+// separate closed trades, so strategy.wintrades/closedtrades is per-EXIT, not per-entry,
+// and inflates win rate. These counters classify one full position (all its partials)
+// as a single win/loss by its total realized P&L, captured from netprofit at entry.
+var float entryStartNet = na
+var int   posEntries = 0
+var int   posWins = 0
+// AUDIT-FIX C-3 (risk-adjusted stats): accumulate per-ENTRY R-multiple moments so the panel can
+// show Sharpe / Sortino / Recovery on the SAME honest per-entry basis as win% / expectancy. R is
+// measured against the dollar risk AT ENTRY (entryRiskV) — not the live compounding unit — so the
+// distribution is stationary. Per-TRADE (not annualized); TV's native tester gives annualized Sharpe.
+var float entryRiskV = na   // $ risk committed at entry (for honest R)
+var int   nR   = 0
+var float sumR = 0.0
+var float sumR2 = 0.0
+var float sumNegR2 = 0.0
+// V4 walk-forward IS/OOS buckets (one full entry classified by total realized P&L)
+var int   entryTimeV = na
+var int   isEntries  = 0
+var int   isWins     = 0
+var float isNet      = 0.0
+var int   oosEntries = 0
+var int   oosWins    = 0
+var float oosNet     = 0.0
+// V4 per-killzone expectancy (which session actually pays). 1=London 2=NY 3=Asia 0=none
+var int   entrySessV = na
+var int   lnE = 0
+var int   lnW = 0
+var float lnN = 0.0
+var int   nyE = 0
+var int   nyW = 0
+var float nyN = 0.0
+var int   asE = 0
+var int   asW = 0
+var float asN = 0.0
+newClosed       = strategy.closedtrades > nz(strategy.closedtrades[1], 0)
+lastTradeProfit = newClosed ? strategy.closedtrades.profit(strategy.closedtrades - 1) : na
+// AUDIT HIGH-2: consec-loss / halt / cooldown accounting MOVED to the per-ENTRY block
+// below (when the full position returns flat). TV logs the TP1 partial and the runner as
+// TWO closed trades, so per-EXIT counting reset consec on every partial win and the
+// consecutive-loss halt almost never engaged. newClosed/lastTradeProfit are kept ONLY for
+// the WIN/LOSS visual dots and the EXIT alert (cosmetic, per-exit is fine there).
+
+coolOk = not useCooldown or na(lastLossBar) or (bar_index - lastLossBar) > coolBars
+volOk = not useVolFilter or (not na(volume) and volume > ta.sma(volume, volLen) * volMult)
+
+// V3 P1 — DYNAMIC RISK ENGINE gate: daily -R stop + consecutive-loss cooldown.
+// Daily loss measured in money vs dailyStopR worth of risk (R -> money).
+// AUDIT V7 (H-6): compare against the FROZEN day-start risk unit (nz fallback on bar 1 only).
+// AUDIT V7 (H-7): latch dayHalted so a breach blocks every subsequent entry this day — a prop
+// daily-loss breach is binary; the old logic re-evaluated each bar off start-of-bar equity and
+// could let one more trade slip through on the breach bar.
+dailyStopHit = useDailyStop and dayLossMoney <= -dailyStopR * nz(dayRiskMoney, riskMoneyEq)
+if dailyStopHit
+    dayHalted := true
+// V9 AUDIT FIX (overall max-DD prop guard): trailing peak-equity drawdown latch. Once breached the
+// account is "blown" for the rest of the run — permanent halt + flatten (see flatten block below).
+var float peakEq   = na
+var bool  acctBlown = false
+peakEq := na(peakEq) ? strategy.equity : math.max(peakEq, strategy.equity)
+maxDDhit = useMaxDD and not na(peakEq) and peakEq > 0 and (strategy.equity - peakEq) <= -maxDDperc / 100.0 * peakEq
+if maxDDhit
+    acctBlown := true
+// V9 AUDIT FIX (consec-streak reset): when a consec-halt cooldown EXPIRES the streak was left at
+// consecMax, so the very next loss re-armed a full cooldown (1 strike, not N). Zero the streak as
+// the cooldown lapses so the user gets a fresh N attempts.
+var bool wasHalted = false
+haltActive   = useConsecHalt and not na(haltUntil) and time < haltUntil
+if wasHalted and not haltActive
+    consec := 0
+wasHalted := haltActive
+riskHaltOk   = not dayHalted and not haltActive and not acctBlown
+
+// VALIDATION MODE collapses contextual gates. P0-2: score is now 0-100, so the
+// validation floor is 50 and the live floor is qMin (default 80).
+minScoreEff = useValMode ? 50 : qMin
+tradeE = useValMode or tradeOk
+htfLE  = useValMode or htfLongOk
+htfSE  = useValMode or htfShortOk
+extLE  = useValMode or extLongOk
+extSE  = useValMode or extShortOk
+adxE   = useValMode or adxOk
+smtLE  = useValMode or smtLongOk
+smtSE  = useValMode or smtShortOk
+coolE  = useValMode or coolOk
+volE   = useValMode or volOk
+judasLE = useValMode or judasLongOk
+judasSE = useValMode or judasShortOk
+
+// signal only when flat (native position size). pyramiding=0 also blocks stacking.
+flatNow = strategy.position_size == 0
+
+swRecLE = useValMode or swRecLong
+swRecSE = useValMode or swRecShort
+spreadLE = useValMode or spreadOkLong
+spreadSE = useValMode or spreadOkShort
+// V3 validation-mode bypass wrappers
+regE   = useValMode or regimeOk
+narrLE = useValMode or narrLongOk
+narrSE = useValMode or narrShortOk
+seqLE  = useValMode or seqLongOk
+seqSE  = useValMode or seqShortOk
+riskE  = useValMode or riskHaltOk
+ofLE   = useValMode or ofLongOk    // V4: order-flow gate (validation-bypassed)
+ofSE   = useValMode or ofShortOk
+// V5 COST INTERLOCK: no orders fire while costs are unacknowledged (unless explicitly
+// disabled or in Validation Mode) -> a zero-cost equity curve can't be produced silently.
+costE  = useValMode or ackCosts or not costBlock
+// AUDIT HIGH-3: HARD-BLOCK silent position mis-size. If the symbol's quote currency is not
+// USD but the Quote->Acct rate is still 1.0 (default / unset), lot sizing is silently wrong
+// on JPY/cross/metal. Previously only a chart WARNING was drawn; now no order fires until the
+// rate is set (or auto-quote resolves a USD quote). Validation Mode bypasses for setup counts.
+quoteMisset = syminfo.currency != "USD" and math.abs(quoteToAcct - 1.0) < 1e-8 and not (useAutoQuote and syminfo.currency == "USD")
+// AUDIT FIX (silent 1-contract mis-size): block entries when pointvalue is na/<=0 (odd
+// instrument) so position sizing can't silently fall back to the 1-contract default and fire.
+sizeOkE     = useValMode or (not quoteMisset and not na(syminfo.pointvalue) and syminfo.pointvalue > 0)
+// V6.2 AUDIT FIX (over-filtering): soft-gate bypass — when useSoftGates, these contextual gates
+// stop HARD-blocking (they are graded into longScore/shortScore via longSoftPen/shortSoftPen).
+// In hard mode (useSoftGates OFF) they revert to full blocking gates. Safety gates are untouched.
+extLE2  = useSoftGates or extLE
+extSE2  = useSoftGates or extSE
+adxE2   = useSoftGates or adxE
+regE2   = useSoftGates or regE
+narrLE2 = useSoftGates or narrLE
+narrSE2 = useSoftGates or narrSE
+// V9 AUDIT FIX (core-thesis integrity): the sweep->MSS->zone SEQUENCE is the literal definition
+// of this strategy ("manipulation precedes entry"). Under soft-gates it became a -8 haircut, so a
+// plain trend-pullback with NO sweep could clear qMin -> the engine silently traded a different,
+// edgeless model. Sequence now stays HARD even in soft-gate mode (context filters ext/adx/regime/
+// narrative remain soft). The redundant useSweepReclaim subset is disabled by default to keep
+// frequency (seqLE already enforces a more-qualified sweep). seqLongOk/seqShortOk also removed
+// from the soft-penalty tally below to avoid double-counting now that they hard-block.
+seqLE2  = seqLE
+seqSE2  = seqSE
+goLongRaw  = costE and sizeOkE and tradeE and htfLE and extLE2 and adxE2 and smtLE and judasLE and swRecLE and spreadLE and regE2 and narrLE2 and seqLE2 and riskE and ofLE and longArmed  and longZone  and longFib  and longTrig  and longScore  >= minScoreEff and longSLok  and coolE and volE and flatNow
+goShortRaw = costE and sizeOkE and tradeE and htfSE and extSE2 and adxE2 and smtSE and judasSE and swRecSE and spreadSE and regE2 and narrSE2 and seqSE2 and riskE and ofSE and shortArmed and shortZone and shortFib and shortTrig and shortScore >= minScoreEff and shortSLok and coolE and volE and flatNow
+// V9 AUDIT FIX (H-3 reversal): the V7 ">=" tie-break forced ties to LONG — a structural long
+// bias. A genuine score tie with BOTH sides raw-valid is equal evidence = range/indecision =
+// a NO-TRADE condition, not a buy. Both sides now strict ">": a tie takes neither (correct).
+// In practice goLongRaw and goShortRaw are rarely simultaneously true (opposite armed dir / zone /
+// fib / HTF), so this only removes the equilibrium longs where edge is zero.
+goLong  = goLongRaw  and (not goShortRaw or longScore  > shortScore)
+goShort = goShortRaw and (not goLongRaw  or shortScore > longScore)
+
+longTP    = close + longRisk  * rr - spreadPrice
+shortTP   = close - shortRisk * rr + spreadPrice
+// V10 AUDIT (#15): fib/liq TP overrides now deduct spread too (was only the R:R path), keeping the
+// cost-honesty design consistent — a long sells into the bid, a short covers at the ask.
+longTP  := useFibExtTP and not na(fibExtTarget) and fibExtTarget > close ? fibExtTarget - spreadPrice : longTP
+shortTP := useFibExtTP and not na(fibExtTarget) and fibExtTarget < close ? fibExtTarget + spreadPrice : shortTP
+longTP  := useLiqTP and not na(liqLongTP)  and liqLongTP  > close + longRisk  ? liqLongTP  - spreadPrice : longTP
+shortTP := useLiqTP and not na(liqShortTP) and liqShortTP < close - shortRisk ? liqShortTP + spreadPrice : shortTP
+longTP  := longRisk  > 0 ? math.min(longTP,  close + longRisk  * maxTPr) : longTP
+shortTP := shortRisk > 0 ? math.max(shortTP, close - shortRisk * maxTPr) : shortTP
+
+// --- V10 PYRAMID / SCALE-IN inputs + state (declared here so reset/engine below can see them) ---
+grpPyr       = "V10 · Pyramid / Scale-In"
+usePyramid   = input.bool(false, "Enable pyramiding / scale-in (adds to winners only)", group=grpPyr, tooltip="OFF = original single-entry behavior (unchanged). ON = stack up to maxAdds extra positions into a trade that is ALREADY at break-even and in profit, so every add is risk-free on the runner. Adds reuse the main entry id, so partials/trail/TP manage the whole stacked size.")
+maxAdds      = input.int(2, "Max adds per trade", minval=1, maxval=6, group=grpPyr)
+pyrTrigR     = input.float(1.0, "First add after open profit (R)", minval=0.1, step=0.1, group=grpPyr, tooltip="Add #1 fires only once the trade is this many R in profit AND the aggregate stop is at break-even or better.")
+pyrStepR     = input.float(1.0, "Extra R of progress between adds", minval=0.1, step=0.1, group=grpPyr)
+pyrRiskModel = input.string("Halve", "Add size model", options=["Halve","Equal","Quarter"], group=grpPyr, tooltip="Halve = 0.5, 0.25, 0.125x the 1R unit (decaying pyramid). Equal = 1x each. Quarter = 0.25x each.")
+pyrTrigType  = input.string("Fresh structure", "Add trigger", options=["Fresh structure","Zone tap"], group=grpPyr, tooltip="Fresh structure = a new BOS / MSS / fast-break in the trade direction. Zone tap = a fresh FVG tap in the trade direction.")
+var int   pyrAdds      = 0
+var float pyrLastAddPx = na
+
+// P0-1 CORRECT FX/INSTRUMENT POSITION SIZE.
+// Old formula divided money by a raw PRICE distance -> ignored contract size and
+// quote->account conversion (wrong on JPY/cross/metal/index). Now:
+//   money risk per 1 contract = SLdistance(price) * pointvalue * quoteToAcct
+//   units = riskMoney / that.
+quoteToAcctEff = (useAutoQuote and syminfo.currency == "USD") ? 1.0 : quoteToAcct
+moneyPerPriceUnit = syminfo.pointvalue * quoteToAcctEff
+riskMoney = riskMoneyEq   // AUDIT-FIX C-4: dedupe — identical to riskMoneyEq (acctEq*riskPerc/100) computed above
+longUnits  = (longRisk  > 0 and moneyPerPriceUnit > 0) ? riskMoney / (longRisk  * moneyPerPriceUnit) : na
+shortUnits = (shortRisk > 0 and moneyPerPriceUnit > 0) ? riskMoney / (shortRisk * moneyPerPriceUnit) : na
+
+// --- NATIVE ENTRIES on a confirmed signal (only when flat) ---
+// process_orders_on_close=true -> the order fills on this confirmed bar's close,
+// matching the indicator's market-on-close, no repaint. Risk-based qty per entry.
+openLong  = goLong  and strategy.position_size == 0 and longRisk  > 0 and barstate.isconfirmed
+openShort = goShort and strategy.position_size == 0 and shortRisk > 0 and barstate.isconfirmed
+if openLong
+    qtyL = (not na(longUnits) and longUnits > 0) ? longUnits : 1.0
+    sizeFallback := na(longUnits) or longUnits <= 0
+    strategy.entry("Long", strategy.long, qty=qtyL)
+    curSL := longSL
+    curTP := longTP
+    initRisk := close - longSL
+    entryBar := bar_index
+    partialDone := false
+    partial2Done := false
+    entryStartNet := strategy.netprofit
+    entryRiskV := riskMoney   // AUDIT-FIX C-3: freeze the $ risk at entry for honest R-multiple stats
+    entryTimeV := time
+    entrySessV := kzLondon ? 1 : kzNY ? 2 : kzAsia ? 3 : 0
+    dayTrades += 1
+    pyrAdds := 0
+    pyrLastAddPx := na
+if openShort
+    qtyS = (not na(shortUnits) and shortUnits > 0) ? shortUnits : 1.0
+    sizeFallback := na(shortUnits) or shortUnits <= 0
+    strategy.entry("Short", strategy.short, qty=qtyS)
+    curSL := shortSL
+    curTP := shortTP
+    initRisk := shortSL - close
+    entryBar := bar_index
+    partialDone := false
+    partial2Done := false
+    entryStartNet := strategy.netprofit
+    entryRiskV := riskMoney   // AUDIT-FIX C-3: freeze the $ risk at entry for honest R-multiple stats
+    entryTimeV := time
+    entrySessV := kzLondon ? 1 : kzNY ? 2 : kzAsia ? 3 : 0
+    dayTrades += 1
+    pyrAdds := 0
+    pyrLastAddPx := na
+
+// =====================================================================
+// V10 — PYRAMID / SCALE-IN ENGINE (opt-in, risk-capped)
+// Adds to a WINNER only. Six guards must all pass: (a) usePyramid ON, (b) aggregate stop already
+// at break-even or better (curSL>=ePx long / <=ePx short) so each add carries ~0 incremental risk
+// on the runner, (c) open profit >= pyrTrigR + pyrAdds*pyrStepR in R, (d) a FRESH same-direction
+// trigger this bar, (e) under maxAdds, (f) session/news (tradeE) + daily-risk (riskE) gates pass.
+// Adds reuse the "Long"/"Short" entry id, so the existing partial/trail/TP/daily-stop logic governs
+// the full stacked size. pyramiding=8 in the header is headroom; usePyramid=false => unchanged.
+// =====================================================================
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+ePx     = strategy.position_avg_price
+pyrFreshL = pyrTrigType == "Fresh structure" ? (newBosBull or mssBull or fastBreakBull) : (inBullFVG and not inBullFVG[1])
+pyrFreshS = pyrTrigType == "Fresh structure" ? (newBosBear or mssBear or fastBreakBear) : (inBearFVG and not inBearFVG[1])
+pyrFrac   = pyrRiskModel == "Equal" ? 1.0 : pyrRiskModel == "Quarter" ? 0.25 : math.pow(0.5, pyrAdds + 1)
+pyrGate   = usePyramid and tradeE and riskE and barstate.isconfirmed and pyrAdds < maxAdds and not na(initRisk) and initRisk > 0
+pyrLongOk  = pyrGate and inLong  and curSL >= ePx and (close - ePx) >= (pyrTrigR + pyrAdds * pyrStepR) * initRisk and pyrFreshL and (na(pyrLastAddPx) or close >= pyrLastAddPx + pyrStepR * initRisk)
+pyrShortOk = pyrGate and inShort and curSL <= ePx and (ePx - close) >= (pyrTrigR + pyrAdds * pyrStepR) * initRisk and pyrFreshS and (na(pyrLastAddPx) or close <= pyrLastAddPx - pyrStepR * initRisk)
+if pyrLongOk
+    addU = (not na(longUnits) and longUnits > 0) ? longUnits * pyrFrac : na
+    if not na(addU) and addU > 0
+        strategy.entry("Long", strategy.long, qty = addU)
+        pyrAdds := pyrAdds + 1
+        pyrLastAddPx := close
+if pyrShortOk
+    addU = (not na(shortUnits) and shortUnits > 0) ? shortUnits * pyrFrac : na
+    if not na(addU) and addU > 0
+        strategy.entry("Short", strategy.short, qty = addU)
+        pyrAdds := pyrAdds + 1
+        pyrLastAddPx := close
+
+// --- EXIT / TRADE MANAGEMENT (native orders, placed/updated each bar) ---
+//   Real partial: TP1 books partialFrac at +partialR; remainder rides to TP with
+//   the stop ratcheted to break-even (and ATR trail if enabled). Time-stop closes
+//   the runner after maxHoldBars. Daily-loss stop flattens immediately.
+if inLong and not na(initRisk) and initRisk > 0
+    tp1L = ePx + partialR * initRisk
+    // V4 FIX-3 (scratch-bleed): ratchet to break-even only AFTER the partial books (when
+    // partials are on). Pre-partial BE killed runners at +0 before TP1 had paid for them.
+    if useBE and (not usePartial or partialDone) and high >= ePx + beTrigR * initRisk
+        curSL := math.max(nz(curSL, ePx), ePx + beOffPips * pip)
+    // V4 FIX-3 (let winners run): once the partial books, trail the runner (auto ATR trail)
+    // so the remainder can ride past fixed TP instead of dying at break-even.
+    // AUDIT FIX: trail from entry ONLY when partials are off. With partials on, the trail must
+    // wait for partialDone — else useTrail=true ran the ATR trail from bar 1 and undid FIX-3
+    // (no break-even/trail before TP1 pays), choking runners at ~+0.
+    if (usePartial and partialDone) or (useTrail and not usePartial)
+        trailMultL = (usePartial and partialDone) ? runnerTrailMult : atrMult
+        atrTrailL  = close - atr * trailMultL
+        // V6: post-partial, ratchet to last swing low (structure invalidation) when tighter.
+        structTrailL = (useStructTrail and usePartial and partialDone and not na(lastPL)) ? lastPL - bufferPips * pip : na
+        newSLL = (not na(structTrailL) and structTrailL < close and structTrailL > atrTrailL) ? structTrailL : atrTrailL
+        curSL := math.max(nz(curSL, newSLL), newSLL)
+    // AUDIT-FIX (Exit Quality): once TP2 has booked, hard-lock the runner stop to at least
+    // break-even (+offset), independent of useBE. A position that already banked TP1+TP2 can
+    // then never reverse into a net loss; the trail still ratchets ABOVE BE in a strong leg.
+    if usePartial and useTP2 and partial2Done
+        curSL := math.max(nz(curSL, ePx + beOffPips * pip), ePx + beOffPips * pip)
+    // AUDIT MEDIUM-4: while the partial is pending, the remainder is protected by a STOP-ONLY
+    // order (no full-size curTP yet) so TP1 actually books before the runner targets full TP.
+    // Old code placed a full-size limit=curTP every bar -> a gap past TP1 closed 100% at curTP
+    // and silently skipped the scale-out. After TP1 books (or with partials off) one exit with
+    // stop+limit manages the remainder.
+    tp2L = ePx + tp2R * initRisk
+    // V6.2 AUDIT FIX (fill optimism): if one bar straddles BOTH the TP and the stop, the
+    // intrabar order is unknowable — assume the STOP filled first (worst case) and place a
+    // stop-only exit so no favorable TP is booked on an ambiguous bar.
+    // V9 AUDIT FIX (consv-fill arbitration): the straddle test must use the stop that was RESTING
+    // during this bar (curSL[1]), not the value just ratcheted up by BE/trail earlier THIS bar.
+    // Arbitrating against the freshly-raised curSL scratched winners (BE raised same-bar) and
+    // phantom-cancelled valid TPs (trail raised above the live stop). curSL still drives the
+    // actual resting order for next bar; slLive only decides this bar's ambiguous fill.
+    slLive = nz(curSL[1], curSL)
+    ambigTp1L = useConsvFill and high >= tp1L and low <= slLive
+    ambigTp2L = useConsvFill and high >= tp2L and low <= slLive
+    // V9 AUDIT FIX (phantom partial): latch partialDone/partial2Done on a REAL position-size
+    // reduction (the fill actually happened), not on bar geometry (high>=tp1L). Geometry-latching
+    // armed BE/trail and the TP2 leg as if 50% had booked even when the limit never filled (gap,
+    // exact-touch, or stop-first) -> up to ~0.75R of phantom booked profit per affected trade and
+    // an over-scaled TP2 (partial2Frac of full instead of remainder). booked = size shrank but
+    // still long.
+    bookedL = strategy.position_size > 0 and strategy.position_size < nz(strategy.position_size[1], strategy.position_size)
+    if usePartial and not partialDone
+        if ambigTp1L
+            strategy.cancel("L-tp1")                       // drop any stale favorable limit from a prior bar
+            strategy.exit("L-stop", "Long", stop = slLive) // V10 AUDIT (#7): book the worst-case fill at the stop RESTING this bar, not the same-bar BE-ratcheted curSL
+        else
+            strategy.exit("L-tp1",  "Long", qty_percent = partialFrac * 100, limit = tp1L, stop = curSL)
+            strategy.exit("L-stop", "Long", stop = curSL)
+        if bookedL
+            partialDone := true
+    else if usePartial and useTP2 and not partial2Done and strategy.position_size != 0
+        strategy.cancel("L-stop")   // V10 AUDIT (R1): cancel the pre-TP1 full-size stop so the trailed L-stop2 (not a stale level) governs the runner
+        // V6: TP2 books a fraction of the post-TP1 remainder at +tp2R; runner stop is the trailed curSL.
+        if ambigTp2L
+            strategy.cancel("L-tp2")
+            strategy.exit("L-stop2", "Long", stop = slLive)
+        else
+            strategy.exit("L-tp2",   "Long", qty_percent = partial2Frac * 100, limit = tp2L, stop = curSL)
+            strategy.exit("L-stop2", "Long", stop = curSL)
+        if bookedL
+            partial2Done := true
+    else
+        strategy.cancel("L-stop")    // V10 AUDIT (R1): clear stale phase stops; "L-exit" governs the runner
+        strategy.cancel("L-stop2")
+        // AUDIT V7 (MN-1): apply the same conservative-fill guard to the RUNNER's final target.
+        // A bar straddling both curTP and curSL is the highest-variance exit (often a news/gap
+        // bar); TV's default OCO books the favorable limit. Assume the stop filled first.
+        if useConsvFill and high >= curTP and low <= slLive
+            strategy.exit("L-exit", "Long", stop = curSL)
+        else
+            strategy.exit("L-exit", "Long", stop = curSL, limit = curTP)
+    if useMaxHold and not na(entryBar) and (bar_index - entryBar) >= maxHoldBars
+        strategy.close("Long", comment = "time")
+if inShort and not na(initRisk) and initRisk > 0
+    tp1S = ePx - partialR * initRisk
+    // V4 FIX-3 (scratch-bleed): break-even only AFTER the partial books.
+    if useBE and (not usePartial or partialDone) and low <= ePx - beTrigR * initRisk
+        curSL := math.min(nz(curSL, ePx), ePx - beOffPips * pip)
+    // V4 FIX-3 (let winners run): trail the runner once the partial books.
+    // AUDIT FIX: mirror of long side — trail from entry only when partials are off.
+    if (usePartial and partialDone) or (useTrail and not usePartial)
+        trailMultS = (usePartial and partialDone) ? runnerTrailMult : atrMult
+        atrTrailS  = close + atr * trailMultS
+        // V6: post-partial, ratchet to last swing high (structure invalidation) when tighter.
+        structTrailS = (useStructTrail and usePartial and partialDone and not na(lastPH)) ? lastPH + bufferPips * pip : na
+        newSLS = (not na(structTrailS) and structTrailS > close and structTrailS < atrTrailS) ? structTrailS : atrTrailS
+        curSL := math.min(nz(curSL, newSLS), newSLS)
+    // AUDIT-FIX (Exit Quality): mirror of long side — after TP2 books, hard-lock the runner stop
+    // to break-even (-offset) so a banked TP1+TP2 short can't reverse into a net loss.
+    if usePartial and useTP2 and partial2Done
+        curSL := math.min(nz(curSL, ePx - beOffPips * pip), ePx - beOffPips * pip)
+    // AUDIT MEDIUM-4: stop-only protection on the remainder while TP1 is pending (see long side).
+    tp2S = ePx - tp2R * initRisk
+    // V6.2 AUDIT FIX (fill optimism): mirror of long side — stop wins an ambiguous straddle bar.
+    // V9 AUDIT FIX (mirror long): arbitrate against the stop live during the bar (curSL[1]); latch
+    // partials on a REAL position-size reduction, not bar geometry (low<=tp1S).
+    slLiveS = nz(curSL[1], curSL)
+    ambigTp1S = useConsvFill and low <= tp1S and high >= slLiveS
+    ambigTp2S = useConsvFill and low <= tp2S and high >= slLiveS
+    bookedS = strategy.position_size < 0 and strategy.position_size > nz(strategy.position_size[1], strategy.position_size)
+    if usePartial and not partialDone
+        if ambigTp1S
+            strategy.cancel("S-tp1")                       // drop any stale favorable limit from a prior bar
+            strategy.exit("S-stop", "Short", stop = slLiveS) // V10 AUDIT (#7): worst-case fill at the stop RESTING this bar, not same-bar BE-ratcheted curSL
+        else
+            strategy.exit("S-tp1",  "Short", qty_percent = partialFrac * 100, limit = tp1S, stop = curSL)
+            strategy.exit("S-stop", "Short", stop = curSL)
+        if bookedS
+            partialDone := true
+    else if usePartial and useTP2 and not partial2Done and strategy.position_size != 0
+        strategy.cancel("S-stop")   // V10 AUDIT (R1): cancel the pre-TP1 full-size stop so the trailed S-stop2 governs the runner
+        // V6: TP2 books a fraction of the post-TP1 remainder at +tp2R; runner stop is the trailed curSL.
+        if ambigTp2S
+            strategy.cancel("S-tp2")
+            strategy.exit("S-stop2", "Short", stop = slLiveS)
+        else
+            strategy.exit("S-tp2",   "Short", qty_percent = partial2Frac * 100, limit = tp2S, stop = curSL)
+            strategy.exit("S-stop2", "Short", stop = curSL)
+        if bookedS
+            partial2Done := true
+    else
+        strategy.cancel("S-stop")    // V10 AUDIT (R1): clear stale phase stops; "S-exit" governs the runner
+        strategy.cancel("S-stop2")
+        // AUDIT V7 (MN-1): mirror of long side — stop wins the ambiguous straddle bar on the runner.
+        if useConsvFill and low <= curTP and high >= slLiveS
+            strategy.exit("S-exit", "Short", stop = curSL)
+        else
+            strategy.exit("S-exit", "Short", stop = curSL, limit = curTP)
+    if useMaxHold and not na(entryBar) and (bar_index - entryBar) >= maxHoldBars
+        strategy.close("Short", comment = "time")
+// daily-loss hard stop: flatten now (further entries blocked via riskHaltOk)
+if useDailyStop and dayLossMoney <= -dailyStopR * nz(dayRiskMoney, riskMoneyEq) and strategy.position_size != 0
+    strategy.close_all(comment = "daily stop")
+// V9 AUDIT FIX (overall max-DD prop guard): flatten immediately on a peak-equity DD breach; the
+// acctBlown latch (set above) then blocks all further entries for the remainder of the run.
+if maxDDhit and strategy.position_size != 0
+    strategy.close_all(comment = "max DD")
+
+// Stage 10 #2: per-ENTRY win classification — when the position returns flat, score the
+// whole entry (partial + runner) by its total realized P&L as ONE win or loss.
+if strategy.position_size == 0 and strategy.position_size[1] != 0 and not na(entryStartNet)
+    entryNet = strategy.netprofit - entryStartNet
+    posEntries += 1
+    // AUDIT-FIX C-3: accumulate R-multiple moments (against entry-time $ risk) for Sharpe/Sortino.
+    if not na(entryRiskV) and entryRiskV > 0
+        eR = entryNet / entryRiskV
+        nR   += 1
+        sumR += eR
+        sumR2 += eR * eR
+        if eR < 0
+            sumNegR2 += eR * eR
+    // AUDIT HIGH-2: per-ENTRY consec-loss / halt / cooldown (one full position = one result).
+    // A TP1 partial no longer resets the streak; the halt now engages on real losing entries.
+    if entryNet > 0
+        posWins += 1
+        consec := 0
+    else
+        consec += 1
+        maxConsec := math.max(maxConsec, consec)
+        lastLossBar := bar_index
+        if useConsecHalt and consec >= consecMax
+            haltUntil := time + int(coolHours * 3600 * 1000)
+    // V4 walk-forward: bucket this entry into IS (entered before OOS start) or OOS.
+    if useWF and not na(entryTimeV)
+        if entryTimeV < oosStart
+            isEntries += 1
+            isNet     += entryNet
+            if entryNet > 0
+                isWins += 1
+        else
+            oosEntries += 1
+            oosNet     += entryNet
+            if entryNet > 0
+                oosWins += 1
+    // V4 per-killzone bucket
+    if entrySessV == 1
+        lnE += 1
+        lnN += entryNet
+        if entryNet > 0
+            lnW += 1
+    else if entrySessV == 2
+        nyE += 1
+        nyN += entryNet
+        if entryNet > 0
+            nyW += 1
+    else if entrySessV == 3
+        asE += 1
+        asN += entryNet
+        if entryNet > 0
+            asW += 1
+    entryStartNet := na
+    entryRiskV := na
+    entryTimeV := na
+    entrySessV := na
+
+// ---------------------------------------------------------------------
+// VISUALS — signals, SL/TP, armed tint
+// ---------------------------------------------------------------------
+winClose  = newClosed and lastTradeProfit > 0
+lossClose = newClosed and lastTradeProfit <= 0
+plotshape(openLong,  title="BUY",  style=shape.labelup,   location=location.belowbar, color=colBull, textcolor=color.white, text="BUY",  size=size.small)
+plotshape(openShort, title="SELL", style=shape.labeldown, location=location.abovebar, color=colBear, textcolor=color.white, text="SELL", size=size.small)
+plotshape(winClose,  title="WIN",  style=shape.circle, location=location.abovebar, color=color.new(colBull,0), size=size.tiny)
+plotshape(lossClose, title="LOSS", style=shape.circle, location=location.belowbar, color=color.new(colBear,0), size=size.tiny)
+
+plot(strategy.position_size != 0 ? strategy.position_avg_price : na, "Entry", color=colAvg,  style=plot.style_linebr, linewidth=2)
+plot(strategy.position_size != 0 ? curSL : na, "SL",    color=colBear, style=plot.style_linebr, linewidth=1)
+plot(strategy.position_size != 0 ? curTP : na, "TP",    color=colBull, style=plot.style_linebr, linewidth=1)
+
+bgcolor(longArmed  and strategy.position_size == 0 ? color.new(color.green, 92) : na, title="Long armed")
+bgcolor(shortArmed and strategy.position_size == 0 ? color.new(color.red,   92) : na, title="Short armed")
+
+// ---------------------------------------------------------------------
+// DASHBOARD
+// ---------------------------------------------------------------------
+maxScore = 100   // P0-2: quality engine is 0-100
+
+cGold = colGold
+cBg   = colPanel
+cHdr  = color.new(colGold, 65)
+cBull = colBull
+cBear = colBear
+cOff  = color.rgb(110, 118, 132)
+cTx   = colText
+
+szDash = dashSize == "Tiny" ? size.tiny : dashSize == "Small" ? size.small : dashSize == "Large" ? size.large : size.normal
+dashPosition = dashPos == "Top Left" ? position.top_left : dashPos == "Bottom Right" ? position.bottom_right : dashPos == "Bottom Left" ? position.bottom_left : dashPos == "Middle Right" ? position.middle_right : position.top_right
+
+trTxt(t) => t == 1 ? "BULL" : t == -1 ? "BEAR" : "FLAT"
+trCol(t) => t == 1 ? cBull : t == -1 ? cBear : cOff
+
+sessName = kzLondon ? "London" : kzNY ? "New York" : kzAsia ? "Asia" : "-"
+kzTxt    = not anyKZ ? "Off" : inKZ ? sessName + " KZ" : "Closed"
+pdTxt    = inPremium ? "Premium" : inDiscount ? "Discount" : "Equil"
+pdCol    = inPremium ? cBear : inDiscount ? cBull : cOff
+sigTxt   = goLong ? "LONG READY" : goShort ? "SHORT READY" : longArmed ? "Long armed" : shortArmed ? "Short armed" : "Awaiting"
+sigCol   = goLong ? cBull : goShort ? cBear : (longArmed or shortArmed) ? cGold : cOff
+posTxt   = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+posCol   = strategy.position_size > 0 ? cBull : strategy.position_size < 0 ? cBear : cOff
+
+var table dash = table.new(dashPosition, 3, 15, border_width=1, frame_color=color.new(color.black,40), frame_width=2, border_color=color.new(color.black,60))
+if barstate.islast
+    table.cell(dash, 0, 0, "SMC SNIPER", text_color=color.black, bgcolor=cGold, text_size=size.normal, text_halign=text.align_left)
+    table.cell(dash, 1, 0, "",          text_color=color.black, bgcolor=cGold)
+    table.cell(dash, 2, 0, useValMode ? "IND VAL" : "IND", text_color=color.black, bgcolor=cGold, text_size=szDash)
+    table.cell(dash, 0, 1, "TIMEFRAME", text_color=cTx, bgcolor=cHdr, text_size=szDash)
+    table.cell(dash, 1, 1, "PERIOD",    text_color=cTx, bgcolor=cHdr, text_size=szDash)
+    table.cell(dash, 2, 1, "TREND",     text_color=cTx, bgcolor=cHdr, text_size=szDash)
+    table.cell(dash, 0, 2, "Current", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(dash, 1, 2, timeframe.period, text_color=cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 2, 2, trTxt(curTrend), text_color=color.white, bgcolor=trCol(curTrend), text_size=szDash)
+    table.cell(dash, 0, 3, "HTF #1", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(dash, 1, 3, htf1TF,  text_color=cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 2, 3, trTxt(htf1Bias), text_color=color.white, bgcolor=trCol(htf1Bias), text_size=szDash)
+    table.cell(dash, 0, 4, "HTF #2", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(dash, 1, 4, htf2TF,  text_color=cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 2, 4, trTxt(htf2Bias), text_color=color.white, bgcolor=trCol(htf2Bias), text_size=szDash)
+    table.cell(dash, 0, 5, "HTF #3", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(dash, 1, 5, htf3TF,  text_color=cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 2, 5, trTxt(htf3Bias), text_color=color.white, bgcolor=trCol(htf3Bias), text_size=szDash)
+    table.cell(dash, 0, 6, "MTF BIAS", text_color=cGold, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(dash, 1, 6, mtfBias==1?"up":mtfBias==-1?"dn":"-", text_color=cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 2, 6, mtfBias==1?"BULL":mtfBias==-1?"BEAR":"MIXED", text_color=color.white, bgcolor=mtfBias==1?cBull:mtfBias==-1?cBear:cOff, text_size=szDash)
+    table.cell(dash, 0, 7, "SESSION", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(dash, 1, 7, "Now", text_color=cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 2, 7, sessName, text_color=cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 0, 8, "KILL ZONE", text_color=cGold, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(dash, 1, 8, "Status", text_color=cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 2, 8, kzTxt, text_color=inKZ and anyKZ?cBull:cOff, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 0, 9, "PD Zone", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(dash, 1, 9, "Price", text_color=cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 2, 9, pdTxt, text_color=pdCol, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 0, 10, "CONFLUENCE", text_color=cGold, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(dash, 1, 10, "/"+str.tostring(maxScore), text_color=cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 2, 10, "L"+str.tostring(longScore,"0")+"  S"+str.tostring(shortScore,"0"), text_color=cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 0, 11, "POSITION", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(dash, 1, 11, "Status", text_color=cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 2, 11, posTxt, text_color=posCol, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 0, 12, "Signal", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(dash, 1, 12, tradeOk and adxOk?"Ready":"Wait", text_color=tradeOk and adxOk?cBull:cOff, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 2, 12, sigTxt, text_color=sigCol, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 0, 13, "GUARDS", text_color=cGold, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(dash, 1, 13, str.tostring(dayTrades) + (maxTrades>0?"/"+str.tostring(maxTrades):""), text_color=cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 2, 13, na(lastLossBar) or (bar_index-lastLossBar)>coolBars ? "OK" : "Cooldown", text_color=cTx, bgcolor=cBg, text_size=szDash)
+    // SNIPER readiness row: surfaces the two SILENT no-trade conditions (unacknowledged costs,
+    // mis-set Quote->Acct rate) + the 1-contract mis-size flag, so a "no shorts firing" state is
+    // never a mystery. ARMED (green) only when orders can actually execute risk-%-sized.
+    costsBlockedNow = costBlock and not ackCosts and not useValMode
+    readyTxt = costsBlockedNow ? "SET COSTS" : quoteMisset ? "SET QT RATE" : sizeFallback ? "MIS-SIZE" : "ARMED"
+    readyCol = (costsBlockedNow or quoteMisset or sizeFallback) ? cBear : cBull
+    table.cell(dash, 0, 14, "READY?", text_color=cGold, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(dash, 1, 14, costsBlockedNow ? "Costs" : quoteMisset ? "Quote" : sizeFallback ? "Size" : "Live", text_color=cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(dash, 2, 14, readyTxt, text_color=color.white, bgcolor=readyCol, text_size=szDash)
+
+// ---------------------------------------------------------------------
+// STRATEGY STATS (native equity engine — real PF / DD / expectancy)
+//   Full equity curve, walk-forward (date range) and deep backtest live in
+//   the TradingView Strategy Tester. This panel mirrors the headline metrics
+//   and adds an analytic Risk-of-Ruin proxy (Pine has no RNG -> no true MC;
+//   export the trade list for a Python Monte Carlo).
+// ---------------------------------------------------------------------
+// V4 per-killzone cell formatter (top-level: Pine forbids function decls in local scope)
+f_kzCell(_e, _w, _n, _rm) => _e > 0 and _rm > 0 ? str.tostring(_w/_e*100.0,"0")+"%  "+str.tostring((_n/_e)/_rm,"0.00")+"R ("+str.tostring(_e)+")" : "-"
+var table stats = table.new(position.bottom_left, 2, 20, border_width=1, frame_color=color.new(color.black,40), frame_width=2, border_color=color.new(color.black,60))
+if barstate.islast
+    ct       = strategy.closedtrades
+    // AUDIT HIGH-2: headline Win rate / Expectancy / RoR now use PER-ENTRY accounting
+    // (posWins/posEntries), NOT per-exit strategy.wintrades/closedtrades — the latter counted
+    // each TP1 partial as its own easy win and inflated the rate. PF / netR / drawdown stay
+    // money-based (already honest). ct is still shown as the raw exit count label.
+    winPct   = posEntries > 0 ? posWins / posEntries * 100.0 : 0.0
+    pf       = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
+    netR     = riskMoneyEq > 0 ? strategy.netprofit / riskMoneyEq : na          // net profit in R units
+    expMoney = posEntries > 0 ? strategy.netprofit / posEntries : na            // per full entry
+    expR     = (posEntries > 0 and riskMoneyEq > 0) ? expMoney / riskMoneyEq : na
+    ddR      = riskMoneyEq > 0 ? strategy.max_drawdown / riskMoneyEq : na
+    ddPct    = strategy.initial_capital > 0 ? strategy.max_drawdown / strategy.initial_capital * 100 : na
+    avgWin   = strategy.wintrades  > 0 ? strategy.grossprofit / strategy.wintrades  : 0.0
+    avgLoss  = strategy.losstrades > 0 ? strategy.grossloss  / strategy.losstrades : 0.0
+    payoff   = avgLoss > 0 ? avgWin / avgLoss : na
+    // RoR proxy (analytic, NOT Monte Carlo). Gambler's-ruin style on net expectancy.
+    Wp        = winPct / 100.0
+    ruinUnits = 100.0 / math.max(riskPerc, 0.1)
+    rorRaw    = (na(expR) or expR <= 0) ? 100.0 : 100.0 * math.pow(math.min(0.999, (1.0 - Wp) / math.max(Wp, 0.01)), math.max(1.0, ruinUnits / 10.0))
+    ror       = math.min(100.0, math.max(0.0, rorRaw))
+    table.cell(stats, 0, 0, "STRATEGY STATS", text_color=color.black, bgcolor=cGold, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 0, str.tostring(posEntries) + " entries / " + str.tostring(ct) + " exits", text_color=color.black, bgcolor=cGold, text_size=szDash)
+    table.cell(stats, 0, 1, "Win rate (per entry)", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 1, str.tostring(winPct, "0.0") + "%", text_color=winPct>=50?cBull:cBear, bgcolor=cBg, text_size=szDash)
+    table.cell(stats, 0, 2, "Profit factor", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 2, na(pf)?"-":str.tostring(pf, "0.00"), text_color=na(pf)?cOff:pf>=1.5?cBull:pf>=1.0?cGold:cBear, bgcolor=cBg, text_size=szDash)
+    table.cell(stats, 0, 3, "Net profit (R / $)", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 3, (na(netR)?"-":str.tostring(netR,"0.0")+"R")+" / "+str.tostring(strategy.netprofit,"0"), text_color=strategy.netprofit>=0?cBull:cBear, bgcolor=cBg, text_size=szDash)
+    table.cell(stats, 0, 4, "Expectancy/trade", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 4, na(expR)?"-":str.tostring(expR, "0.00")+"R", text_color=na(expR)?cOff:expR>=0?cBull:cBear, bgcolor=cBg, text_size=szDash)
+    table.cell(stats, 0, 5, "Payoff (avgW/avgL)", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 5, na(payoff)?"-":str.tostring(payoff,"0.00"), text_color=cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(stats, 0, 6, "Max drawdown", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 6, (na(ddR)?"-":str.tostring(ddR,"0.0")+"R")+(na(ddPct)?"":" / "+str.tostring(ddPct,"0.0")+"%"), text_color=(not na(ddPct) and ddPct>=20)?cBear:cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(stats, 0, 7, "Max consec loss", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 7, str.tostring(maxConsec), text_color=maxConsec>=5?cBear:cTx, bgcolor=cBg, text_size=szDash)
+    table.cell(stats, 0, 8, "Risk of ruin ~ (proxy)", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 8, str.tostring(ror,"0.0")+"%", text_color=ror<=5?cBull:ror<=20?cGold:cBear, bgcolor=cBg, text_size=szDash)
+    table.cell(stats, 0, 9, "Open PnL (R)", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 9, riskMoneyEq>0?str.tostring(strategy.openprofit/riskMoneyEq,"0.0")+"R":"-", text_color=strategy.openprofit>=0?cBull:cBear, bgcolor=cBg, text_size=szDash)
+    // AUDIT-FIX (Code Quality): row 10 was a DUPLICATE "Win rate (per entry)" (already row 1).
+    // Repurposed to surface expMoney (computed above, previously never displayed) = avg realized
+    // $ per full entry — a non-redundant complement to the R-based expectancy on row 4.
+    table.cell(stats, 0, 10, "Avg $ / entry", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 10, na(expMoney)?"-":str.tostring(expMoney,"0.0"), text_color=na(expMoney)?cOff:expMoney>=0?cBull:cBear, bgcolor=cBg, text_size=szDash)
+    // V4 WALK-FORWARD: IS vs OOS expectancy. A large OOS drop vs IS = overfit edge.
+    isWinPct  = isEntries  > 0 ? isWins  / isEntries  * 100.0 : 0.0
+    oosWinPct = oosEntries > 0 ? oosWins / oosEntries * 100.0 : 0.0
+    isExpR    = (isEntries  > 0 and riskMoneyEq > 0) ? (isNet  / isEntries)  / riskMoneyEq : na
+    oosExpR   = (oosEntries > 0 and riskMoneyEq > 0) ? (oosNet / oosEntries) / riskMoneyEq : na
+    table.cell(stats, 0, 11, "IS  win / exp",  text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 11, not useWF ? "WF off" : isEntries>0  ? str.tostring(isWinPct,"0")+"%  "+(na(isExpR)?"-":str.tostring(isExpR,"0.00")+"R")+" ("+str.tostring(isEntries)+")"   : "-", text_color=not useWF?cOff:na(isExpR)?cOff:isExpR>=0?cBull:cBear, bgcolor=cBg, text_size=szDash)
+    table.cell(stats, 0, 12, "OOS win / exp", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 12, not useWF ? "WF off" : oosEntries>0 ? str.tostring(oosWinPct,"0")+"%  "+(na(oosExpR)?"-":str.tostring(oosExpR,"0.00")+"R")+" ("+str.tostring(oosEntries)+")" : "-", text_color=not useWF?cOff:na(oosExpR)?cOff:oosExpR>=0?cBull:cBear, bgcolor=cBg, text_size=szDash)
+    // V4 overfit verdict: OOS expectancy holding >= 60% of IS = robust; < 0 = overfit.
+    // AUDIT FIX: when IS expectancy is <= 0, the `oosExpR >= isExpR*0.6` test compares against a
+    // negative threshold and falsely labels a lucky positive OOS as ROBUST. Flag the abnormal
+    // IS-negative state first so the verdict can't claim robustness off a broken baseline.
+    wfVerdict = (not useWF or na(isExpR) or na(oosExpR)) ? "-" : isExpR <= 0 ? "IS NEG" : oosExpR < 0 ? "OVERFIT" : oosExpR >= isExpR*0.6 ? "ROBUST" : "DEGRADED"
+    table.cell(stats, 0, 13, "WF verdict", text_color=cGold, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 13, wfVerdict, text_color=wfVerdict=="ROBUST"?cBull:wfVerdict=="OVERFIT"?cBear:wfVerdict=="DEGRADED"?cGold:cOff, bgcolor=cBg, text_size=szDash)
+    // V4 per-killzone expectancy — which session actually pays (per-entry, R units)
+    lnExpR = (lnE>0 and riskMoneyEq>0) ? (lnN/lnE)/riskMoneyEq : na
+    nyExpR = (nyE>0 and riskMoneyEq>0) ? (nyN/nyE)/riskMoneyEq : na
+    asExpR = (asE>0 and riskMoneyEq>0) ? (asN/asE)/riskMoneyEq : na
+    table.cell(stats, 0, 14, "London  w/exp", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 14, f_kzCell(lnE, lnW, lnN, riskMoneyEq), text_color=na(lnExpR)?cOff:lnExpR>=0?cBull:cBear, bgcolor=cBg, text_size=szDash)
+    table.cell(stats, 0, 15, "New York w/exp", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 15, f_kzCell(nyE, nyW, nyN, riskMoneyEq), text_color=na(nyExpR)?cOff:nyExpR>=0?cBull:cBear, bgcolor=cBg, text_size=szDash)
+    table.cell(stats, 0, 16, "Asia   w/exp", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 16, f_kzCell(asE, asW, asN, riskMoneyEq), text_color=na(asExpR)?cOff:asExpR>=0?cBull:cBear, bgcolor=cBg, text_size=szDash)
+    // AUDIT-FIX C-3: risk-adjusted per-TRADE stats (Sharpe / Sortino / Recovery), honest per-entry R.
+    //   meanR  = sumR/nR ; varR = E[R^2]-mean^2 ; Sharpe = meanR/stdR (per-trade, NOT annualized).
+    //   Sortino uses downside deviation only (sqrt(sumNegR2/nR)). Recovery = netProfit / maxDrawdown.
+    meanR    = nR > 0 ? sumR / nR : na
+    varR     = nR > 1 ? math.max(0.0, sumR2 / nR - meanR * meanR) : na
+    stdR     = na(varR) ? na : math.sqrt(varR)
+    sharpeT  = (not na(stdR) and stdR > 0) ? meanR / stdR : na
+    downDev  = nR > 0 ? math.sqrt(sumNegR2 / nR) : na
+    sortinoT = (not na(downDev) and downDev > 0) ? meanR / downDev : na
+    recovery = strategy.max_drawdown > 0 ? strategy.netprofit / strategy.max_drawdown : na
+    table.cell(stats, 0, 17, "Sharpe (per-trade)", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 17, na(sharpeT)?"-":str.tostring(sharpeT,"0.00"), text_color=na(sharpeT)?cOff:sharpeT>=1.0?cBull:sharpeT>=0?cGold:cBear, bgcolor=cBg, text_size=szDash)
+    table.cell(stats, 0, 18, "Sortino (per-trade)", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 18, na(sortinoT)?"-":str.tostring(sortinoT,"0.00"), text_color=na(sortinoT)?cOff:sortinoT>=1.5?cBull:sortinoT>=0?cGold:cBear, bgcolor=cBg, text_size=szDash)
+    table.cell(stats, 0, 19, "Recovery factor", text_color=cTx, bgcolor=cBg, text_size=szDash, text_halign=text.align_left)
+    table.cell(stats, 1, 19, na(recovery)?"-":str.tostring(recovery,"0.00"), text_color=na(recovery)?cOff:recovery>=2.0?cBull:recovery>=1.0?cGold:cBear, bgcolor=cBg, text_size=szDash)
+
+// Stage 10 #7: position-size mis-set guard. If the symbol's quote currency is not USD
+// but the Quote->Acct rate is still 1.0, lot sizing is silently wrong on JPY/cross/metal.
+var label qWarnLbl = na
+if barstate.islast and useQuoteWarn and syminfo.currency != "USD" and math.abs(quoteToAcct - 1.0) < 1e-8
+    label.delete(qWarnLbl)
+    qWarnLbl := label.new(bar_index, high, "WARNING: quote ccy " + syminfo.currency + " != USD but Quote->Acct rate = 1.0 -> position size likely WRONG. Set the rate in the Risk inputs.", style=label.style_label_down, color=color.new(color.red,0), textcolor=color.white, size=size.normal)
+
+// V6 AUDIT-FIX (Institutional readiness): silent mis-size guard. If a live entry fell back to a
+// 1-contract default (risk-based units were na/<=0, e.g. pointvalue/quote rate unresolved), the
+// position was NOT risk-sized -> flag it instead of letting a wrong size pass unnoticed.
+var label sizeWarnLbl = na
+if barstate.islast and sizeFallback
+    label.delete(sizeWarnLbl)
+    sizeWarnLbl := label.new(bar_index, low, "WARNING: a trade used the 1-contract FALLBACK size (risk-based units could not be computed -> check syminfo.pointvalue / Quote->Acct rate). Position was NOT risk-%-sized.", style=label.style_label_up, color=color.new(color.red,0), textcolor=color.white, size=size.normal)
+
+// V4 COST-HONESTY GUARD: a zero-cost backtest is fiction. The engine cannot read the
+// broker's spread/commission, so it refuses to let an equity curve be trusted silently.
+var label costWarnLbl = na
+if barstate.islast and not ackCosts
+    label.delete(costWarnLbl)
+    costWarnLbl := label.new(bar_index, low, "COSTS NOT CONFIRMED: set realistic Commission + Slippage in Strategy Properties, then tick 'I have set...' in the V4 Cost group. Until then this equity curve is OPTIMISTIC and must NOT be trusted.", style=label.style_label_up, color=color.new(color.orange,0), textcolor=color.black, size=size.normal)
+
+// ---------------------------------------------------------------------
+// ALERTS — alertcondition (static) + alert() (dynamic, webhook-ready)
+// ---------------------------------------------------------------------
+alertcondition(openLong,  "Sniper LONG",  "SMC long signal")
+alertcondition(openShort, "Sniper SHORT", "SMC short signal")
+alertcondition(newClosed, "Sniper EXIT",  "SMC position closed")
+
+if openLong
+    alert("SNIPER BUY " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + "  SL " + str.tostring(longSL, format.mintick) + "  TP " + str.tostring(longTP, format.mintick) + "  Q " + str.tostring(longScore, "0") + "/100  units " + str.tostring(longUnits, "0.##"), alert.freq_once_per_bar_close)
+if openShort
+    alert("SNIPER SELL " + syminfo.ticker + " @ " + str.tostring(close, format.mintick) + "  SL " + str.tostring(shortSL, format.mintick) + "  TP " + str.tostring(shortTP, format.mintick) + "  Q " + str.tostring(shortScore, "0") + "/100  units " + str.tostring(shortUnits, "0.##"), alert.freq_once_per_bar_close)
+if newClosed
+    alert("SNIPER EXIT " + syminfo.ticker + (lastTradeProfit >= 0 ? "  WIN " : "  LOSS ") + str.tostring(lastTradeProfit, "0.##"), alert.freq_once_per_bar_close)
