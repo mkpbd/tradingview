@@ -1,0 +1,1532 @@
+//@version=6
+indicator(title="Elite Institutional SMC + ICT + Harmonic Indicator",
+     shorttitle="ELITE-SMC-ICT",
+     overlay=true,
+     max_bars_back=500,
+     max_lines_count=500,
+     max_labels_count=500,
+     max_boxes_count=500)
+
+// ============================================================
+// SECTION 1: INPUT GROUPS & SETTINGS
+// ============================================================
+
+var string GRP_STRUCT = "📊 Market Structure"
+inp_showBOS     = input.bool(true,  "Show BOS / CHoCH",           group=GRP_STRUCT)
+inp_showHHHL    = input.bool(true,  "Show HH / HL / LH / LL",     group=GRP_STRUCT)
+inp_structLen   = input.int(10,     "Structure Lookback Length",   group=GRP_STRUCT,
+     minval=5, maxval=50)
+inp_bosColor    = input.color(color.new(#00E5FF, 0), "BOS Color",  group=GRP_STRUCT)
+inp_chochColor  = input.color(color.new(#FF6B6B, 0), "CHoCH Color",group=GRP_STRUCT)
+
+var string GRP_LIQ = "💧 Liquidity"
+inp_showEQHL    = input.bool(true,  "Show Equal Highs/Lows",       group=GRP_LIQ)
+inp_showLiqSweep= input.bool(true,  "Show Liquidity Sweeps",       group=GRP_LIQ)
+inp_eqThresh    = input.float(0.05, "EQH/EQL Threshold %",
+     group=GRP_LIQ, minval=0.01, maxval=0.5, step=0.01)
+inp_eqLen       = input.int(10,     "EQH/EQL Lookback",
+     group=GRP_LIQ, minval=3, maxval=30)
+
+var string GRP_OB = "🧱 Order Blocks"
+inp_showOB      = input.bool(true,  "Show Order Blocks",           group=GRP_OB)
+inp_showBB      = input.bool(true,  "Show Breaker Blocks",         group=GRP_OB)
+inp_obLen       = input.int(10,     "OB Lookback Length",
+     group=GRP_OB, minval=3, maxval=30)
+inp_obBullColor = input.color(color.new(#00E676, 85), "Bull OB",   group=GRP_OB)
+inp_obBearColor = input.color(color.new(#FF5252, 85), "Bear OB",   group=GRP_OB)
+inp_bbBullColor = input.color(color.new(#69F0AE, 85), "Bull BB",   group=GRP_OB)
+inp_bbBearColor = input.color(color.new(#FF8A80, 85), "Bear BB",   group=GRP_OB)
+
+var string GRP_FVG = "⚡ Fair Value Gaps"
+inp_showFVG     = input.bool(true,  "Show Fair Value Gaps",        group=GRP_FVG)
+inp_showIFVG    = input.bool(true,  "Show Inverse FVGs",           group=GRP_FVG)
+inp_fvgBullCol  = input.color(color.new(#00BCD4, 80), "Bull FVG",  group=GRP_FVG)
+inp_fvgBearCol  = input.color(color.new(#FF9800, 80), "Bear FVG",  group=GRP_FVG)
+inp_fvgMinSize  = input.float(0.0,  "Min FVG Size (Points)",
+     group=GRP_FVG, minval=0.0)
+
+var string GRP_KZ = "🕐 ICT Kill Zones"
+inp_showKZ      = input.bool(true,  "Show Kill Zones",             group=GRP_KZ)
+inp_timezone    = input.string("America/New_York", "Timezone",     group=GRP_KZ)
+inp_showAsian   = input.bool(true,  "Asian Session",               group=GRP_KZ)
+inp_showLondon  = input.bool(true,  "London Open",                 group=GRP_KZ)
+inp_showNYOpen  = input.bool(true,  "NY Open",                     group=GRP_KZ)
+inp_showLClose  = input.bool(true,  "London Close",                group=GRP_KZ)
+inp_asianColor  = input.color(color.new(#9C27B0, 90), "Asian",     group=GRP_KZ)
+inp_londonColor = input.color(color.new(#2196F3, 90), "London",    group=GRP_KZ)
+inp_nyColor     = input.color(color.new(#4CAF50, 90), "NY",        group=GRP_KZ)
+inp_lcloseColor = input.color(color.new(#FF9800, 90), "L.Close",   group=GRP_KZ)
+
+var string GRP_FIB = "📐 Fibonacci & OTE"
+inp_showFib     = input.bool(true,  "Show OTE Fibonacci",          group=GRP_FIB)
+inp_showOTE     = input.bool(true,  "Highlight OTE Zone",          group=GRP_FIB)
+inp_oteColor    = input.color(color.new(#FFEB3B, 85), "OTE Color", group=GRP_FIB)
+
+var string GRP_HARM = "🦋 Harmonic Patterns"
+inp_showHarm    = input.bool(true,  "Show Harmonic Patterns",      group=GRP_HARM)
+inp_harmLook    = input.int(50,     "Harmonic Lookback Bars",
+     group=GRP_HARM, minval=20, maxval=200)
+inp_harmTol     = input.float(5.0,  "Ratio Tolerance %",
+     group=GRP_HARM, minval=1.0, maxval=15.0)
+inp_showGartley = input.bool(true,  "Gartley",                     group=GRP_HARM)
+inp_showBat     = input.bool(true,  "Bat",                         group=GRP_HARM)
+inp_showButterf = input.bool(true,  "Butterfly",                   group=GRP_HARM)
+inp_showCrab    = input.bool(true,  "Crab",                        group=GRP_HARM)
+inp_showCypher  = input.bool(true,  "Cypher",                      group=GRP_HARM)
+inp_showABCD    = input.bool(true,  "ABCD",                        group=GRP_HARM)
+
+var string GRP_CP = "📈 Chart Patterns"
+inp_showCP      = input.bool(true,  "Show Chart Patterns",         group=GRP_CP)
+inp_cpLook      = input.int(50,     "Chart Pattern Lookback",
+     group=GRP_CP, minval=20, maxval=200)
+inp_showHnS     = input.bool(true,  "Head & Shoulders",            group=GRP_CP)
+inp_showDblTop  = input.bool(true,  "Double Top/Bottom",           group=GRP_CP)
+inp_showTri     = input.bool(true,  "Triangles",                   group=GRP_CP)
+inp_showWedge   = input.bool(true,  "Wedges",                      group=GRP_CP)
+inp_showFlag    = input.bool(true,  "Flags",                       group=GRP_CP)
+
+var string GRP_SIG = "🎯 Signal Settings"
+inp_minScore    = input.int(60,     "Min Confluence Score",
+     group=GRP_SIG, minval=30, maxval=100)
+inp_showSigs    = input.bool(true,  "Show Trade Signals",          group=GRP_SIG)
+inp_showSLTP    = input.bool(true,  "Show SL/TP Levels",           group=GRP_SIG)
+inp_tp1RR       = input.float(1.0,  "TP1 R:R",
+     group=GRP_SIG, minval=0.5, step=0.5)
+inp_tp2RR       = input.float(2.0,  "TP2 R:R",
+     group=GRP_SIG, minval=1.0, step=0.5)
+inp_tp3RR       = input.float(3.0,  "TP3 R:R",
+     group=GRP_SIG, minval=1.5, step=0.5)
+inp_atrMult     = input.float(1.5,  "ATR SL Multiplier",
+     group=GRP_SIG, minval=0.5, maxval=5.0, step=0.1)
+inp_atrLen      = input.int(14,     "ATR Length",
+     group=GRP_SIG, minval=5, maxval=50)
+inp_buyColor    = input.color(color.new(#00E676, 0),  "Buy Color", group=GRP_SIG)
+inp_sellColor   = input.color(color.new(#FF5252, 0),  "Sell Color",group=GRP_SIG)
+
+var string GRP_MTF = "🔭 Multi-Timeframe"
+inp_showMTF     = input.bool(true,   "Enable MTF Analysis",        group=GRP_MTF)
+inp_htf1        = input.timeframe("60",  "HTF 1",                  group=GRP_MTF)
+inp_htf2        = input.timeframe("240", "HTF 2",                  group=GRP_MTF)
+inp_htf3        = input.timeframe("D",   "HTF 3",                  group=GRP_MTF)
+
+var string GRP_DASH = "📋 Dashboard"
+inp_showDash    = input.bool(true,  "Show Dashboard",              group=GRP_DASH)
+inp_dashPos     = input.string("Top Right", "Position",
+     group=GRP_DASH,
+     options=["Top Right","Top Left","Bottom Right","Bottom Left"])
+inp_dashBg      = input.color(color.new(#0D1117, 85), "BG Color",  group=GRP_DASH)
+
+// ============================================================
+// SECTION 2: UTILITY FUNCTIONS (ALL AT TOP LEVEL)
+// ============================================================
+
+// Check if a ratio is within tolerance of a target
+withinTol(ratio, target, tol) =>
+    math.abs(ratio - target) / target * 100 <= tol
+
+// Clamp a value between min and max
+clamp(val, lo, hi) =>
+    math.max(lo, math.min(hi, val))
+
+// Price as string with symbol-appropriate decimals
+priceStr(p) =>
+    str.tostring(p, "#.#####")
+
+// ============================================================
+// SECTION 3: BASE CALCULATIONS
+// ============================================================
+
+atr14 = ta.atr(inp_atrLen)
+
+// Confirmed pivot highs and lows (non-repainting)
+// ta.pivothigh/low returns na until rightBars bars have closed
+ph = ta.pivothigh(high, inp_structLen, inp_structLen)
+pl = ta.pivotlow(low,   inp_structLen, inp_structLen)
+
+// ============================================================
+// SECTION 4: SWING POINT TRACKING
+// ============================================================
+
+var float[] swingHighs    = array.new_float(0)
+var int[]   swingHighBars = array.new_int(0)
+var float[] swingLows     = array.new_float(0)
+var int[]   swingLowBars  = array.new_int(0)
+
+var float lastSwingHigh   = na
+var float lastSwingLow    = na
+var float prevSwingHigh   = na
+var float prevSwingLow    = na
+var int   lastSHBar       = na
+var int   lastSLBar       = na
+
+// Push confirmed pivot highs
+if not na(ph)
+    prevSwingHigh := lastSwingHigh
+    lastSwingHigh := ph
+    lastSHBar     := bar_index - inp_structLen
+    array.push(swingHighs,    ph)
+    array.push(swingHighBars, bar_index - inp_structLen)
+    if array.size(swingHighs) > 50
+        array.shift(swingHighs)
+        array.shift(swingHighBars)
+
+// Push confirmed pivot lows
+if not na(pl)
+    prevSwingLow := lastSwingLow
+    lastSwingLow := pl
+    lastSLBar    := bar_index - inp_structLen
+    array.push(swingLows,    pl)
+    array.push(swingLowBars, bar_index - inp_structLen)
+    if array.size(swingLows) > 50
+        array.shift(swingLows)
+        array.shift(swingLowBars)
+
+// ============================================================
+// SECTION 5: MARKET STRUCTURE ENGINE
+// ============================================================
+
+var bool bullishBias  = true
+var bool prevBullBias = true
+
+// BOS detection on closed bar (barstate.isconfirmed prevents repainting)
+bosUp   = not na(lastSwingHigh) and
+     close > lastSwingHigh and close[1] <= lastSwingHigh
+
+bosDown = not na(lastSwingLow) and
+     close < lastSwingLow  and close[1] >= lastSwingLow
+
+// CHoCH = BOS against current bias
+chochUp   = bosUp   and not bullishBias
+chochDown = bosDown and bullishBias
+
+// Update bias
+if chochUp or bosUp
+    bullishBias := true
+if chochDown or bosDown
+    bullishBias := false
+
+// HH / HL / LH / LL Labels
+if inp_showHHHL
+    if not na(ph) and not na(prevSwingHigh)
+        phLabel = ph > prevSwingHigh ? "HH" : "LH"
+        phCol   = ph > prevSwingHigh ? color.green : color.red
+        label.new(bar_index - inp_structLen, ph, phLabel,
+             color     = color.new(phCol, 70),
+             textcolor = phCol,
+             style     = label.style_label_down,
+             size      = size.tiny)
+
+    if not na(pl) and not na(prevSwingLow)
+        plLabel = pl > prevSwingLow ? "HL" : "LL"
+        plCol   = pl > prevSwingLow ? color.green : color.red
+        label.new(bar_index - inp_structLen, pl, plLabel,
+             color     = color.new(plCol, 70),
+             textcolor = plCol,
+             style     = label.style_label_up,
+             size      = size.tiny)
+
+// BOS / CHoCH Labels
+if inp_showBOS
+    if bosUp and not chochUp
+        label.new(bar_index, high, "BOS ▲",
+             color     = inp_bosColor,
+             textcolor = color.white,
+             style     = label.style_label_up,
+             size      = size.small)
+
+    if bosDown and not chochDown
+        label.new(bar_index, low, "BOS ▼",
+             color     = inp_bosColor,
+             textcolor = color.white,
+             style     = label.style_label_down,
+             size      = size.small)
+
+    if chochUp
+        label.new(bar_index, high, "CHoCH ▲",
+             color     = inp_chochColor,
+             textcolor = color.white,
+             style     = label.style_label_up,
+             size      = size.small)
+
+    if chochDown
+        label.new(bar_index, low, "CHoCH ▼",
+             color     = inp_chochColor,
+             textcolor = color.white,
+             style     = label.style_label_down,
+             size      = size.small)
+
+// ============================================================
+// SECTION 6: LIQUIDITY ENGINE
+// ============================================================
+
+var bool  eqhDetected = false
+var bool  eqlDetected = false
+var float eqhLvl      = na
+var float eqlLvl      = na
+
+// Reset each bar
+eqhDetected := false
+eqlDetected := false
+eqhLvl      := na
+eqlLvl      := na
+
+// Scan recent bars for equal highs / lows
+// Capped loop to avoid performance issues
+int scanLen = math.min(inp_eqLen, bar_index)
+if inp_showEQHL and scanLen >= 2
+    for i = 1 to scanLen - 1
+        if eqhDetected and eqlDetected
+            break
+        for j = i + 1 to scanLen
+            if eqhDetected and eqlDetected
+                break
+            float hiI = high[i]
+            float hiJ = high[j]
+            float loI = low[i]
+            float loJ = low[j]
+
+            if not eqhDetected and hiI > 0
+                float diffH = math.abs(hiI - hiJ) / hiI * 100
+                if diffH <= inp_eqThresh
+                    eqhDetected := true
+                    eqhLvl      := (hiI + hiJ) / 2
+
+            if not eqlDetected and loI > 0
+                float diffL = math.abs(loI - loJ) / loI * 100
+                if diffL <= inp_eqThresh
+                    eqlDetected := true
+                    eqlLvl      := (loI + loJ) / 2
+
+// Draw EQH / EQL  (single persistent marker each — delete old before redraw)
+var line  eqhLine = na
+var label eqhLab  = na
+var line  eqlLine = na
+var label eqlLab  = na
+
+if eqhDetected and not na(eqhLvl)
+    line.delete(eqhLine)
+    label.delete(eqhLab)
+    eqhLine := line.new(bar_index - scanLen, eqhLvl, bar_index + 5, eqhLvl,
+         color=color.new(#FF6B6B, 30), width=1, style=line.style_dashed)
+    eqhLab  := label.new(bar_index, eqhLvl, "EQH",
+         color     = color.new(#FF6B6B, 50),
+         textcolor = color.white,
+         style     = label.style_label_left,
+         size      = size.tiny)
+
+if eqlDetected and not na(eqlLvl)
+    line.delete(eqlLine)
+    label.delete(eqlLab)
+    eqlLine := line.new(bar_index - scanLen, eqlLvl, bar_index + 5, eqlLvl,
+         color=color.new(#69F0AE, 30), width=1, style=line.style_dashed)
+    eqlLab  := label.new(bar_index, eqlLvl, "EQL",
+         color     = color.new(#69F0AE, 50),
+         textcolor = color.white,
+         style     = label.style_label_left,
+         size      = size.tiny)
+
+// Liquidity Sweep Detection
+bool liqSweepUp   = false
+bool liqSweepDown = false
+
+if eqhDetected and not na(eqhLvl)
+    liqSweepDown := high > eqhLvl and close < eqhLvl
+
+if eqlDetected and not na(eqlLvl)
+    liqSweepUp := low < eqlLvl and close > eqlLvl
+
+if inp_showLiqSweep
+    // Only on a NEW sweep (rising edge) — stops per-bar label spam
+    if liqSweepUp and not liqSweepUp[1]
+        label.new(bar_index, low, "🔱",
+             color     = color.new(#00E676, 40),
+             textcolor = color.white,
+             style     = label.style_label_up,
+             size      = size.small)
+    if liqSweepDown and not liqSweepDown[1]
+        label.new(bar_index, high, "🔱",
+             color     = color.new(#FF5252, 40),
+             textcolor = color.white,
+             style     = label.style_label_down,
+             size      = size.small)
+
+// ============================================================
+// SECTION 7: ORDER BLOCK ENGINE
+// ============================================================
+
+var box[]   obBoxes     = array.new_box(0)
+var bool[]  obBullish   = array.new_bool(0)
+var float[] obTopArr    = array.new_float(0)
+var float[] obBotArr    = array.new_float(0)
+var bool[]  obMitigated = array.new_bool(0)
+var int[]   obBarArr    = array.new_int(0)
+
+// Create Bullish Order Block on BOS Up
+if bosUp and inp_showOB
+    bool obFound = false
+    int  kMax    = math.min(inp_obLen, bar_index - 1)
+    for k = 1 to kMax
+        if obFound
+            break
+        // Last bearish candle before BOS = Bull OB
+        if close[k] < open[k]
+            float obTop = math.max(open[k], close[k])
+            float obBot = math.min(open[k], close[k])
+            box newBox  = box.new(
+                 bar_index - k, obTop,
+                 bar_index + 20, obBot,
+                 border_color = inp_obBullColor,
+                 bgcolor      = inp_obBullColor,
+                 border_width = 1)
+            array.push(obBoxes,     newBox)
+            array.push(obBullish,   true)
+            array.push(obTopArr,    obTop)
+            array.push(obBotArr,    obBot)
+            array.push(obMitigated, false)
+            array.push(obBarArr,    bar_index - k)
+            obFound := true
+
+// Create Bearish Order Block on BOS Down
+if bosDown and inp_showOB
+    bool obFound2 = false
+    int  kMax2    = math.min(inp_obLen, bar_index - 1)
+    for k = 1 to kMax2
+        if obFound2
+            break
+        // Last bullish candle before BOS = Bear OB
+        if close[k] > open[k]
+            float obTop = math.max(open[k], close[k])
+            float obBot = math.min(open[k], close[k])
+            box newBox  = box.new(
+                 bar_index - k, obTop,
+                 bar_index + 20, obBot,
+                 border_color = inp_obBearColor,
+                 bgcolor      = inp_obBearColor,
+                 border_width = 1)
+            array.push(obBoxes,     newBox)
+            array.push(obBullish,   false)
+            array.push(obTopArr,    obTop)
+            array.push(obBotArr,    obBot)
+            array.push(obMitigated, false)
+            array.push(obBarArr,    bar_index - k)
+            obFound2 := true
+
+// Update / Mitigate existing Order Blocks
+int obSize = array.size(obBoxes)
+if obSize > 0
+    for idx = obSize - 1 to 0
+        bool  isBullOB  = array.get(obBullish,   idx)
+        float obT       = array.get(obTopArr,    idx)
+        float obB       = array.get(obBotArr,    idx)
+        bool  isMit     = array.get(obMitigated, idx)
+        box   b         = array.get(obBoxes,     idx)
+
+        if not isMit
+            box.set_right(b, bar_index + 10)
+            // Bull OB mitigated: close below OB bottom
+            if isBullOB and close < obB
+                array.set(obMitigated, idx, true)
+                box.set_border_color(b, color.new(color.gray, 50))
+                box.set_bgcolor(b,      color.new(color.gray, 92))
+            // Bear OB mitigated: close above OB top
+            if not isBullOB and close > obT
+                array.set(obMitigated, idx, true)
+                box.set_border_color(b, color.new(color.gray, 50))
+                box.set_bgcolor(b,      color.new(color.gray, 92))
+
+// Trim OB array to 20
+if array.size(obBoxes) > 20
+    box oldB = array.shift(obBoxes)
+    box.delete(oldB)
+    array.shift(obBullish)
+    array.shift(obTopArr)
+    array.shift(obBotArr)
+    array.shift(obMitigated)
+    array.shift(obBarArr)
+
+// --- Breaker Block Detection ---
+var box[]  bbBoxes  = array.new_box(0)
+var bool[] bbIsBull = array.new_bool(0)
+
+if inp_showBB
+    int obSz = array.size(obBoxes)
+    if obSz > 0
+        for idx = 0 to obSz - 1
+            bool  isMit    = array.get(obMitigated, idx)
+            bool  isBullOB = array.get(obBullish,   idx)
+            float obT      = array.get(obTopArr,    idx)
+            float obB      = array.get(obBotArr,    idx)
+            int   obBr     = array.get(obBarArr,    idx)
+
+            if isMit
+                // Mitigated Bull OB → Bearish Breaker if price returns
+                if isBullOB and close <= obT and close >= obB
+                    box newBB = box.new(obBr, obT, bar_index + 10, obB,
+                         border_color = inp_bbBearColor,
+                         bgcolor      = inp_bbBearColor,
+                         border_width = 2,
+                         border_style = line.style_dashed)
+                    array.push(bbBoxes,  newBB)
+                    array.push(bbIsBull, false)
+
+                // Mitigated Bear OB → Bullish Breaker if price returns
+                if not isBullOB and close >= obB and close <= obT
+                    box newBB = box.new(obBr, obT, bar_index + 10, obB,
+                         border_color = inp_bbBullColor,
+                         bgcolor      = inp_bbBullColor,
+                         border_width = 2,
+                         border_style = line.style_dashed)
+                    array.push(bbBoxes,  newBB)
+                    array.push(bbIsBull, true)
+
+// Trim BB array
+if array.size(bbBoxes) > 10
+    box oldBB = array.shift(bbBoxes)
+    box.delete(oldBB)
+    array.shift(bbIsBull)
+
+// ============================================================
+// SECTION 8: FAIR VALUE GAP ENGINE
+// ============================================================
+
+var box[]   fvgBoxes  = array.new_box(0)
+var bool[]  fvgIsBull = array.new_bool(0)
+var float[] fvgTopArr = array.new_float(0)
+var float[] fvgBotArr = array.new_float(0)
+var bool[]  fvgFilled = array.new_bool(0)
+
+// Detect on confirmed bars using [0],[1],[2]
+// Bullish FVG: candle[2] high < candle[0] low (gap above candle 2)
+bool bullFVG  = low[0]  > high[2]
+bool bearFVG  = high[0] < low[2]
+float fvgSzBull = bullFVG ? low[0]  - high[2] : 0.0
+float fvgSzBear = bearFVG ? low[2]  - high[0] : 0.0
+
+if inp_showFVG and bullFVG and fvgSzBull >= inp_fvgMinSize
+    float fvgTop = low[0]
+    float fvgBot = high[2]
+    box nf = box.new(bar_index - 2, fvgTop, bar_index + 30, fvgBot,
+         border_color = inp_fvgBullCol,
+         bgcolor      = inp_fvgBullCol,
+         border_width = 1)
+    array.push(fvgBoxes,  nf)
+    array.push(fvgIsBull, true)
+    array.push(fvgTopArr, fvgTop)
+    array.push(fvgBotArr, fvgBot)
+    array.push(fvgFilled, false)
+    label.new(bar_index - 1, fvgBot, "FVG ▲",
+         color=color.new(#00BCD4, 60), textcolor=color.white,
+         style=label.style_label_up, size=size.tiny)
+
+if inp_showFVG and bearFVG and fvgSzBear >= inp_fvgMinSize
+    float fvgTop = low[2]
+    float fvgBot = high[0]
+    box nf = box.new(bar_index - 2, fvgTop, bar_index + 30, fvgBot,
+         border_color = inp_fvgBearCol,
+         bgcolor      = inp_fvgBearCol,
+         border_width = 1)
+    array.push(fvgBoxes,  nf)
+    array.push(fvgIsBull, false)
+    array.push(fvgTopArr, fvgTop)
+    array.push(fvgBotArr, fvgBot)
+    array.push(fvgFilled, false)
+    label.new(bar_index - 1, fvgTop, "FVG ▼",
+         color=color.new(#FF9800, 60), textcolor=color.white,
+         style=label.style_label_down, size=size.tiny)
+
+// Update FVG fill status and extend boxes
+int fvgSz = array.size(fvgBoxes)
+if fvgSz > 0
+    for idx = fvgSz - 1 to 0
+        bool  isBF  = array.get(fvgIsBull, idx)
+        float fT    = array.get(fvgTopArr, idx)
+        float fB    = array.get(fvgBotArr, idx)
+        bool  done  = array.get(fvgFilled, idx)
+        box   fb    = array.get(fvgBoxes,  idx)
+
+        if not done
+            box.set_right(fb, bar_index + 10)
+            if isBF and low <= fT and low >= fB
+                array.set(fvgFilled, idx, true)
+                box.set_bgcolor(fb,      color.new(color.gray, 92))
+                box.set_border_color(fb, color.new(color.gray, 60))
+            if not isBF and high >= fB and high <= fT
+                array.set(fvgFilled, idx, true)
+                box.set_bgcolor(fb,      color.new(color.gray, 92))
+                box.set_border_color(fb, color.new(color.gray, 60))
+
+// Trim FVG array
+if array.size(fvgBoxes) > 25
+    box oldF = array.shift(fvgBoxes)
+    box.delete(oldF)
+    array.shift(fvgIsBull)
+    array.shift(fvgTopArr)
+    array.shift(fvgBotArr)
+    array.shift(fvgFilled)
+
+// Inverse FVG (IFVG): filled FVG retested from opposite side
+var box[]  ifvgBoxes  = array.new_box(0)
+var bool[] ifvgIsBull = array.new_bool(0)
+
+if inp_showIFVG
+    int fSz2 = array.size(fvgBoxes)
+    if fSz2 > 0
+        for idx = 0 to fSz2 - 1
+            bool  isFilled = array.get(fvgFilled,  idx)
+            bool  isBF     = array.get(fvgIsBull,  idx)
+            float fT       = array.get(fvgTopArr,  idx)
+            float fB       = array.get(fvgBotArr,  idx)
+
+            if isFilled and isBF and close <= fT and close >= fB
+                box ni = box.new(bar_index, fT, bar_index + 20, fB,
+                     border_color = color.new(#E91E63, 40),
+                     bgcolor      = color.new(#E91E63, 85),
+                     border_width = 1,
+                     border_style = line.style_dotted)
+                array.push(ifvgBoxes,  ni)
+                array.push(ifvgIsBull, false)
+
+if array.size(ifvgBoxes) > 10
+    box oldI = array.shift(ifvgBoxes)
+    box.delete(oldI)
+    array.shift(ifvgIsBull)
+
+// ============================================================
+// SECTION 9: ICT KILL ZONE ENGINE
+// ============================================================
+
+int   curHour   = hour(time,   inp_timezone)
+int   curMin    = minute(time, inp_timezone)
+int   curHHMM   = curHour * 100 + curMin
+
+bool inAsian  = curHHMM >= 2000 or  curHHMM < 100
+bool inLondon = curHHMM >= 200  and curHHMM <= 500
+bool inNY     = curHHMM >= 930  and curHHMM <= 1100
+bool inLClose = curHHMM >= 1000 and curHHMM <= 1200
+
+string activeSession =
+     inNY     ? "🗽 NY Open"   :
+     inLondon ? "🇬🇧 London"   :
+     inLClose ? "🔔 L.Close"   :
+     inAsian  ? "🌏 Asian"     : "⏳ Off-Hours"
+
+int sessionScore =
+     inNY or inLondon ? 8 :
+     inLClose or inAsian ? 4 : 0
+
+bgcolor(inp_showKZ and inp_showAsian  and inAsian  ? inp_asianColor  : na,
+     title="Asian KZ BG")
+bgcolor(inp_showKZ and inp_showLondon and inLondon ? inp_londonColor : na,
+     title="London KZ BG")
+bgcolor(inp_showKZ and inp_showNYOpen and inNY     ? inp_nyColor     : na,
+     title="NY KZ BG")
+bgcolor(inp_showKZ and inp_showLClose and inLClose ? inp_lcloseColor : na,
+     title="LClose KZ BG")
+
+// ============================================================
+// SECTION 10: FIBONACCI & OTE ENGINE
+// ============================================================
+
+var float ote618  = na
+var float ote705  = na
+var float ote79   = na
+var float ote50   = na
+var bool  inOTE   = false
+var box   oteBox  = na
+
+if not na(lastSwingHigh) and not na(lastSwingLow)
+    float rangeHL = lastSwingHigh - lastSwingLow
+
+    if bullishBias
+        // Retracement from swing high down to swing low
+        ote50  := lastSwingHigh - rangeHL * 0.500
+        ote618 := lastSwingHigh - rangeHL * 0.618
+        ote705 := lastSwingHigh - rangeHL * 0.705
+        ote79  := lastSwingHigh - rangeHL * 0.790
+        inOTE  := close >= ote79 and close <= ote618
+    else
+        // Retracement from swing low up toward swing high
+        ote50  := lastSwingLow + rangeHL * 0.500
+        ote618 := lastSwingLow + rangeHL * 0.618
+        ote705 := lastSwingLow + rangeHL * 0.705
+        ote79  := lastSwingLow + rangeHL * 0.790
+        inOTE  := close <= ote79 and close >= ote618
+
+// Draw / update OTE zone box
+if inp_showOTE and not na(ote618) and not na(ote79)
+    if not na(oteBox)
+        box.delete(oteBox)
+    float oteHi = bullishBias ? ote618 : ote79
+    float oteLo = bullishBias ? ote79  : ote618
+    oteBox := box.new(bar_index - 5, oteHi, bar_index + 15, oteLo,
+         border_color = inp_oteColor,
+         bgcolor      = inp_oteColor,
+         border_width = 2)
+
+// Fibonacci level lines
+if inp_showFib and not na(ote50) and barstate.islast
+    line.new(bar_index - 10, ote50,  bar_index + 10, ote50,
+         color=color.new(#FFEB3B, 40), width=1, style=line.style_dashed)
+    line.new(bar_index - 10, ote618, bar_index + 10, ote618,
+         color=color.new(#FF9800, 40), width=1, style=line.style_dashed)
+    line.new(bar_index - 10, ote705, bar_index + 10, ote705,
+         color=color.new(#FF5722, 40), width=1, style=line.style_dashed)
+    line.new(bar_index - 10, ote79,  bar_index + 10, ote79,
+         color=color.new(#F44336, 40), width=1, style=line.style_dashed)
+
+// ============================================================
+// SECTION 11: HARMONIC PATTERN ENGINE
+// ============================================================
+
+var bool   harmDetected = false
+var string harmName     = "None"
+var bool   harmIsBull   = true
+var float  harmPRZHigh  = na
+var float  harmPRZLow   = na
+
+// Reset each bar
+harmDetected := false
+harmName     := "None"
+
+int shSz = array.size(swingHighs)
+int slSz = array.size(swingLows)
+
+if inp_showHarm and shSz >= 2 and slSz >= 2
+
+    // === BULLISH PATTERNS: X=Low, A=High, B=Low, C=High, D=PRZ ===
+    float xV = array.get(swingLows,  slSz - 2)
+    float aV = array.get(swingHighs, shSz - 2)
+    float bV = array.get(swingLows,  slSz - 1)
+    float cV = array.get(swingHighs, shSz - 1)
+
+    // Validate structural integrity
+    bool structOK = xV < aV and bV < aV and bV > xV and cV < aV and cV > bV
+
+    if structOK
+        float xaRng = aV - xV
+        float abRng = aV - bV
+        float bcRng = cV - bV
+
+        float abRat = xaRng > 0 ? abRng / xaRng : 0.0
+        float bcRat = abRng > 0 ? bcRng / abRng : 0.0
+
+        // --- Gartley Bullish: AB≈0.618 XA ---
+        if inp_showGartley and not harmDetected
+            if withinTol(abRat, 0.618, inp_harmTol) and
+                 bcRat >= 0.382 and bcRat <= 0.886
+                float dProj = cV - bcRng * 1.272
+                if dProj > xV * 0.95 and dProj < bV
+                    harmDetected := true
+                    harmName     := "Gartley 🐚"
+                    harmIsBull   := true
+                    harmPRZHigh  := dProj + atr14
+                    harmPRZLow   := math.max(dProj - atr14, xV)
+
+        // --- Bat Bullish: AB=0.382-0.50 XA ---
+        if inp_showBat and not harmDetected
+            if abRat >= 0.382 and abRat <= 0.500 and
+                 bcRat >= 0.382 and bcRat <= 0.886
+                float dProj = cV - bcRng * 1.618
+                if dProj > xV and dProj < aV
+                    harmDetected := true
+                    harmName     := "Bat 🦇"
+                    harmIsBull   := true
+                    harmPRZHigh  := dProj + atr14
+                    harmPRZLow   := math.max(dProj - atr14, xV * 0.886)
+
+        // --- Butterfly Bullish: AB≈0.786 XA, D beyond X ---
+        if inp_showButterf and not harmDetected
+            if withinTol(abRat, 0.786, inp_harmTol) and
+                 bcRat >= 0.382 and bcRat <= 0.886
+                float dProj = cV - bcRng * 1.618
+                if dProj < xV
+                    harmDetected := true
+                    harmName     := "Butterfly 🦋"
+                    harmIsBull   := true
+                    harmPRZHigh  := dProj + atr14
+                    harmPRZLow   := dProj - atr14
+
+        // --- Crab Bullish: deep extension 1.618 XA ---
+        if inp_showCrab and not harmDetected
+            if abRat >= 0.382 and abRat <= 0.618 and
+                 bcRat >= 0.382 and bcRat <= 0.886
+                float dProj = xV - xaRng * 0.618
+                if dProj < xV
+                    harmDetected := true
+                    harmName     := "Crab 🦀"
+                    harmIsBull   := true
+                    harmPRZHigh  := dProj + atr14
+                    harmPRZLow   := dProj - atr14
+
+        // --- Cypher Bullish: C beyond A, D at 0.786 XC ---
+        if inp_showCypher and not harmDetected
+            if abRat >= 0.382 and abRat <= 0.618
+                float xcRng = math.abs(cV - xV)
+                float xcRat = xaRng > 0 ? xcRng / xaRng : 0.0
+                if xcRat >= 1.272 and xcRat <= 1.414
+                    float dProj = xV + xcRng * 0.786
+                    harmDetected := true
+                    harmName     := "Cypher ⚡"
+                    harmIsBull   := true
+                    harmPRZHigh  := dProj + atr14
+                    harmPRZLow   := dProj - atr14
+
+    // === ABCD Bullish ===
+    if inp_showABCD and not harmDetected and slSz >= 2 and shSz >= 1
+        float abcdA  = array.get(swingHighs, shSz - 1)
+        float abcdB  = array.get(swingLows,  slSz - 1)
+        float abcdAB = abcdA - abcdB
+        // Projected D = B - AB (equal legs)
+        float abcdD  = abcdB - abcdAB
+        if close <= abcdB and close >= abcdD * 0.98
+            harmDetected := true
+            harmName     := "ABCD 📐"
+            harmIsBull   := true
+            harmPRZHigh  := abcdD + atr14
+            harmPRZLow   := abcdD - atr14
+
+// Draw Harmonic PRZ box (single persistent — delete old before redraw)
+var box   harmBox = na
+var label harmLab = na
+if harmDetected and inp_showHarm and not na(harmPRZHigh) and not na(harmPRZLow)
+    box.delete(harmBox)
+    label.delete(harmLab)
+    harmBox := box.new(bar_index, harmPRZHigh, bar_index + 15, harmPRZLow,
+         border_color = color.new(#E040FB, 20),
+         bgcolor      = color.new(#E040FB, 75),
+         border_width = 2)
+    harmLab := label.new(bar_index + 7, (harmPRZHigh + harmPRZLow) / 2,
+         harmName + "\nPRZ",
+         color     = color.new(#E040FB, 40),
+         textcolor = color.white,
+         style     = label.style_label_center,
+         size      = size.small)
+
+// ============================================================
+// SECTION 12: CHART PATTERN ENGINE
+// ============================================================
+
+bool dblTopDet  = false
+bool dblBotDet  = false
+bool hnsDet     = false
+bool ihnsDet    = false
+bool ascTriDet  = false
+bool descTriDet = false
+bool symmTriDet = false
+bool rWedgeDet  = false
+bool fWedgeDet  = false
+bool bullFlagDet = false
+bool bearFlagDet = false
+
+int cpShSz = array.size(swingHighs)
+int cpSlSz = array.size(swingLows)
+
+// --- Double Top / Double Bottom ---
+if inp_showDblTop and inp_showCP
+    if cpShSz >= 2
+        float sh1 = array.get(swingHighs, cpShSz - 1)
+        float sh2 = array.get(swingHighs, cpShSz - 2)
+        if sh1 > 0 and math.abs(sh1 - sh2) / sh1 * 100 <= inp_eqThresh * 2
+            dblTopDet := true
+            label.new(bar_index, sh1, "🔴 Dbl Top",
+                 color=color.new(#FF5252, 50), textcolor=color.white,
+                 style=label.style_label_down, size=size.small)
+
+    if cpSlSz >= 2
+        float sl1 = array.get(swingLows, cpSlSz - 1)
+        float sl2 = array.get(swingLows, cpSlSz - 2)
+        if sl1 > 0 and math.abs(sl1 - sl2) / sl1 * 100 <= inp_eqThresh * 2
+            dblBotDet := true
+            label.new(bar_index, sl1, "🟢 Dbl Bot",
+                 color=color.new(#00E676, 50), textcolor=color.white,
+                 style=label.style_label_up, size=size.small)
+
+// --- Head & Shoulders ---
+if inp_showHnS and inp_showCP and cpShSz >= 3
+    float rSh  = array.get(swingHighs, cpShSz - 1)
+    float head = array.get(swingHighs, cpShSz - 2)
+    float lSh  = array.get(swingHighs, cpShSz - 3)
+    bool  hns  = head > rSh and head > lSh and
+         head > 0 and math.abs(rSh - lSh) / head * 100 <= 5.0
+    if hns
+        hnsDet := true
+        label.new(bar_index, head, "H&S 🎭",
+             color=color.new(#FF5252, 40), textcolor=color.white,
+             style=label.style_label_down, size=size.normal)
+
+// --- Inverse Head & Shoulders ---
+if inp_showHnS and inp_showCP and cpSlSz >= 3
+    float rSh  = array.get(swingLows, cpSlSz - 1)
+    float head = array.get(swingLows, cpSlSz - 2)
+    float lSh  = array.get(swingLows, cpSlSz - 3)
+    bool  ihns = head < rSh and head < lSh and
+         math.abs(head) > 0 and math.abs(rSh - lSh) / math.abs(head) * 100 <= 5.0
+    if ihns
+        ihnsDet := true
+        label.new(bar_index, head, "IH&S 🎭",
+             color=color.new(#00E676, 40), textcolor=color.white,
+             style=label.style_label_up, size=size.normal)
+
+// --- Triangles ---
+if inp_showTri and inp_showCP and cpShSz >= 3 and cpSlSz >= 3
+    float h1 = array.get(swingHighs, cpShSz - 1)
+    float h2 = array.get(swingHighs, cpShSz - 2)
+    float h3 = array.get(swingHighs, cpShSz - 3)
+    float l1 = array.get(swingLows,  cpSlSz - 1)
+    float l2 = array.get(swingLows,  cpSlSz - 2)
+    float l3 = array.get(swingLows,  cpSlSz - 3)
+
+    bool highsFlat    = h1 > 0 and h2 > 0 and
+         math.abs(h1-h2)/h1*100 < 1.0 and math.abs(h2-h3)/h2*100 < 1.0
+    bool lowsRising   = l1 > l2 and l2 > l3
+    bool highsFalling = h1 < h2 and h2 < h3
+    bool lowsFlat     = l1 > 0 and l2 > 0 and
+         math.abs(l1-l2)/l1*100 < 1.0 and math.abs(l2-l3)/l2*100 < 1.0
+    bool converging   = h1 < h3 and l1 > l3
+
+    if highsFlat and lowsRising
+        ascTriDet := true
+        label.new(bar_index, (h1+l1)/2, "▲ Asc Triangle",
+             color=color.new(#00E676,50), textcolor=color.white,
+             style=label.style_label_center, size=size.small)
+
+    if highsFalling and lowsFlat
+        descTriDet := true
+        label.new(bar_index, (h1+l1)/2, "▼ Desc Triangle",
+             color=color.new(#FF5252,50), textcolor=color.white,
+             style=label.style_label_center, size=size.small)
+
+    if converging and not highsFlat and not lowsFlat
+        symmTriDet := true
+        label.new(bar_index, (h1+l1)/2, "◆ Symm Triangle",
+             color=color.new(#FF9800,50), textcolor=color.white,
+             style=label.style_label_center, size=size.small)
+
+// --- Wedges ---
+if inp_showWedge and inp_showCP and cpShSz >= 2 and cpSlSz >= 2
+    float wH1 = array.get(swingHighs, cpShSz - 1)
+    float wH2 = array.get(swingHighs, cpShSz - 2)
+    float wL1 = array.get(swingLows,  cpSlSz - 1)
+    float wL2 = array.get(swingLows,  cpSlSz - 2)
+
+    bool bothRising  = wH1 > wH2 and wL1 > wL2
+    bool bothFalling = wH1 < wH2 and wL1 < wL2
+
+    if bothRising and (wH1 - wH2) < (wL1 - wL2)
+        rWedgeDet := true
+        label.new(bar_index, wH1, "⬆ Rising Wedge ⚠️",
+             color=color.new(#FF5252,50), textcolor=color.white,
+             style=label.style_label_down, size=size.small)
+
+    if bothFalling and (wH2 - wH1) > (wL2 - wL1)
+        fWedgeDet := true
+        label.new(bar_index, wL1, "⬇ Falling Wedge ✅",
+             color=color.new(#00E676,50), textcolor=color.white,
+             style=label.style_label_up, size=size.small)
+
+// --- Flags ---
+if inp_showFlag and inp_showCP
+    float impUp    = close[5] - close[10]
+    float impDown  = close[10] - close[5]
+    float cRange   = ta.highest(high, 5) - ta.lowest(low, 5)
+
+    if impUp > atr14 * 2.5 and cRange < atr14 * 1.5 and bullishBias
+        bullFlagDet := true
+        label.new(bar_index, low, "🚩 Bull Flag",
+             color=color.new(#00E676,50), textcolor=color.white,
+             style=label.style_label_up, size=size.small)
+
+    if impDown > atr14 * 2.5 and cRange < atr14 * 1.5 and not bullishBias
+        bearFlagDet := true
+        label.new(bar_index, high, "🚩 Bear Flag",
+             color=color.new(#FF5252,50), textcolor=color.white,
+             style=label.style_label_down, size=size.small)
+
+// ============================================================
+// SECTION 13: PREMIUM / DISCOUNT ZONE ENGINE
+// ============================================================
+
+var float dealingHigh = na
+var float dealingLow  = na
+var float equilibrium = na
+bool inDiscount = false
+bool inPremium  = false
+bool pdAligned  = false
+
+if not na(lastSwingHigh) and not na(lastSwingLow)
+    dealingHigh := math.max(lastSwingHigh, lastSwingLow)
+    dealingLow  := math.min(lastSwingHigh, lastSwingLow)
+    equilibrium := (dealingHigh + dealingLow) / 2.0
+    inDiscount  := close < equilibrium
+    inPremium   := close > equilibrium
+    pdAligned   := (bullishBias and inDiscount) or
+         (not bullishBias and inPremium)
+
+// Equilibrium dotted line (single persistent — delete old before redraw)
+var line eqLine = na
+if not na(equilibrium)
+    line.delete(eqLine)
+    eqLine := line.new(bar_index - 30, equilibrium, bar_index + 5, equilibrium,
+         color=color.new(#FFFFFF, 50), width=1,
+         style=line.style_dotted)
+
+// ============================================================
+// SECTION 14: MULTI-TIMEFRAME BIAS ENGINE
+// ============================================================
+
+float htf1Cls  = request.security(syminfo.tickerid, inp_htf1,
+     close[1], lookahead=barmerge.lookahead_off)
+float htf2Cls  = request.security(syminfo.tickerid, inp_htf2,
+     close[1], lookahead=barmerge.lookahead_off)
+float htf3Cls  = request.security(syminfo.tickerid, inp_htf3,
+     close[1], lookahead=barmerge.lookahead_off)
+
+float htf1E20  = request.security(syminfo.tickerid, inp_htf1,
+     ta.ema(close, 20)[1], lookahead=barmerge.lookahead_off)
+float htf2E20  = request.security(syminfo.tickerid, inp_htf2,
+     ta.ema(close, 20)[1], lookahead=barmerge.lookahead_off)
+float htf3E20  = request.security(syminfo.tickerid, inp_htf3,
+     ta.ema(close, 20)[1], lookahead=barmerge.lookahead_off)
+
+bool htf1Bull  = htf1Cls > htf1E20
+bool htf2Bull  = htf2Cls > htf2E20
+bool htf3Bull  = htf3Cls > htf3E20
+
+string htf1Bias = htf1Bull ? "🟢 Bull" : "🔴 Bear"
+string htf2Bias = htf2Bull ? "🟢 Bull" : "🔴 Bear"
+string htf3Bias = htf3Bull ? "🟢 Bull" : "🔴 Bear"
+
+// SMT Divergence proxy
+bool smtDivBull = close > close[1] and htf1Cls < htf1Cls[1]
+bool smtDivBear = close < close[1] and htf1Cls > htf1Cls[1]
+int  smtScore   = smtDivBull or smtDivBear ? 5 : 0
+
+// ============================================================
+// SECTION 15: CONFLUENCE SCORING ENGINE
+// ============================================================
+
+// 1. BOS / CHoCH → 15 pts
+int bosScore = bosUp or bosDown or chochUp or chochDown ? 15 : 0
+
+// 2. Order Block (price inside unmitigated OB) → 15 pts
+int obScore = 0
+int obSzC = array.size(obBoxes)
+if obSzC > 0
+    for idx = 0 to obSzC - 1
+        if not array.get(obMitigated, idx)
+            float ot = array.get(obTopArr, idx)
+            float ob = array.get(obBotArr, idx)
+            if close <= ot and close >= ob
+                obScore := 15
+
+// 3. FVG (price inside unfilled FVG) → 12 pts
+int fvgScore = 0
+int fvgSzC = array.size(fvgBoxes)
+if fvgSzC > 0
+    for idx = 0 to fvgSzC - 1
+        if not array.get(fvgFilled, idx)
+            float ft = array.get(fvgTopArr, idx)
+            float fb = array.get(fvgBotArr, idx)
+            if close <= ft and close >= fb
+                fvgScore := 12
+
+// 4. Liquidity Sweep → 12 pts
+int liqScore = liqSweepUp or liqSweepDown ? 12 : 0
+
+// 5. OTE → 10 pts
+int oteScore = inOTE ? 10 : 0
+
+// 6. Harmonic PRZ → 10 pts
+int harmScore = harmDetected ? 10 : 0
+
+// 7. Chart Pattern → 8 pts
+bool anyCP = dblTopDet or dblBotDet or hnsDet or ihnsDet or
+     ascTriDet or descTriDet or symmTriDet or
+     rWedgeDet or fWedgeDet or bullFlagDet or bearFlagDet
+int cpScore = anyCP ? 8 : 0
+
+// 8. Session → 8 pts (calculated in Section 9)
+
+// 9. SMT → 5 pts (calculated in Section 14)
+
+// 10. P/D Alignment → 5 pts
+int pdScore = pdAligned ? 5 : 0
+
+// Total
+int totalScore = bosScore + obScore + fvgScore + liqScore +
+     oteScore + harmScore + cpScore + sessionScore +
+     smtScore + pdScore
+
+color scoreColor =
+     totalScore >= 80 ? color.new(#00E676, 0) :
+     totalScore >= 60 ? color.new(#FFEB3B, 0) :
+     totalScore >= 40 ? color.new(#FF9800, 0) :
+     color.new(#FF5252, 0)
+
+// ============================================================
+// SECTION 16: SIGNAL GENERATION
+// ============================================================
+
+// Non-repainting: barstate.isconfirmed ensures signal
+// only fires on the CLOSED bar
+bool buyRaw = bullishBias and
+     totalScore >= inp_minScore and
+     (liqSweepUp or inOTE or fvgScore > 0 or obScore > 0) and
+     (bosUp or chochUp) and
+     not na(lastSwingLow)
+
+bool sellRaw = not bullishBias and
+     totalScore >= inp_minScore and
+     (liqSweepDown or inOTE or fvgScore > 0 or obScore > 0) and
+     (bosDown or chochDown) and
+     not na(lastSwingHigh)
+
+bool buySignal  = buyRaw  and barstate.isconfirmed
+bool sellSignal = sellRaw and barstate.isconfirmed
+
+// ============================================================
+// SECTION 17: RISK MANAGEMENT
+// ============================================================
+
+var float buyEntry  = na
+var float buySL     = na
+var float buyTP1    = na
+var float buyTP2    = na
+var float buyTP3    = na
+var float buyRR     = na
+
+var float sellEntry = na
+var float sellSL    = na
+var float sellTP1   = na
+var float sellTP2   = na
+var float sellTP3   = na
+var float sellRR    = na
+
+if buySignal
+    buyEntry := close
+    buySL    := math.min(lastSwingLow - atr14 * 0.2,
+         close - atr14 * inp_atrMult)
+    float bRisk = buyEntry - buySL
+    buyTP1   := bRisk > 0 ? buyEntry + bRisk * inp_tp1RR : na
+    buyTP2   := bRisk > 0 ? buyEntry + bRisk * inp_tp2RR : na
+    buyTP3   := bRisk > 0 ? buyEntry + bRisk * inp_tp3RR : na
+    buyRR    := bRisk > 0 and not na(buyTP2) ?
+         (buyTP2 - buyEntry) / bRisk : 0.0
+
+if sellSignal
+    sellEntry := close
+    sellSL    := math.max(lastSwingHigh + atr14 * 0.2,
+         close + atr14 * inp_atrMult)
+    float sRisk = sellSL - sellEntry
+    sellTP1   := sRisk > 0 ? sellEntry - sRisk * inp_tp1RR : na
+    sellTP2   := sRisk > 0 ? sellEntry - sRisk * inp_tp2RR : na
+    sellTP3   := sRisk > 0 ? sellEntry - sRisk * inp_tp3RR : na
+    sellRR    := sRisk > 0 and not na(sellTP2) ?
+         (sellEntry - sellTP2) / sRisk : 0.0
+
+// ============================================================
+// SECTION 18: SIGNAL VISUALIZATION
+// ============================================================
+
+if inp_showSigs and buySignal
+    label.new(bar_index, low - atr14 * 0.5,
+         "🟢 BUY\n" +
+         "Entry : " + priceStr(buyEntry) + "\n" +
+         "SL    : " + priceStr(buySL)    + "\n" +
+         "TP1   : " + priceStr(buyTP1)   + "\n" +
+         "TP2   : " + priceStr(buyTP2)   + "\n" +
+         "TP3   : " + priceStr(buyTP3)   + "\n" +
+         "Score : " + str.tostring(totalScore) + "/100\n" +
+         "R:R   : 1:" + str.tostring(buyRR, "#.##"),
+         color     = inp_buyColor,
+         textcolor = color.white,
+         style     = label.style_label_up,
+         size      = size.normal)
+
+    if inp_showSLTP and not na(buySL) and not na(buyTP3)
+        line.new(bar_index, buySL,  bar_index + 25, buySL,
+             color=color.new(#FF5252, 0), width=2)
+        line.new(bar_index, buyTP1, bar_index + 25, buyTP1,
+             color=color.new(#69F0AE, 60), width=1,
+             style=line.style_dashed)
+        line.new(bar_index, buyTP2, bar_index + 25, buyTP2,
+             color=color.new(#00E676, 40), width=1,
+             style=line.style_dashed)
+        line.new(bar_index, buyTP3, bar_index + 25, buyTP3,
+             color=color.new(#00BFA5, 20), width=2)
+
+if inp_showSigs and sellSignal
+    label.new(bar_index, high + atr14 * 0.5,
+         "🔴 SELL\n" +
+         "Entry : " + priceStr(sellEntry) + "\n" +
+         "SL    : " + priceStr(sellSL)    + "\n" +
+         "TP1   : " + priceStr(sellTP1)   + "\n" +
+         "TP2   : " + priceStr(sellTP2)   + "\n" +
+         "TP3   : " + priceStr(sellTP3)   + "\n" +
+         "Score : " + str.tostring(totalScore) + "/100\n" +
+         "R:R   : 1:" + str.tostring(sellRR, "#.##"),
+         color     = inp_sellColor,
+         textcolor = color.white,
+         style     = label.style_label_down,
+         size      = size.normal)
+
+    if inp_showSLTP and not na(sellSL) and not na(sellTP3)
+        line.new(bar_index, sellSL,  bar_index + 25, sellSL,
+             color=color.new(#FF5252, 0), width=2)
+        line.new(bar_index, sellTP1, bar_index + 25, sellTP1,
+             color=color.new(#FF8A80, 60), width=1,
+             style=line.style_dashed)
+        line.new(bar_index, sellTP2, bar_index + 25, sellTP2,
+             color=color.new(#FF5252, 40), width=1,
+             style=line.style_dashed)
+        line.new(bar_index, sellTP3, bar_index + 25, sellTP3,
+             color=color.new(#D50000, 20), width=2)
+
+// Plotshape arrows (always visible on chart)
+plotshape(inp_showSigs and buySignal,
+     title="Buy Signal",
+     style=shape.triangleup,
+     location=location.belowbar,
+     color=inp_buyColor,
+     size=size.normal,
+     text="BUY")
+
+plotshape(inp_showSigs and sellSignal,
+     title="Sell Signal",
+     style=shape.triangledown,
+     location=location.abovebar,
+     color=inp_sellColor,
+     size=size.normal,
+     text="SELL")
+
+// ============================================================
+// SECTION 19: DASHBOARD
+// ============================================================
+
+// Dashboard position mapping
+string tPos =
+     inp_dashPos == "Top Right"    ? position.top_right    :
+     inp_dashPos == "Top Left"     ? position.top_left     :
+     inp_dashPos == "Bottom Right" ? position.bottom_right :
+     position.bottom_left
+
+var table dash = table.new(
+     tPos, 2, 20,
+     bgcolor      = inp_dashBg,
+     border_color = color.new(#333333, 0),
+     border_width = 1,
+     frame_color  = color.new(#00E5FF, 0),
+     frame_width  = 2)
+
+// Only update dashboard on the last bar for performance
+if inp_showDash and barstate.islast
+
+    // --- Row 0: Title ---
+    table.cell(dash, 0, 0, "⚡ ELITE SMC + ICT",
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.normal,
+         bgcolor     = color.new(#0f3460, 0),
+         text_halign = text.align_center)
+    table.cell(dash, 1, 0, "INSTITUTIONAL",
+         text_color  = color.new(#FFD700, 0),
+         text_size   = size.normal,
+         bgcolor     = color.new(#0f3460, 0),
+         text_halign = text.align_center)
+
+    // --- Row 1: Divider ---
+    table.cell(dash, 0, 1, "── MARKET ──────────────",
+         text_color  = color.new(#555555, 0),
+         text_size   = size.tiny,
+         bgcolor     = inp_dashBg,
+         text_halign = text.align_left)
+    table.cell(dash, 1, 1, "",
+         bgcolor = inp_dashBg)
+
+    // --- Row 2: Symbol ---
+    table.cell(dash, 0, 2, "📌 Symbol",
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#1a1a2e, 0),
+         text_halign = text.align_left)
+    table.cell(dash, 1, 2,
+         syminfo.ticker + " | " + timeframe.period,
+         text_color  = color.white,
+         text_size   = size.small,
+         bgcolor     = color.new(#16213e, 0),
+         text_halign = text.align_right)
+
+    // --- Row 3: Trend ---
+    string trendStr = bullishBias ? "⬆ BULLISH" : "⬇ BEARISH"
+    color  trendClr = bullishBias ?
+         color.new(#00E676, 0) : color.new(#FF5252, 0)
+    table.cell(dash, 0, 3, "📈 Trend",
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#1a1a2e, 0),
+         text_halign = text.align_left)
+    table.cell(dash, 1, 3, trendStr,
+         text_color  = trendClr,
+         text_size   = size.small,
+         bgcolor     = color.new(#16213e, 0),
+         text_halign = text.align_right)
+
+    // --- Row 4: Session ---
+    table.cell(dash, 0, 4, "🕐 Session",
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#1a1a2e, 0),
+         text_halign = text.align_left)
+    table.cell(dash, 1, 4, activeSession,
+         text_color  = color.new(#FFEB3B, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#16213e, 0),
+         text_halign = text.align_right)
+
+    // --- Row 5: P/D Zone ---
+    string pdStr = inDiscount ? "💚 Discount" :
+         inPremium ? "🔴 Premium" : "⚖ Equilibrium"
+    color pdClr = inDiscount ? color.new(#00E676, 0) :
+         inPremium ? color.new(#FF5252, 0) : color.white
+    table.cell(dash, 0, 5, "📍 P/D Zone",
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#1a1a2e, 0),
+         text_halign = text.align_left)
+    table.cell(dash, 1, 5, pdStr,
+         text_color  = pdClr,
+         text_size   = size.small,
+         bgcolor     = color.new(#16213e, 0),
+         text_halign = text.align_right)
+
+    // --- Row 6: Divider ---
+    table.cell(dash, 0, 6, "── CONFLUENCE ──────────",
+         text_color  = color.new(#555555, 0),
+         text_size   = size.tiny,
+         bgcolor     = inp_dashBg,
+         text_halign = text.align_left)
+    table.cell(dash, 1, 6, "", bgcolor=inp_dashBg)
+
+    // --- Row 7: Score ---
+    table.cell(dash, 0, 7, "🎯 Score",
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#1a1a2e, 0),
+         text_halign = text.align_left)
+    table.cell(dash, 1, 7,
+         str.tostring(totalScore) + " / 100",
+         text_color  = scoreColor,
+         text_size   = size.small,
+         bgcolor     = color.new(#16213e, 0),
+         text_halign = text.align_right)
+
+    // --- Row 8: BOS ---
+    bool bosActive = bosScore > 0
+    table.cell(dash, 0, 8, "✅ BOS/CHoCH",
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#1a1a2e, 0),
+         text_halign = text.align_left)
+    table.cell(dash, 1, 8,
+         bosActive ? "✅ " + str.tostring(bosScore) + "pts" : "❌ 0pts",
+         text_color  = bosActive ?
+             color.new(#00E676, 0) : color.new(#555555, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#16213e, 0),
+         text_halign = text.align_right)
+
+    // --- Row 9: Order Block ---
+    bool obActive = obScore > 0
+    table.cell(dash, 0, 9, "🧱 Order Block",
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#1a1a2e, 0),
+         text_halign = text.align_left)
+    table.cell(dash, 1, 9,
+         obActive ? "✅ " + str.tostring(obScore) + "pts" : "❌ 0pts",
+         text_color  = obActive ?
+             color.new(#00E676, 0) : color.new(#555555, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#16213e, 0),
+         text_halign = text.align_right)
+
+    // --- Row 10: FVG ---
+    bool fvgActive = fvgScore > 0
+    table.cell(dash, 0, 10, "⚡ FVG",
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#1a1a2e, 0),
+         text_halign = text.align_left)
+    table.cell(dash, 1, 10,
+         fvgActive ? "✅ " + str.tostring(fvgScore) + "pts" : "❌ 0pts",
+         text_color  = fvgActive ?
+             color.new(#00E676, 0) : color.new(#555555, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#16213e, 0),
+         text_halign = text.align_right)
+
+    // --- Row 11: Liquidity ---
+    bool liqActive = liqScore > 0
+    table.cell(dash, 0, 11, "💧 Liq Sweep",
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#1a1a2e, 0),
+         text_halign = text.align_left)
+    table.cell(dash, 1, 11,
+         liqActive ? "✅ " + str.tostring(liqScore) + "pts" : "❌ 0pts",
+         text_color  = liqActive ?
+             color.new(#00E676, 0) : color.new(#555555, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#16213e, 0),
+         text_halign = text.align_right)
+
+    // --- Row 12: OTE ---
+    table.cell(dash, 0, 12, "📐 OTE Zone",
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#1a1a2e, 0),
+         text_halign = text.align_left)
+    table.cell(dash, 1, 12,
+         inOTE ? "✅ 10pts IN ZONE" : "❌ 0pts",
+         text_color  = inOTE ?
+             color.new(#FFEB3B, 0) : color.new(#555555, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#16213e, 0),
+         text_halign = text.align_right)
+
+    // --- Row 13: Harmonic ---
+    table.cell(dash, 0, 13, "🦋 Harmonic",
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#1a1a2e, 0),
+         text_halign = text.align_left)
+    table.cell(dash, 1, 13,
+         harmDetected ? "✅ " + harmName : "❌ None",
+         text_color  = harmDetected ?
+             color.new(#E040FB, 0) : color.new(#555555, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#16213e, 0),
+         text_halign = text.align_right)
+
+    // --- Row 14: Divider ---
+    table.cell(dash, 0, 14, "── MTF BIAS ────────────",
+         text_color  = color.new(#555555, 0),
+         text_size   = size.tiny,
+         bgcolor     = inp_dashBg,
+         text_halign = text.align_left)
+    table.cell(dash, 1, 14, "", bgcolor=inp_dashBg)
+
+    // --- Row 15: HTF1 ---
+    table.cell(dash, 0, 15, "🔭 " + inp_htf1,
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#1a1a2e, 0),
+         text_halign = text.align_left)
+    table.cell(dash, 1, 15, htf1Bias,
+         text_color  = htf1Bull ?
+             color.new(#00E676, 0) : color.new(#FF5252, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#16213e, 0),
+         text_halign = text.align_right)
+
+    // --- Row 16: HTF2 ---
+    table.cell(dash, 0, 16, "🔭 " + inp_htf2,
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#1a1a2e, 0),
+         text_halign = text.align_left)
+    table.cell(dash, 1, 16, htf2Bias,
+         text_color  = htf2Bull ?
+             color.new(#00E676, 0) : color.new(#FF5252, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#16213e, 0),
+         text_halign = text.align_right)
+
+    // --- Row 17: HTF3 ---
+    table.cell(dash, 0, 17, "🔭 " + inp_htf3,
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#1a1a2e, 0),
+         text_halign = text.align_left)
+    table.cell(dash, 1, 17, htf3Bias,
+         text_color  = htf3Bull ?
+             color.new(#00E676, 0) : color.new(#FF5252, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#16213e, 0),
+         text_halign = text.align_right)
+
+    // --- Row 18: Signal ---
+    string sigStr = buySignal  ? "🟢 BUY ACTIVE"  :
+         sellSignal ? "🔴 SELL ACTIVE" : "⏳ Waiting..."
+    color  sigClr = buySignal  ? color.new(#00E676, 0) :
+         sellSignal ? color.new(#FF5252, 0) :
+         color.new(#888888, 0)
+    table.cell(dash, 0, 18, "🎯 Signal",
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#1a1a2e, 0),
+         text_halign = text.align_left)
+    table.cell(dash, 1, 18, sigStr,
+         text_color  = sigClr,
+         text_size   = size.small,
+         bgcolor     = color.new(#16213e, 0),
+         text_halign = text.align_right)
+
+    // --- Row 19: R:R ---
+    float displayRR  = buySignal ? buyRR : sellSignal ? sellRR : 0.0
+    string rrStr     = displayRR > 0 ?
+         "1 : " + str.tostring(displayRR, "#.##") : "— "
+    table.cell(dash, 0, 19, "⚖ R:R Ratio",
+         text_color  = color.new(#00E5FF, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#1a1a2e, 0),
+         text_halign = text.align_left)
+    table.cell(dash, 1, 19, rrStr,
+         text_color  = displayRR >= 2.0 ?
+             color.new(#00E676, 0) : color.new(#FFEB3B, 0),
+         text_size   = size.small,
+         bgcolor     = color.new(#16213e, 0),
+         text_halign = text.align_right)
+
+// ============================================================
+// SECTION 20: ALERT CONDITIONS
+// ============================================================
+
+alertcondition(buySignal,
+     title   = "🟢 BUY Signal",
+     message = "🟢 BUY | {{ticker}} | {{interval}} | Price: {{close}} | SL below last swing low")
+
+alertcondition(sellSignal,
+     title   = "🔴 SELL Signal",
+     message = "🔴 SELL | {{ticker}} | {{interval}} | Price: {{close}} | SL above last swing high")
+
+alertcondition(bosUp or bosDown,
+     title   = "📊 BOS Detected",
+     message = "📊 BOS | {{ticker}} | {{interval}} | Price: {{close}}")
+
+alertcondition(chochUp or chochDown,
+     title   = "🔄 CHoCH Detected",
+     message = "🔄 CHoCH | {{ticker}} | {{interval}} | Price: {{close}}")
+
+alertcondition(liqSweepUp or liqSweepDown,
+     title   = "💧 Liquidity Sweep",
+     message = "💧 SWEEP | {{ticker}} | {{interval}} | Price: {{close}}")
+
+alertcondition(bullFVG or bearFVG,
+     title   = "⚡ FVG Created",
+     message = "⚡ FVG | {{ticker}} | {{interval}} | Price: {{close}}")
+
+alertcondition(inOTE,
+     title   = "📐 Price in OTE",
+     message = "📐 OTE ZONE | {{ticker}} | {{interval}} | Price: {{close}}")
+
+alertcondition(harmDetected,
+     title   = "🦋 Harmonic PRZ",
+     message = "🦋 HARMONIC | {{ticker}} | {{interval}} | Price: {{close}}")
+
+alertcondition(totalScore >= 80,
+     title   = "🎯 High Confluence 80+",
+     message = "🎯 HIGH SCORE | {{ticker}} | {{interval}} | Price: {{close}}")
+
+alertcondition(inLondon or inNY,
+     title   = "🕐 Kill Zone Active",
+     message = "🕐 KILL ZONE | {{ticker}} | {{interval}} | Price: {{close}}")
