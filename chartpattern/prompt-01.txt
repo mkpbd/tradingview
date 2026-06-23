@@ -1,0 +1,411 @@
+নিচের প্রম্পটটি আপনি [Claude Code](https://claude.ai/code?utm_source=chatgpt.com)-এ ব্যবহার করতে পারেন। এটি এমনভাবে তৈরি করা হয়েছে যাতে Claude একটি production-ready, non-repainting, multi-pattern TradingView indicator তৈরি করতে পারে।
+
+---
+
+# Institutional-Grade TradingView Multi-Pattern Indicator Prompt
+
+You are a senior quantitative trader, Pine Script v6 architect, and TradingView indicator engineer with 20+ years of experience in market microstructure, Smart Money Concepts (SMC), algorithmic trading, and pattern recognition.
+
+Your task is to design and implement a professional, production-ready TradingView indicator in Pine Script v6 that automatically detects, validates, scores, and visualizes major chart patterns.
+
+## Primary Objective
+
+Build a high-performance, non-repainting, multi-timeframe chart pattern detection indicator capable of identifying high-probability trading opportunities across:
+
+* Forex
+* Indices
+* Commodities
+* Gold (XAUUSD)
+* Silver (XAGUSD)
+* Stocks
+* Cryptocurrency
+
+The indicator must work on:
+
+* 1-minute
+* 5-minute
+* 15-minute
+* 1-hour
+* 4-hour
+* Daily
+* Weekly
+
+---
+
+## Chart Patterns to Detect
+
+### Reversal Patterns
+
+#### Bullish Reversal
+
+* Inverse Head and Shoulders
+* Double Bottom
+* Triple Bottom
+* Falling Wedge
+* Bullish Rectangle
+* Rounded Bottom
+* Cup and Handle
+* Diamond Bottom
+* Descending Broadening Wedge
+* Spike Bottom
+* Adam and Eve Bottom
+* Complex Inverse Head and Shoulders
+
+#### Bearish Reversal
+
+* Head and Shoulders
+* Double Top
+* Triple Top
+* Rising Wedge
+* Bearish Rectangle
+* Rounded Top
+* Diamond Top
+* Ascending Broadening Wedge
+* Spike Top
+* Adam and Eve Top
+* Complex Head and Shoulders
+* Bump and Run Reversal
+
+---
+
+### Continuation Patterns
+
+#### Bullish Continuation
+
+* Bull Flag
+* Bull Pennant
+* Ascending Triangle
+* Symmetrical Triangle Bullish Breakout
+* Rising Channel
+* Rectangle Breakout
+* Cup and Handle Continuation
+* Bullish Megaphone
+* Three White Soldiers
+* Mat Hold Pattern
+
+#### Bearish Continuation
+
+* Bear Flag
+* Bear Pennant
+* Descending Triangle
+* Symmetrical Triangle Bearish Breakout
+* Falling Channel
+* Rectangle Breakdown
+* Bearish Megaphone
+* Three Black Crows
+* Falling Three Methods
+* Descending Wedge Continuation
+
+---
+
+### Neutral / Bilateral Patterns
+
+* Symmetrical Triangle
+* Rectangle
+* Pennant
+* Broadening Formation
+* Megaphone Pattern
+* Diamond Pattern
+* Channel Pattern
+* Volatility Contraction Pattern (VCP)
+
+---
+
+### Channel Patterns
+
+* Ascending Channel
+* Descending Channel
+* Horizontal Channel
+* Parallel Channel
+* Regression Channel
+
+---
+
+### Triangle Patterns
+
+* Ascending Triangle
+* Descending Triangle
+* Symmetrical Triangle
+* Expanding Triangle
+* Right-Angled Ascending Triangle
+* Right-Angled Descending Triangle
+
+---
+
+### Flag and Pennant Patterns
+
+* Bull Flag
+* Bear Flag
+* Bull Pennant
+* Bear Pennant
+* High Tight Flag
+
+---
+
+### Broadening Patterns
+
+* Broadening Top
+* Broadening Bottom
+* Broadening Wedge
+* Broadening Formation
+* Megaphone Pattern
+
+---
+
+### Cup Patterns
+
+* Cup and Handle
+* Inverse Cup and Handle
+* Rounded Bottom
+* Rounded Top
+* Saucer Bottom
+
+---
+
+## Technical Requirements
+
+### Pine Script Version
+
+* Use Pine Script v6 only.
+* Follow TradingView best practices.
+* Ensure code compiles without warnings or errors.
+
+### Repainting Rules
+
+The indicator must:
+
+* Never repaint.
+* Never use future-looking data.
+* Never use lookahead mode.
+* Confirm signals only after candle close.
+* Use `barstate.isconfirmed` where necessary.
+
+### Pattern Detection Engine
+
+Use a hybrid approach combining:
+
+* Pivot highs/lows
+* ZigZag logic
+* Swing structure analysis
+* Trendline convergence/divergence
+* Volume confirmation
+* ATR normalization
+* Volatility filters
+
+Patterns must adapt dynamically to:
+
+* Different market conditions
+* Different timeframes
+* Different instrument volatility
+
+---
+
+## Validation Rules
+
+A pattern is valid only if:
+
+* Minimum swing count is satisfied.
+* Neckline is respected.
+* Geometric ratios fall within configurable tolerances.
+* Volume confirms breakout.
+* Breakout candle closes beyond confirmation level.
+* ATR-adjusted noise filter passes.
+* Pattern size exceeds minimum threshold.
+
+Provide user inputs for:
+
+* Tolerance percentage
+* Minimum bars per pattern
+* Maximum bars per pattern
+* Volume multiplier
+* ATR filter strength
+* Breakout confirmation candles
+* Pivot sensitivity
+
+---
+
+## Pattern Quality Scoring
+
+Assign each detected pattern a confidence score from 0–100 based on:
+
+* Symmetry quality
+* Volume confirmation
+* Breakout strength
+* Trend context
+* Risk-to-reward potential
+* Historical reliability
+* Volatility conditions
+
+Display:
+
+* Weak: 0–49
+* Moderate: 50–69
+* Strong: 70–84
+* Institutional Grade: 85–100
+
+Allow users to filter patterns below a minimum score.
+
+---
+
+## Trade Setup Generation
+
+For each confirmed pattern automatically calculate:
+
+### Entry
+
+* Aggressive entry
+* Conservative retest entry
+
+### Stop Loss
+
+* ATR-based stop
+* Structure-based stop
+
+### Targets
+
+* Target 1
+* Target 2
+* Target 3
+
+Calculate:
+
+* Risk-to-reward ratio
+* Estimated move projection
+
+---
+
+## Visualization Requirements
+
+Draw:
+
+* Pattern boundaries
+* Trendlines
+* Necklines
+* Channels
+* Breakout zones
+* Entry levels
+* Stop-loss levels
+* Take-profit levels
+
+Use:
+
+* Green for bullish
+* Red for bearish
+* Yellow for neutral
+
+Labels must show:
+
+* Pattern name
+* Confidence score
+* Direction
+* Entry price
+* Stop loss
+* Risk-to-reward ratio
+
+Use tables for summary information.
+
+Avoid chart clutter.
+
+Provide toggles for each visualization component.
+
+---
+
+## Alerts
+
+Create alert conditions for:
+
+* Pattern detected
+* Breakout confirmed
+* Retest completed
+* Target reached
+* Stop loss hit
+
+Alert messages must include:
+
+* Symbol
+* Timeframe
+* Pattern name
+* Direction
+* Confidence score
+* Entry
+* Stop loss
+* Target 1
+
+---
+
+## Performance Optimization
+
+The indicator must:
+
+* Respect TradingView limits.
+* Minimize loops.
+* Reuse calculations.
+* Avoid excessive line objects.
+* Automatically delete obsolete drawings.
+* Maintain smooth performance on lower timeframes.
+
+Maximum recommended object count:
+
+* Lines: 300
+* Labels: 300
+* Boxes: 100
+
+---
+
+## Code Architecture
+
+Organize code into modules:
+
+1. Settings
+2. Utility functions
+3. Pivot engine
+4. ZigZag engine
+5. Pattern detectors
+6. Validation engine
+7. Scoring engine
+8. Visualization engine
+9. Alert engine
+
+Use:
+
+* Arrays
+* Custom types
+* Functions
+* Enumerations
+
+Provide extensive comments explaining:
+
+* Detection logic
+* Validation rules
+* Mathematical formulas
+* Optimization decisions
+
+---
+
+## Deliverables
+
+Provide:
+
+1. Complete Pine Script v6 source code.
+2. Detailed explanation of detection algorithms.
+3. Optimization notes.
+4. User guide.
+5. Recommended settings by market type:
+
+* Forex
+* Gold
+* Crypto
+* Stocks
+
+6. Known limitations.
+7. Future enhancement suggestions.
+
+If TradingView limitations prevent implementing every pattern in a single indicator:
+
+* Prioritize patterns by historical reliability.
+* Split the solution into multiple indicators.
+* Clearly explain the architecture and trade-offs.
+
+Do not simplify the implementation.
+
+Think step-by-step like an institutional quant developer before writing code.
