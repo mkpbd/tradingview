@@ -1,0 +1,429 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════
+// 🏛️ INSTITUTIONAL MASTER ANALYZER  v2 — money-flow engine rebuilt
+//   v2 changelog (vs money-flaw-1):
+//     1 Money-flow: single-bar read → CVD + MFI + divergence engine
+//     2 Dashboard names Distribution / Accumulation (real institutional tell)
+//     3 Signal cooldown decoupled to its own input (less spam)
+//     4 Order Blocks no longer draw into the future + old box deleted (no leak)
+//     5 Divergence feeds the confirmation score
+//
+//   1 Market Structure (BOS / CHOCH / trend / internal+external)
+//   2 Liquidity (EQH/EQL · BSL/SSL · sweeps · stop hunt · inducement)
+//   3 Smart Money (Order Blocks · FVG / imbalance · Premium/Discount)
+//   4 Candle Structure (wick · body · rejection · pin · engulf · doji · expansion)
+//   5 Whale vs Shark (volume participation · accumulation/distribution)
+//   6 Breakout Validation (volume · liquidity removal · structure · retest)
+//   7 Fibonacci (auto-draw · 50/61.8/70.5/78.6 · OTE)
+//   8 Bollinger Bands (expansion · compression · mean reversion · extreme dev)
+//   9 Trade Setup (Entry/SL/TP1-3 · RR gate 1:2 min)
+//  10 Confirmation Score (0-100 weighted) → BUY / SELL / WAIT verdict
+//
+// indicator() only — visual analysis + dashboard. No broker fills.
+// Never uses candle color alone; weights liquidity/structure/smart-money/flow.
+// ═══════════════════════════════════════════════════════════════════════════
+indicator("Institutional Master Analyzer v2", shorttitle="IMA2", overlay=true,
+     max_boxes_count=500, max_lines_count=500, max_labels_count=500)
+
+// ─────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────
+gStr = "① Structure"
+pivLen   = input.int(8, "Swing pivot length", minval=2, maxval=50, group=gStr, tooltip="Bars left/right for swing High/Low detection (external structure)")
+pivLenIn = input.int(3, "Internal pivot length", minval=1, maxval=20, group=gStr, tooltip="Smaller pivots = internal structure / inducement")
+
+gLiq = "② Liquidity"
+eqTol    = input.float(0.10, "Equal H/L tolerance (× ATR)", minval=0.02, maxval=1.0, step=0.02, group=gLiq)
+sweepTol = input.float(0.08, "Sweep wick tolerance (× ATR)", minval=0.0, step=0.02, group=gLiq, tooltip="Wick must pierce the level by ≥ this and close back")
+
+gSmc = "③ Smart Money"
+showOB   = input.bool(true,  "Show Order Blocks", group=gSmc)
+showFVG  = input.bool(true,  "Show Fair Value Gaps", group=gSmc)
+fvgMin   = input.float(0.15, "Min FVG size (× ATR)", minval=0.0, step=0.05, group=gSmc)
+showPD   = input.bool(true,  "Show Premium/Discount", group=gSmc)
+
+gCnd = "④ Candle"
+expMult  = input.float(1.5, "Expansion range (× ATR)", minval=0.5, step=0.1, group=gCnd)
+wickRej  = input.float(0.60, "Rejection wick ratio", minval=0.3, maxval=0.9, step=0.05, group=gCnd, tooltip="Wick ÷ range to flag pin/rejection")
+
+gVol = "⑤ Whale/Volume/Flow"
+volMult  = input.float(1.7, "Whale volume (× avg)", minval=1.0, step=0.1, group=gVol)
+volLen   = input.int(20, "Volume avg length", minval=5, group=gVol)
+mfLen    = input.int(14, "Money-flow length",    minval=5, group=gVol, tooltip="Window for CVD sum, MFI, and divergence lookback")
+mfSmooth = input.int(5,  "Money-flow smoothing",  minval=1, group=gVol)
+
+gFib = "⑦ Fibonacci"
+showFib  = input.bool(true, "Auto-draw Fibonacci (last swing)", group=gFib)
+
+gBB = "⑧ Bollinger"
+bbLen    = input.int(20, "BB length", minval=5, group=gBB)
+bbMult   = input.float(2.0, "BB std-dev mult", minval=1.0, step=0.1, group=gBB)
+
+gTrade = "⑨ Trade Setup"
+minRR    = input.float(2.0, "Min Risk:Reward (TP1)", minval=1.0, step=0.5, group=gTrade)
+slBuf    = input.float(0.25, "SL buffer beyond sweep (× ATR)", minval=0.0, step=0.05, group=gTrade)
+
+gScore = "⑩ Score / UI"
+gateScore   = input.int(61, "Min score to fire signal", minval=0, maxval=100, group=gScore, tooltip="61+ = Good, 81+ = Institutional grade")
+sigCooldown = input.int(20, "Bars between signals", minval=1, group=gScore, tooltip="Min bars between fired LONG/SHORT signals — raise to cut spam")
+showDash    = input.bool(true, "Show dashboard", group=gScore)
+dashPos     = input.string("Top Right", "Dashboard position", options=["Top Right","Top Left","Bottom Right","Bottom Left"], group=gScore)
+biasUseHTF  = input.bool(true, "Confirm trend with HTF EMA", group=gScore)
+htfRes      = input.timeframe("60", "HTF for bias", group=gScore)
+
+// ─────────────────────────────────────────────────────────────
+// CORE SERIES
+// ─────────────────────────────────────────────────────────────
+atr      = ta.atr(14)
+volAvg   = ta.sma(volume, volLen)
+emaFast  = ta.ema(close, 21)
+emaSlow  = ta.ema(close, 50)
+htfEma   = request.security(syminfo.tickerid, htfRes, ta.ema(close, 50), barmerge.gaps_off, barmerge.lookahead_off)
+
+rng      = high - low
+body     = math.abs(close - open)
+upWick   = high - math.max(close, open)
+dnWick   = math.min(close, open) - low
+
+// ═════════════════════════════════════════════════════════════
+// STEP 1 — MARKET STRUCTURE  (swing pivots → BOS / CHOCH)
+// ═════════════════════════════════════════════════════════════
+ph = ta.pivothigh(high, pivLen, pivLen)
+pl = ta.pivotlow(low,  pivLen, pivLen)
+
+var float lastSwingHigh = na
+var float lastSwingLow  = na
+var float prevSwingHigh = na
+var float prevSwingLow  = na
+if not na(ph)
+    prevSwingHigh := lastSwingHigh
+    lastSwingHigh := ph
+if not na(pl)
+    prevSwingLow := lastSwingLow
+    lastSwingLow := pl
+
+// trend state: +1 bull, -1 bear, 0 range
+var int trendDir = 0
+bosUp   = not na(lastSwingHigh) and close > lastSwingHigh and close[1] <= lastSwingHigh
+bosDn   = not na(lastSwingLow)  and close < lastSwingLow  and close[1] >= lastSwingLow
+chochUp = bosUp and trendDir == -1
+chochDn = bosDn and trendDir == 1
+if bosUp
+    trendDir := 1
+if bosDn
+    trendDir := -1
+
+structLabel = chochUp ? "CHOCH↑" : chochDn ? "CHOCH↓" : bosUp ? "BOS↑" : bosDn ? "BOS↓" : ""
+if bosUp or bosDn
+    label.new(bar_index, bosUp ? low - atr*0.5 : high + atr*0.5, structLabel,
+         style=bosUp ? label.style_label_up : label.style_label_down,
+         color=bosUp ? color.new(color.teal,20) : color.new(color.red,20),
+         textcolor=color.white, size=size.small)
+
+// internal pivots (inducement / internal structure)
+phIn = ta.pivothigh(high, pivLenIn, pivLenIn)
+plIn = ta.pivotlow(low,  pivLenIn, pivLenIn)
+
+// ═════════════════════════════════════════════════════════════
+// STEP 2 — LIQUIDITY  (EQH/EQL · sweeps · stop hunt)
+// ═════════════════════════════════════════════════════════════
+eqThresh = atr * eqTol
+equalHigh = not na(ph) and not na(prevSwingHigh) and math.abs(ph - prevSwingHigh) <= eqThresh
+equalLow  = not na(pl) and not na(prevSwingLow)  and math.abs(pl - prevSwingLow)  <= eqThresh
+
+// liquidity sweep: wick takes prior swing then closes back inside (stop hunt)
+swpTh = atr * sweepTol
+sweepHigh = not na(lastSwingHigh) and high > lastSwingHigh + swpTh and close < lastSwingHigh
+sweepLow  = not na(lastSwingLow)  and low  < lastSwingLow  - swpTh and close > lastSwingLow
+
+if equalHigh
+    line.new(bar_index[pivLen], ph, bar_index, ph, color=color.new(color.orange,30), style=line.style_dotted, width=1)
+if equalLow
+    line.new(bar_index[pivLen], pl, bar_index, pl, color=color.new(color.orange,30), style=line.style_dotted, width=1)
+if sweepHigh
+    label.new(bar_index, high, "⚡SSL grab", style=label.style_label_down, color=color.new(color.maroon,20), textcolor=color.white, size=size.tiny)
+if sweepLow
+    label.new(bar_index, low,  "⚡BSL grab", style=label.style_label_up,   color=color.new(color.green,20),  textcolor=color.white, size=size.tiny)
+
+// ═════════════════════════════════════════════════════════════
+// STEP 3 — SMART MONEY  (Order Blocks · FVG · Premium/Discount)
+// ═════════════════════════════════════════════════════════════
+// Order block = last opposite candle before BOS impulse
+// FIX v2: draw to bar_index (no future-draw) + delete prior box (no leak)
+var box obBull = na
+var box obBear = na
+if bosUp
+    if not na(obBull)
+        box.delete(obBull)
+    obBull := box.new(bar_index[1], high[1], bar_index, low[1], border_color=color.teal, bgcolor=color.new(color.teal,85), text="Bull OB", text_color=color.teal, text_size=size.tiny)
+if bosDn
+    if not na(obBear)
+        box.delete(obBear)
+    obBear := box.new(bar_index[1], high[1], bar_index, low[1], border_color=color.red, bgcolor=color.new(color.red,85), text="Bear OB", text_color=color.red, text_size=size.tiny)
+if showOB and not na(obBull)
+    box.set_right(obBull, bar_index)
+if showOB and not na(obBear)
+    box.set_right(obBear, bar_index)
+
+// Fair Value Gap (3-candle imbalance)
+bullFVG = low > high[2] and (low - high[2]) > atr*fvgMin
+bearFVG = high < low[2] and (low[2] - high) > atr*fvgMin
+if showFVG and bullFVG
+    box.new(bar_index[2], low, bar_index, high[2], border_color=na, bgcolor=color.new(color.green,80))
+if showFVG and bearFVG
+    box.new(bar_index[2], low[2], bar_index, high, border_color=na, bgcolor=color.new(color.red,80))
+
+// Premium / Discount from last swing range; 50% = equilibrium
+swHi = math.max(nz(lastSwingHigh, high), high)
+swLo = math.min(nz(lastSwingLow, low), low)
+eqMid = (swHi + swLo) / 2
+inDiscount = close < eqMid           // discount = buy zone
+inPremium  = close > eqMid           // premium = sell zone
+
+// ═════════════════════════════════════════════════════════════
+// STEP 4 — CANDLE STRUCTURE  (ignore color; read wick/body/flow)
+// ═════════════════════════════════════════════════════════════
+bodyRatio   = rng > 0 ? body / rng : 0
+expansion   = rng > atr * expMult
+compression = rng < atr * 0.6
+upRejection = rng > 0 and upWick / rng >= wickRej     // selling rejection (money out top)
+dnRejection = rng > 0 and dnWick / rng >= wickRej     // buying rejection (money in bottom)
+pinBar      = upRejection or dnRejection
+doji        = bodyRatio < 0.1
+bullEngulf  = close > open and close[1] < open[1] and close >= open[1] and open <= close[1]
+bearEngulf  = close < open and close[1] > open[1] and close <= open[1] and open >= close[1]
+
+// ═════════════════════════════════════════════════════════════
+// MONEY-FLOW ENGINE  (CVD + MFI + divergence — replaces single-bar read)
+//   barDelta : where price closed in its range, weighted by volume
+//   cvd      : cumulative volume delta over mfLen (accumulation/distribution)
+//   mfi      : built-in volume-weighted oscillator
+//   *Div     : price vs flow disagreement = the real institutional tell
+// ═════════════════════════════════════════════════════════════
+barDelta  = rng > 0 ? volume * ((close - low) - (high - close)) / rng : 0.0
+cvd       = math.sum(barDelta, mfLen)
+cvdSmooth = ta.ema(cvd, mfSmooth)
+mfi       = ta.mfi(hlc3, mfLen)
+
+flowUp = cvdSmooth > 0 and cvdSmooth > cvdSmooth[1]
+flowDn = cvdSmooth < 0 and cvdSmooth < cvdSmooth[1]
+mfiOB  = mfi > 80                                  // overbought → distribution
+mfiOS  = mfi < 20                                  // oversold → accumulation
+
+priceUp = close > close[mfLen]
+priceDn = close < close[mfLen]
+bearDiv = priceUp and cvdSmooth < cvdSmooth[mfLen] // price up, money out → distribution
+bullDiv = priceDn and cvdSmooth > cvdSmooth[mfLen] // price down, money in → accumulation
+
+moneyIn  = flowUp or bullDiv or mfiOS
+moneyOut = flowDn or bearDiv or mfiOB
+
+// ═════════════════════════════════════════════════════════════
+// STEP 5 — WHALE vs SHARK  (volume participation)
+// ═════════════════════════════════════════════════════════════
+whaleVol  = volume > volAvg * volMult
+bigCandle = expansion and bodyRatio > 0.5
+whaleBuy  = whaleVol and bigCandle and moneyIn
+whaleSell = whaleVol and bigCandle and moneyOut
+retailTrap= whaleVol and (upRejection or dnRejection) and not bigCandle  // high vol, no follow-through
+
+// ═════════════════════════════════════════════════════════════
+// STEP 6 — BREAKOUT VALIDATION
+// ═════════════════════════════════════════════════════════════
+volExpand   = volume > volAvg * 1.3
+realBreakUp = bosUp and volExpand and moneyIn and not upRejection
+realBreakDn = bosDn and volExpand and moneyOut and not dnRejection
+fakeBreakUp = bosUp and (not volExpand or upRejection or sweepHigh)
+fakeBreakDn = bosDn and (not volExpand or dnRejection or sweepLow)
+
+// ═════════════════════════════════════════════════════════════
+// STEP 7 — FIBONACCI  (auto-draw last swing; OTE 0.62–0.79)
+// ═════════════════════════════════════════════════════════════
+fibTop = swHi
+fibBot = swLo
+fibBull = trendDir >= 0      // measure low→high for a long bias
+f_fib(lvl) => fibBull ? fibTop - (fibTop - fibBot) * lvl : fibBot + (fibTop - fibBot) * lvl
+fib50 = (fibTop + fibBot)/2
+fib618 = f_fib(0.618)
+fib705 = f_fib(0.705)
+fib786 = f_fib(0.786)
+oteHi = math.max(fib618, fib786)
+oteLo = math.min(fib618, fib786)
+inOTE = close <= oteHi and close >= oteLo
+var line lf50  = na
+var line lf618 = na
+var line lf705 = na
+var line lf786 = na
+if showFib and barstate.islast and not na(fibTop) and not na(fibBot)
+    if not na(lf50)
+        line.delete(lf50)
+        line.delete(lf618)
+        line.delete(lf705)
+        line.delete(lf786)
+    lf50  := line.new(bar_index-30, fib50,  bar_index, fib50,  color=color.gray,   style=line.style_dashed)
+    lf618 := line.new(bar_index-30, fib618, bar_index, fib618, color=color.yellow, width=2)
+    lf705 := line.new(bar_index-30, fib705, bar_index, fib705, color=color.orange)
+    lf786 := line.new(bar_index-30, fib786, bar_index, fib786, color=color.red,    width=2)
+
+// ═════════════════════════════════════════════════════════════
+// STEP 8 — BOLLINGER BANDS
+// ═════════════════════════════════════════════════════════════
+bbBasis = ta.sma(close, bbLen)
+bbDev   = bbMult * ta.stdev(close, bbLen)
+bbUp    = bbBasis + bbDev
+bbLo    = bbBasis - bbDev
+bbWidth = (bbUp - bbLo) / bbBasis
+bbSqueeze = bbWidth < ta.lowest(bbWidth, 50) * 1.15      // compression
+bbExpand  = bbWidth > ta.highest(bbWidth, 50) * 0.95     // expansion
+extremeUp = high >= bbUp and upRejection                  // institutional rejection top
+extremeDn = low  <= bbLo and dnRejection                  // institutional rejection bottom
+
+// ═════════════════════════════════════════════════════════════
+// TREND BIAS  (whale-flow direction)
+// ═════════════════════════════════════════════════════════════
+emaBias  = emaFast > emaSlow ? 1 : emaFast < emaSlow ? -1 : 0
+htfBias  = close > htfEma ? 1 : close < htfEma ? -1 : 0
+bias     = biasUseHTF ? (emaBias + htfBias) : emaBias    // -2..+2
+biasUp   = bias > 0
+biasDn   = bias < 0
+
+// ═════════════════════════════════════════════════════════════
+// STEP 10 — CONFIRMATION SCORE  (weighted, 0-100)
+//   Structure 20 · Liquidity 20 · SMC 20 · Candle 15 · Volume 15 · Fib 5 · BB 5
+//   v2: divergence adds an accumulation/distribution bonus (clamped at 100)
+// ═════════════════════════════════════════════════════════════
+// LONG score
+sLong = 0.0
+sLong += (trendDir==1 or chochUp or biasUp) ? 20 : (trendDir==0 ? 8 : 0)            // structure
+sLong += (sweepLow or equalLow) ? 20 : (inDiscount ? 10 : 0)                         // liquidity
+sLong += (not na(obBull) and inDiscount) ? 12 : 0
+sLong += bullFVG ? 8 : 0                                                              // SMC (OB+FVG=20)
+sLong += (dnRejection or bullEngulf or moneyIn) ? 15 : (doji ? 5 : 0)                // candle
+sLong += whaleBuy ? 15 : (volExpand and moneyIn ? 8 : 0)                             // volume
+sLong += inOTE ? 5 : 0                                                               // fib
+sLong += extremeDn ? 5 : 0                                                           // BB
+sLong += bullDiv ? 8 : 0                                                             // accumulation bonus
+scoreLong = math.min(sLong, 100)
+
+// SHORT score
+sShort = 0.0
+sShort += (trendDir==-1 or chochDn or biasDn) ? 20 : (trendDir==0 ? 8 : 0)
+sShort += (sweepHigh or equalHigh) ? 20 : (inPremium ? 10 : 0)
+sShort += (not na(obBear) and inPremium) ? 12 : 0
+sShort += bearFVG ? 8 : 0
+sShort += (upRejection or bearEngulf or moneyOut) ? 15 : (doji ? 5 : 0)
+sShort += whaleSell ? 15 : (volExpand and moneyOut ? 8 : 0)
+sShort += inOTE ? 5 : 0
+sShort += extremeUp ? 5 : 0
+sShort += bearDiv ? 8 : 0                                                            // distribution bonus
+scoreShort = math.min(sShort, 100)
+
+bestScore = math.max(scoreLong, scoreShort)
+longBias  = scoreLong > scoreShort
+verdict   = bestScore < gateScore ? "WAIT" : longBias ? "BUY" : "SELL"
+
+grade = bestScore <= 40 ? "Avoid" : bestScore <= 60 ? "Weak" : bestScore <= 80 ? "Good" : "Institutional"
+
+// ═════════════════════════════════════════════════════════════
+// STEP 9 — TRADE SETUP  (Entry / SL / TP1-3 · RR gate)
+// ═════════════════════════════════════════════════════════════
+// LONG setup
+longEntry = close
+longSL    = (sweepLow ? low : swLo) - atr*slBuf
+longRisk  = longEntry - longSL
+longTP1   = longEntry + longRisk*minRR
+longTP2   = longEntry + longRisk*3
+longTP3   = longEntry + longRisk*5
+longRRok  = longRisk > 0
+
+// SHORT setup
+shortEntry= close
+shortSL   = (sweepHigh ? high : swHi) + atr*slBuf
+shortRisk = shortSL - shortEntry
+shortTP1  = shortEntry - shortRisk*minRR
+shortTP2  = shortEntry - shortRisk*3
+shortTP3  = shortEntry - shortRisk*5
+shortRRok = shortRisk > 0
+
+// ── FIRE SIGNALS ──
+// FIX v2: cooldown now its own input (was hard-coded pivLen)
+var int lastSig = 0
+canFire = bar_index - lastSig > sigCooldown
+fireLong  = verdict=="BUY"  and longRRok  and canFire
+fireShort = verdict=="SELL" and shortRRok and canFire
+if fireLong or fireShort
+    lastSig := bar_index
+
+plotshape(fireLong,  "LONG",  shape.triangleup,   location.belowbar, color.new(color.green,0), size=size.small, text="LONG")
+plotshape(fireShort, "SHORT", shape.triangledown, location.abovebar, color.new(color.red,0),   size=size.small, text="SHORT")
+
+// premium/discount fill
+plot(showPD ? eqMid : na, "Equilibrium 50%", color=color.new(color.gray,40), style=plot.style_linebr)
+plot(bbUp, "BB Up", color=color.new(color.blue,70))
+plot(bbLo, "BB Lo", color=color.new(color.blue,70))
+
+// ═════════════════════════════════════════════════════════════
+// DASHBOARD
+// ═════════════════════════════════════════════════════════════
+f_pos() =>
+    dashPos=="Top Right" ? position.top_right : dashPos=="Top Left" ? position.top_left : dashPos=="Bottom Right" ? position.bottom_right : position.bottom_left
+f_px(x) => str.tostring(math.round_to_mintick(x))
+
+trendTxt = trendDir==1 ? "Bullish ▲" : trendDir==-1 ? "Bearish ▼" : "Range ◆"
+liqTxt   = sweepHigh ? "SSL swept" : sweepLow ? "BSL swept" : equalHigh ? "EQH built" : equalLow ? "EQL built" : "—"
+smcTxt   = inDiscount ? "Discount (buy)" : "Premium (sell)"
+// FIX v2: flow text names divergence first — the real institutional read
+flowTxt  = bearDiv   ? "Distribution ⚠ (money out on rally)" :
+           bullDiv   ? "Accumulation ✓ (money in on dip)"   :
+           whaleBuy  ? "Whale Buy 🐋"  : whaleSell ? "Whale Sell 🐋" :
+           moneyIn   ? "Money In ↑"    : moneyOut  ? "Money Out ↓"  : "Neutral"
+brkTxt   = realBreakUp ? "Real ↑" : realBreakDn ? "Real ↓" : fakeBreakUp or fakeBreakDn ? "Fake ⚠" : "—"
+bbTxt    = bbSqueeze ? "Squeeze" : bbExpand ? "Expansion" : extremeUp ? "Reject Top" : extremeDn ? "Reject Bot" : "Mid"
+vColor   = verdict=="BUY" ? color.green : verdict=="SELL" ? color.red : color.gray
+
+var table dash = table.new(f_pos(), 2, 15, border_width=1)
+if showDash and barstate.islast
+    table.clear(dash, 0, 0, 1, 14)
+    bc = color.new(color.black, 15)
+    hc = color.new(color.blue, 30)
+    tc = color.white
+    table.cell(dash, 0, 0, "🏛️ MASTER ANALYZER", text_color=tc, bgcolor=hc, text_size=size.small)
+    table.cell(dash, 1, 0, grade, text_color=tc, bgcolor=hc, text_size=size.small)
+    table.cell(dash, 0, 1, "Trend",        text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 1, 1, trendTxt,       text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 0, 2, "Structure",    text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 1, 2, structLabel=="" ? "—" : structLabel, text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 0, 3, "Liquidity",    text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 1, 3, liqTxt,         text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 0, 4, "SMC Zone",     text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 1, 4, smcTxt,         text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 0, 5, "Inst. Flow",   text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 1, 5, flowTxt,        text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 0, 6, "MFI",          text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 1, 6, str.tostring(mfi,"#.#") + (mfiOB ? " OB" : mfiOS ? " OS" : ""), text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 0, 7, "Breakout",     text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 1, 7, brkTxt,         text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 0, 8, "Fib OTE",      text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 1, 8, inOTE ? "In OTE ✓" : "Out", text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 0, 9, "Bollinger",    text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 1, 9, bbTxt,          text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 0,10, "Bull Prob",    text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 1,10, str.tostring(scoreLong,"#")+"%",  text_color=color.lime, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 0,11, "Bear Prob",    text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 1,11, str.tostring(scoreShort,"#")+"%", text_color=color.orange, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 0,12, "VERDICT",      text_color=tc, bgcolor=vColor, text_size=size.small)
+    table.cell(dash, 1,12, verdict,        text_color=tc, bgcolor=vColor, text_size=size.small)
+    table.cell(dash, 0,13, "Score",        text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 1,13, str.tostring(bestScore,"#")+"/100", text_color=tc, bgcolor=bc, text_size=size.tiny)
+    setupTxt = verdict=="BUY"  ? "E "+f_px(longEntry)+"  SL "+f_px(longSL)+"  TP1 "+f_px(longTP1) :
+               verdict=="SELL" ? "E "+f_px(shortEntry)+"  SL "+f_px(shortSL)+"  TP1 "+f_px(shortTP1) : "No setup — WAIT"
+    table.cell(dash, 0,14, "Setup",        text_color=tc, bgcolor=bc, text_size=size.tiny)
+    table.cell(dash, 1,14, setupTxt,       text_color=tc, bgcolor=bc, text_size=size.tiny)
+
+// ── ALERTS ──
+alertcondition(fireLong,  "IMA Long",  "IMA BUY — institutional long setup")
+alertcondition(fireShort, "IMA Short", "IMA SELL — institutional short setup")
+alertcondition(sweepHigh, "SSL Sweep", "Sell-side liquidity grab / stop hunt high")
+alertcondition(sweepLow,  "BSL Sweep", "Buy-side liquidity grab / stop hunt low")
+alertcondition(bearDiv,   "Distribution", "Bearish divergence — price up, money flow down")
+alertcondition(bullDiv,   "Accumulation", "Bullish divergence — price down, money flow up")
