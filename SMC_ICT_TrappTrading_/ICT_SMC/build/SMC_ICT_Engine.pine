@@ -335,6 +335,7 @@ type Zone
     string state         = "NEW"
     bool   consumed      = false
     int    touchCount    = 0
+    int    lastTouchBar  = -10
     float  mitigationPct = 0.0
     bool   isHTF         = false
     box    drawing       = na
@@ -372,6 +373,7 @@ type Setup
     bool   smtPresent    = false
     bool   trapConfirmed = false
     bool   tlqConfirmed  = false
+    bool   poiLeft       = false
     int    scoreCtx      = 0
     int    scoreLiq      = 0
     int    scoreStr      = 0
@@ -1300,7 +1302,10 @@ if confirmed and array.size(zones) > 0
             float zh = math.max(z.top - z.bottom, syminfo.mintick)
             bool touching = low <= z.top and high >= z.bottom
             if touching
-                z.touchCount += 1
+                // consecutive bars inside the zone are ONE touch, not one per bar
+                if bar_index - z.lastTouchBar > 1
+                    z.touchCount += 1
+                z.lastTouchBar := bar_index
                 float pen = z.direction == "BULL" ? (z.top - math.max(math.min(low, z.top), z.bottom)) / zh : (math.min(math.max(high, z.bottom), z.top) - z.bottom) / zh
                 z.mitigationPct := math.max(z.mitigationPct, pen)
                 z.state := z.mitigationPct >= 0.5 ? "MITIGATED" : "TOUCHED"
@@ -1352,6 +1357,7 @@ f_reset(Setup s) =>
     s.smtPresent    := false
     s.trapConfirmed := false
     s.tlqConfirmed  := false
+    s.poiLeft       := false
     s.scoreCtx      := 0
     s.scoreLiq      := 0
     s.scoreStr      := 0
@@ -1626,8 +1632,13 @@ if engineOn and confirmed
             activeLong.state := "INVALIDATED"
         else if activeLong.poi.state == "FILLED" or activeLong.poi.state == "INVALID"
             activeLong.state := "INVALIDATED"
-        else if low <= activeLong.poi.top and high >= activeLong.poi.bottom
-            activeLong.state := "RETRACE_WAIT"
+        else
+            // price must LEAVE the POI before a return counts as a retrace
+            bool touchingL = low <= activeLong.poi.top and high >= activeLong.poi.bottom
+            if not touchingL
+                activeLong.poiLeft := true
+            else if activeLong.poiLeft
+                activeLong.state := "RETRACE_WAIT"
     else if activeLong.state == "RETRACE_WAIT"
         if na(activeLong.poi) or activeLong.poi.state == "FILLED" or activeLong.poi.state == "INVALID" or bar_index - activeLong.poiBar > poiTimeout
             activeLong.state := "INVALIDATED"
@@ -1726,8 +1737,12 @@ if engineOn and confirmed
             activeShort.state := "INVALIDATED"
         else if activeShort.poi.state == "FILLED" or activeShort.poi.state == "INVALID"
             activeShort.state := "INVALIDATED"
-        else if low <= activeShort.poi.top and high >= activeShort.poi.bottom
-            activeShort.state := "RETRACE_WAIT"
+        else
+            bool touchingS = low <= activeShort.poi.top and high >= activeShort.poi.bottom
+            if not touchingS
+                activeShort.poiLeft := true
+            else if activeShort.poiLeft
+                activeShort.state := "RETRACE_WAIT"
     else if activeShort.state == "RETRACE_WAIT"
         if na(activeShort.poi) or activeShort.poi.state == "FILLED" or activeShort.poi.state == "INVALID" or bar_index - activeShort.poiBar > poiTimeout
             activeShort.state := "INVALIDATED"

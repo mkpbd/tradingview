@@ -215,3 +215,9 @@ Dashboard-এর `Objects z/l/g/t` সারি live সংখ্যা দে�
 ## Dead code
 
 `voidBars`, `woOn`, `tp1Pct` আগে কোনো code পড়ত না; `tlBreakUp/tlBreakDn` শুধু লেখা হতো। সবগুলো এখন যুক্ত (void run length, daily bias, alert text, trendline break alert)। `drawnLines/drawnLabels` মুছে ফেলা হয়েছে। এখন dead variable **শূন্য**।
+
+## Logic review-এ ধরা পড়া দুইটা bug (fix করা হয়েছে)
+
+1. **POI-তে সাথে সাথে entry হয়ে যেত।** `POI_CREATED → RETRACE_WAIT` শর্ত ছিল "দাম zone ছুঁয়েছে"। কিন্তু zone তৈরিই হয় displacement candle থেকে, তাই দাম তখনো zone-এর গায়ে — পরের bar-এই touch ধরা পড়ত আর retracement ছাড়াই entry হতো। এখন setup-এ `poiLeft` flag: দাম **আগে zone ছেড়ে বেরোতে হবে**, তারপর ফিরে এলেই কেবল `RETRACE_WAIT`। এটাই plan-এর "দাম POI-তে ফিরল"।
+
+2. **`touchCount` স্ফীত হতো।** দাম zone-এর ভেতরে ১০ bar বসে থাকলে touchCount ১০ হয়ে যেত, অথচ ওটা **একটাই** touch। Score v2-তে `touchCount >= 2` মানে −1 penalty, তাই ভুলটা score-এও যেত। এখন `lastTouchBar` দিয়ে পরপর bar একটাই touch হিসেবে গোনা হয়।
