@@ -1819,32 +1819,46 @@ if newDay
     todayLong  := 0
     todayShort := 0
 
-// -- Phase 44 - close a trade and book the result (SL wins ties - conservative)
-f_bookTrade(Setup st) =>
+// -- Phase 44 - R of a closed trade (pure: functions cannot write globals in Pine)
+f_tradeR(Setup st) =>
+    float r = na
     if st.state == "INVALIDATED" and st.entryBar > 0 and st.exitReason != ""
         float exitPx = st.exitReason == "SL" ? st.slPrice : st.exitReason == "BE" ? st.entryPrice : st.exitReason == "TP1" ? st.tp1 : st.exitReason == "TP3" ? st.tp3 : close
         float den    = math.max(math.abs(st.entryPrice - st.slInit), syminfo.mintick)
-        float r      = (st.direction == "LONG" ? exitPx - st.entryPrice : st.entryPrice - exitPx) / den
-        nTrades += 1
-        sumR    += r
-        sumRR   += st.rr
-        bestR   := nTrades == 1 ? r : math.max(bestR, r)
-        worstR  := nTrades == 1 ? r : math.min(worstR, r)
-        if r > 0
-            nWins   += 1
-            lossRun := 0
-        else
-            lossRun += 1
-            maxLossRun := math.max(maxLossRun, lossRun)
-    true
+        r := (st.direction == "LONG" ? exitPx - st.entryPrice : st.entryPrice - exitPx) / den
+    r
 
 // === 08 - CLEANUP ==========================================================
 if confirmed
     if activeLong.state == "INVALIDATED"
-        f_bookTrade(activeLong)
+        float rL = f_tradeR(activeLong)
+        if not na(rL)
+            nTrades += 1
+            sumR    += rL
+            sumRR   += activeLong.rr
+            bestR   := nTrades == 1 ? rL : math.max(bestR, rL)
+            worstR  := nTrades == 1 ? rL : math.min(worstR, rL)
+            if rL > 0
+                nWins   += 1
+                lossRun := 0
+            else
+                lossRun    += 1
+                maxLossRun := math.max(maxLossRun, lossRun)
         f_reset(activeLong)
     if activeShort.state == "INVALIDATED"
-        f_bookTrade(activeShort)
+        float rS = f_tradeR(activeShort)
+        if not na(rS)
+            nTrades += 1
+            sumR    += rS
+            sumRR   += activeShort.rr
+            bestR   := nTrades == 1 ? rS : math.max(bestR, rS)
+            worstR  := nTrades == 1 ? rS : math.min(worstR, rS)
+            if rS > 0
+                nWins   += 1
+                lossRun := 0
+            else
+                lossRun    += 1
+                maxLossRun := math.max(maxLossRun, lossRun)
         f_reset(activeShort)
 
 if confirmed and array.size(zones) > 0
