@@ -649,7 +649,7 @@ htfBias    = htfOn and htfValid and not na(htfBiasRaw) ? htfBiasRaw : "NEUTRAL"
 
 // -- Phase 39 - HTF POI: detect an HTF FVG from CLOSED HTF bars only
 f_htfFvg() =>
-    float a    = ta.atr(atrLen)
+    float a    = ta.atr(atrLen)[1]   // ATR of the CLOSED HTF bar - the live one would repaint the flag
     float body = math.abs(close[2] - open[2])
     float rng  = math.max(high[2] - low[2], syminfo.mintick)
     bool  disp = body / rng >= bodyRatioMin and body >= a * atrMult
