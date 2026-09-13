@@ -227,3 +227,32 @@ Dashboard-এর `Objects z/l/g/t` সারি live সংখ্যা দে�
 3. **EOD flat শুধু trade management on থাকলে কাজ করত।** `eodFlat` স্বাধীন Tier C toggle, কিন্তু exit-টা `tmOn` branch-এর ভেতরে ছিল — `tmOn = false` (default) রাখলে EOD flat একদমই ঘটত না। এখন দুই branch-এই আছে।
 4. **Break-even exit loss হিসেবে গোনা হতো।** BE-তে বেরোলে R = 0, কিন্তু `r > 0` না হওয়ায় সেটা lossRun বাড়াত — "Max consecutive loss" বাড়িয়ে দেখাত। এখন R = 0 নিরপেক্ষ: win-ও নয়, loss-ও নয়।
 5. **Swept level array ছাড়ত না।** প্রতিটা TRAP / TLQ ঘটনা `swept = true` অবস্থায় array-তে ঢুকত আর কখনো বের হতো না; cap ভরে গেলে **পুরনো কিন্তু জীবিত** level বেরিয়ে যেত, আর মৃত record থেকে যেত — TP target আর DOL দুইটাই খারাপ হতো। এখন sweep-এর ৫০ bar পর level (তার line ও label সহ) মুছে যায়।
+
+---
+
+# Reference simulation (`build/tests/`)
+
+চার্ট ছাড়াই Phase 16-এর ক্রম-নির্ভর test চালানোর জন্য Tier A core-টা Python-এ port করা আছে — `sim.py`, আর case গুলো `cases.py`।
+
+```
+python build/tests/cases.py
+```
+
+| Case | কী যাচাই করে | ফল |
+|---|---|---|
+| T1 | পূর্ণ ক্রম (sweep → disp → MSS → FVG → ছেড়ে যাওয়া → ফেরা) | ঠিক ১টা LONG |
+| T4 | sweep আছে, displacement নেই | ০ signal |
+| T5 | target কাছে, RR < 1.5 | ০ signal |
+| T6 | entry-র পর ৫ বার touch | এখনো ১টাই |
+| REG | POI ছেড়ে না গেলে | ০ signal (উপরের bug ১-এর regression) |
+| REG | `touchCount` bar নয়, touch গোনে | ≤ 3 (bug ২-এর regression) |
+| T_TO | `mssTimeout`-এর পরে displacement | ০ signal |
+| T12 | SL sweep-এর নিচে, RR ≥ 1.5 | সত্য |
+
+**সীমাবদ্ধতা — সৎভাবে:** এটা **Pine translation যাচাই করে না**। যা যাচাই করে তা হলো state machine-এর ক্রম, timeout, RR gate আর "এক setup = এক signal" নিয়ম। Pine syntax, drawing, repaint — সব এখনো TradingView-তেই পরীক্ষা করতে হবে।
+
+## Simulation থেকে পাওয়া একটা আচরণ (bug নয়, জেনে রাখা দরকার)
+
+দাম POI-তে ফেরার **পরের bar**-এ entry হয়। কারণ ফেরার bar-এ state `RETRACE_WAIT`-এ যায়, আর entry যাচাই হয় তার পরের bar-এ। ফলে entry একটু রক্ষণশীল (এক bar দেরি), কিন্তু এতে repaint-এর কোনো সুযোগ থাকে না।
+
+আরেকটা জিনিস simulation-এ স্পষ্ট হলো: **RR gate সত্যিই কামড়ায়**। sweep অনেক নিচে হলে SL দূরে যায়, আর পরের liquidity pool কাছে থাকলে RR 1.5-এর নিচে নেমে যায় — তখন সব শর্ত মিললেও trade হয় না। এটা Phase 12-এর ইচ্ছাকৃত আচরণ, signal কম আসার সবচেয়ে সাধারণ কারণও এটাই।
