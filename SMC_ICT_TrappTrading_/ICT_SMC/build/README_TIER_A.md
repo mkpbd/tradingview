@@ -221,3 +221,9 @@ Dashboard-এর `Objects z/l/g/t` সারি live সংখ্যা দে�
 1. **POI-তে সাথে সাথে entry হয়ে যেত।** `POI_CREATED → RETRACE_WAIT` শর্ত ছিল "দাম zone ছুঁয়েছে"। কিন্তু zone তৈরিই হয় displacement candle থেকে, তাই দাম তখনো zone-এর গায়ে — পরের bar-এই touch ধরা পড়ত আর retracement ছাড়াই entry হতো। এখন setup-এ `poiLeft` flag: দাম **আগে zone ছেড়ে বেরোতে হবে**, তারপর ফিরে এলেই কেবল `RETRACE_WAIT`। এটাই plan-এর "দাম POI-তে ফিরল"।
 
 2. **`touchCount` স্ফীত হতো।** দাম zone-এর ভেতরে ১০ bar বসে থাকলে touchCount ১০ হয়ে যেত, অথচ ওটা **একটাই** touch। Score v2-তে `touchCount >= 2` মানে −1 penalty, তাই ভুলটা score-এও যেত। এখন `lastTouchBar` দিয়ে পরপর bar একটাই touch হিসেবে গোনা হয়।
+
+## দ্বিতীয় logic pass — আরও তিনটা
+
+3. **EOD flat শুধু trade management on থাকলে কাজ করত।** `eodFlat` স্বাধীন Tier C toggle, কিন্তু exit-টা `tmOn` branch-এর ভেতরে ছিল — `tmOn = false` (default) রাখলে EOD flat একদমই ঘটত না। এখন দুই branch-এই আছে।
+4. **Break-even exit loss হিসেবে গোনা হতো।** BE-তে বেরোলে R = 0, কিন্তু `r > 0` না হওয়ায় সেটা lossRun বাড়াত — "Max consecutive loss" বাড়িয়ে দেখাত। এখন R = 0 নিরপেক্ষ: win-ও নয়, loss-ও নয়।
+5. **Swept level array ছাড়ত না।** প্রতিটা TRAP / TLQ ঘটনা `swept = true` অবস্থায় array-তে ঢুকত আর কখনো বের হতো না; cap ভরে গেলে **পুরনো কিন্তু জীবিত** level বেরিয়ে যেত, আর মৃত record থেকে যেত — TP target আর DOL দুইটাই খারাপ হতো। এখন sweep-এর ৫০ bar পর level (তার line ও label সহ) মুছে যায়।

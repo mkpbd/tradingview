@@ -1672,8 +1672,8 @@ if engineOn and confirmed
                 longTrigger           := true
     else if activeLong.state == "TRADE_ACTIVE"
         if not tmOn
-            if low <= activeLong.slPrice or high >= activeLong.tp1 or bar_index - activeLong.entryBar > tradeTimeout
-                activeLong.exitReason := low <= activeLong.slPrice ? "SL" : high >= activeLong.tp1 ? "TP1" : "TIME"
+            if low <= activeLong.slPrice or high >= activeLong.tp1 or bar_index - activeLong.entryBar > tradeTimeout or (eodFlat and sessionEnd)
+                activeLong.exitReason := low <= activeLong.slPrice ? "SL" : high >= activeLong.tp1 ? "TP1" : (eodFlat and sessionEnd) ? "EOD" : "TIME"
                 activeLong.state := "INVALIDATED"
         else
             // SL first - same bar SL and TP counts as SL (conservative)
@@ -1776,8 +1776,8 @@ if engineOn and confirmed
                 shortTrigger           := true
     else if activeShort.state == "TRADE_ACTIVE"
         if not tmOn
-            if high >= activeShort.slPrice or low <= activeShort.tp1 or bar_index - activeShort.entryBar > tradeTimeout
-                activeShort.exitReason := high >= activeShort.slPrice ? "SL" : low <= activeShort.tp1 ? "TP1" : "TIME"
+            if high >= activeShort.slPrice or low <= activeShort.tp1 or bar_index - activeShort.entryBar > tradeTimeout or (eodFlat and sessionEnd)
+                activeShort.exitReason := high >= activeShort.slPrice ? "SL" : low <= activeShort.tp1 ? "TP1" : (eodFlat and sessionEnd) ? "EOD" : "TIME"
                 activeShort.state := "INVALIDATED"
         else
             if high >= activeShort.slPrice
@@ -1863,7 +1863,7 @@ if confirmed
             if rL > 0
                 nWins   += 1
                 lossRun := 0
-            else
+            else if rL < 0
                 lossRun    += 1
                 maxLossRun := math.max(maxLossRun, lossRun)
         f_reset(activeLong)
@@ -1878,7 +1878,7 @@ if confirmed
             if rS > 0
                 nWins   += 1
                 lossRun := 0
-            else
+            else if rS < 0
                 lossRun    += 1
                 maxLossRun := math.max(maxLossRun, lossRun)
         f_reset(activeShort)
@@ -1896,6 +1896,17 @@ if confirmed and array.size(zones) > 0
                 line.delete(z.ceLine)
                 z.ceLine := na
             array.remove(zones, i)
+
+// a swept level is history - drop it so the cap does not evict live levels instead
+if confirmed and array.size(liquidity) > 0
+    for i = array.size(liquidity) - 1 to 0
+        LiqLevel lv = array.get(liquidity, i)
+        if lv.swept and bar_index - lv.sweptBar > 50
+            if not na(lv.drawing)
+                line.delete(lv.drawing)
+            if not na(lv.lbl)
+                label.delete(lv.lbl)
+            array.remove(liquidity, i)
 
 // liquidity hard cap (TLQ / TRAP pushes bypass f_pushLiq)
 if array.size(liquidity) > 50
