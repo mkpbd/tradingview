@@ -32,7 +32,7 @@ File: `SMC_ICT_Engine.pine` — Pine Script **v6**, single `indicator()`.
 - Array cap: swings 100 · liquidity 50 · zones 100। মোছার **আগে** `box.delete` / `line.delete`।
 - সব array loop backward, এবং size>0 guard (`for i = size-1 to 0` size 0 হলে index −1 → runtime error, তাই guard)।
 - সব division `math.max(x, syminfo.mintick)` দিয়ে সুরক্ষিত।
-- `request.security` মোট ৩টা, সবগুলোতে `[1]` + `lookahead_off`।
+- `request.security` মোট ৪টা (Tier B-র SMT সহ), সবগুলোতে `[1]` + `lookahead_off`।
 
 ## Repaint checklist (Phase 15)
 
