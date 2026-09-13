@@ -1,0 +1,541 @@
+//@version=6
+// ─────────────────────────────────────────────────────────────────────────────
+// CRT + TBS + TWS · MTF FORENSIC LAYER v1  —  DETECT → VALIDATE → CONFIRM → MARK
+//
+// A STANDALONE COMPANION OVERLAY. It marks nothing but CRT, TBS (turtle soup)
+// and TWS (three-wave sequence) structures, on 15M / 30M / 1H / 4H, and it
+// emits no BUY, SELL, LONG, SHORT, entry, exit, TP, SL or RR of any kind.
+//
+// WHY IT IS A SEPARATE FILE AND NOT AN EDIT TO 14.liquidty+supply-v6.0-ui2.pine
+// -----------------------------------------------------------------------------
+// File 14 (and its whole lineage, files 7-14) is at TradingView's compiled-token
+// ceiling: v5.8 measured ~99 600 of the 100 256 cap, v5.9 gave ~30 source tokens
+// back, v6.0 spent ~50 again. Four HTF detection contexts, each carrying three
+// state machines, is thousands of tokens — it cannot go in that file without
+// deleting working systems, which the scope lock forbids. Files 10
+// (ICT forensic layer) and 12 (retail price-action layer) set the precedent:
+// a substantial NEW capability ships as its own overlay. Add this indicator to
+// the same chart as file 14 and the two read as one workspace.
+//
+// SCOPE LOCK, honoured literally: file 14 was READ, not written. Its bytes are
+// untouched. Nothing in this file reads or writes file 14's liquidity registry,
+// zones, FVG / IFVG, order / breaker / mitigation blocks, CISD, MSS, BOS,
+// CHoCH, OTE, SMC / ICT layers, trade engine, TP / SL, risk, alerts, sessions,
+// dashboard or inputs — this is a different script and cannot touch them.
+//
+// ── WHAT ALREADY EXISTED IN THE LINEAGE (the audit that shaped this file) ────
+//  · CRT existed as V5.5-E1: a five-state lifecycle (IDLE → ARMED → SWEPT →
+//    RECLAIM → CONFIRMED, plus INVALID) on the CHART timeframe only, graded by
+//    penetration (tiny / real / deep) off the same thresholds the pool registry
+//    uses. Its methodology is preserved here verbatim in shape.
+//  · TBS existed as V5.5-E2: same lifecycle over an aged N-bar extreme, with a
+//    user-chosen confirmation rule. Preserved, including the "a one-tick poke
+//    is not a manipulation" rule.
+//  · TWS existed as V5.5-E3: wave 1 interaction → a DEEPER, rejected wave 2 →
+//    reclaim with displacement, and it was explicitly a context engine that
+//    never emits. Preserved, and it still never emits.
+//  · CONFLUENCE existed as V5.8-CTT: one shared label updated to CRT + TBS /
+//    CRT + TWS / TBS + TWS / CRT + TBS + TWS inside a window. Preserved.
+//  · WHAT WAS MISSING: all of it ran on the chart timeframe alone. The only
+//    HTF CRT / TBS in the lineage was f_crtTbsHtf — a single ONE-shot boolean
+//    per HTF bar with no lifecycle, no reclaim stage, no penetration grade and
+//    no TWS, on ONE timeframe. There was no 15M / 30M / 1H / 4H detection, no
+//    per-structure source-timeframe tag, and no MTF confluence. That gap is
+//    what this file fills.
+//
+// ── HOW EACH STRUCTURE IS VALIDATED (no structure is marked on movement alone)
+//  CRT  reference candle must have CLOSED and span ≥ ctt_crtRng × ATR · its
+//       extreme must be SWEPT with the close back INSIDE the range · the
+//       penetration is graded (weak / valid / strong) · a LATER candle must
+//       reclaim the range MID · a LATER candle must displace. A close beyond
+//       the swept extreme is expansion, not a CRT: that invalidates.
+//  TBS  the reference extreme must be at least ctt_tbsAge bars old (an extreme
+//       made two bars ago is the current leg, not resting liquidity) · swept
+//       with the close back on the origin side · graded penetration · a
+//       DECISIVE reclaim (0.25 × ATR beyond the level, not a marginal one) ·
+//       then the chosen confirmation rule. A sweep alone is never a TBS.
+//  TWS  wave 1 interaction with the window extreme · wave 2 must take wave 1
+//       out by ≥ ctt_twsDeep × ATR and CLOSE BACK BEYOND wave 1 (it was
+//       rejected, not accepted) · wave 3 reclaims wave 1 WITH displacement.
+//       Acceptance beyond wave 2 invalidates: that is a trend.
+//  Each engine passes or fails ON ITS OWN. A confluence label is only ever the
+//  union of independently confirmed structures inside one window on one
+//  timeframe and one side — three labels landing near each other is not a
+//  master confluence.
+//
+// ── NON-REPAINTING (mandatory, and the reason for the [1] inside f_cttScan) ──
+//  Every timeframe's whole state machine runs INSIDE request.security, and each
+//  of the twelve outputs is indexed [1] there, so the chart only ever sees the
+//  LAST CLOSED HTF bar. The calls use lookahead = barmerge.lookahead_off — no
+//  lookahead, no future bar, no unfinished HTF candle presented as history.
+//  Duplicate control: the HTF bar's own `time` is returned and each timeframe
+//  remembers the last one it processed, so a confirmation is drawn ONCE, on the
+//  first chart bar after the HTF candle closes, and never re-drawn on ticks.
+//  Realtime var state inside a security context is rolled back by Pine on every
+//  recalculation, so an intrabar advance cannot leak into a drawn object.
+//  A timeframe LOWER than the chart is never requested (the request falls back
+//  to the chart timeframe) and never drawn, so 15M structures can never be
+//  printed as 30M, 1H as 4H, or the reverse.
+//
+// UNRELATED EXISTING ISSUE — NOT MODIFIED: none found in file 14's CRT / TBS /
+// TWS engines during this pass; the two shortcomings named above (chart-TF-only
+// scope, and f_crtTbsHtf being a stateless boolean) are limitations of scope,
+// not defects, and file 14 is left exactly as it is either way.
+//
+// Educational tool. Marks structure only. No signal, no probability claim.
+// ─────────────────────────────────────────────────────────────────────────────
+indicator("CRT + TBS + TWS · MTF Forensic Layer [15m/30m/1H/4H]", "CTT-MTF v1", overlay = true,
+     max_labels_count = 500, max_lines_count = 500)
+
+// ═════════════════════════════════════════════════ MODULE 1 · INPUTS (ctt_ only)
+grpCttE = "① Engines"
+ctt_useCrt = input.bool(true, "CRT — Candle Range Theory", group = grpCttE,
+     tooltip = "Reference candle closed and wide enough → its extreme swept with the close back inside → range mid reclaimed on a later candle → displacement on a later candle.")
+ctt_useTbs = input.bool(true, "TBS — Turtle Soup", group = grpCttE,
+     tooltip = "An AGED N-bar extreme swept, the close back on the origin side, then a decisive reclaim and the confirmation rule below. A liquidity sweep on its own is never marked TBS.")
+ctt_useTws = input.bool(true, "TWS — three-wave sequence", group = grpCttE,
+     tooltip = "Wave 1 interaction → wave 2 takes wave 1 out and is REJECTED (closes back beyond it) → wave 3 reclaims wave 1 with displacement. Context structure only.")
+
+grpCttT = "② Timeframes"
+ctt_t15  = input.bool(true, "15M", group = grpCttT)
+ctt_t30  = input.bool(true, "30M", group = grpCttT)
+ctt_t60  = input.bool(true, "1H",  group = grpCttT)
+ctt_t240 = input.bool(true, "4H",  group = grpCttT)
+
+grpCttV = "③ Validation"
+ctt_atrLen  = input.int(14, "ATR length (per timeframe)", minval = 1, group = grpCttV)
+ctt_crtRng  = input.float(1.2, "CRT · minimum reference-candle range (ATR ×)", step = 0.1, minval = 0.3, group = grpCttV)
+ctt_dispAtr = input.float(0.5, "Confirmation displacement body (ATR ×)", step = 0.1, minval = 0.1, group = grpCttV,
+     tooltip = "Shared by all three engines: the confirming candle must have a body this big AND close in its own outer third.")
+ctt_minAtr  = input.float(0.10, "Minimum sweep penetration (ATR ×)", step = 0.05, minval = 0.0, group = grpCttV,
+     tooltip = "Below this the sweep is graded WEAK. At the default minimum quality (Valid) a weak sweep is detected and tracked but NOT marked — a one-tick wick is not a manipulation.")
+ctt_deepAtr = input.float(0.35, "Strong sweep penetration (ATR ×)", step = 0.05, minval = 0.05, group = grpCttV)
+ctt_life    = input.int(12, "Lifecycle window (bars of that timeframe)", minval = 2, group = grpCttV,
+     tooltip = "How long an armed reference, or a swept level awaiting its reclaim and confirmation, stays live before it is abandoned.")
+ctt_tbsLen  = input.int(20, "TBS · extreme lookback (bars)", minval = 5, group = grpCttV)
+ctt_tbsAge  = input.int(4,  "TBS · swept extreme minimum age (bars)", minval = 1, group = grpCttV)
+ctt_tbsMode = input.string("Reclaim + displacement", "TBS · confirmation rule",
+     options = ["Reclaim only", "Reclaim + displacement", "Reclaim + delivery flip"], group = grpCttV)
+ctt_twsWin  = input.int(15, "TWS · maximum bars per wave", minval = 3, group = grpCttV)
+ctt_twsDeep = input.float(0.15, "TWS · wave 2 must be deeper by (ATR ×)", step = 0.05, minval = 0.0, group = grpCttV)
+ctt_minQ    = input.string("Valid", "Minimum structural quality to MARK",
+     options = ["Weak", "Valid", "Strong"], group = grpCttV,
+     tooltip = "Weak = any graded penetration · Valid (default) = a real sweep · Strong = a deep sweep only. Detection and the lifecycle are unaffected; this decides what earns a label.")
+
+grpCttM = "④ Marking"
+ctt_win     = input.int(4, "Confluence window (chart bars)", minval = 0, maxval = 40, group = grpCttM,
+     tooltip = "Two or three engines confirming on the SAME timeframe and the SAME side inside this many chart bars share ONE label, updated to CRT + TBS, CRT + TWS, TBS + TWS or CRT + TBS + TWS.")
+ctt_showRng = input.bool(true, "Draw CRT HIGH / EQ / LOW on confirmation", group = grpCttM)
+ctt_rngLen  = input.int(30, "CRT range line length (chart bars)", minval = 5, maxval = 300, group = grpCttM)
+ctt_maxRng  = input.int(4,  "CRT ranges kept on chart", minval = 1, maxval = 20, group = grpCttM)
+ctt_maxLbl  = input.int(40, "Maximum structure labels kept", minval = 8, maxval = 200, group = grpCttM)
+ctt_szOpt   = input.string("Small", "Label size", options = ["Tiny", "Small", "Normal", "Large"], group = grpCttM)
+ctt_gap     = input.float(0.35, "Label offset from the level (ATR ×)", step = 0.05, minval = 0.0, maxval = 3.0, group = grpCttM)
+
+// ═══════════════════════════════════════ MODULE 2 · CONSTANTS · TYPES · LIFECYCLE
+var color CTT_BULL = #089981
+var color CTT_BEAR = #f23645
+
+// one shared lifecycle vocabulary for all three engines
+var int CS_IDLE = 0
+var int CS_ARM  = 1    // reference range / extreme registered, and CLOSED
+var int CS_SWP  = 2    // that reference was taken; penetration graded
+var int CS_RCL  = 3    // reclaimed on a LATER bar
+var int CS_CNF  = 4    // confirmed — this is what gets marked
+var int CS_INV  = 5    // the sweep became a break, or the clock ran out
+var int CS_W1   = 6    // TWS · first liquidity interaction
+var int CS_W2   = 7    // TWS · the deeper, rejected manipulation wave
+
+// quality classes
+var int CQ_WEAK = 1
+var int CQ_VAL  = 2
+var int CQ_STR  = 3
+
+// one state container, used by all three engines (six instances per timeframe)
+type CttSt
+    int   st   = 0
+    float hi   = na    // CRT range high · TWS wave-1 extreme
+    float lo   = na    // CRT range low · TBS reference level · TWS wave-2 extreme
+    float mid  = na    // CRT range equilibrium
+    float ext  = na    // the swept extreme
+    float pen  = na    // penetration in ATR
+    int   cls  = 0     // graded penetration → quality
+    int   q    = 0
+    int   aBar = na    // armed / wave-1 bar
+    int   sBar = na    // sweep / wave-2 bar
+    int   rBar = na    // reclaim bar
+    int   eBar = na    // terminal bar (confirmed or invalidated)
+
+// per-timeframe chart-side marking state
+type CttTf
+    string tf    = ""
+    int    lastT = 0   // HTF bar time already processed → duplicate guard
+    int    mask  = 0   // 1 = CRT · 2 = TBS · 4 = TWS
+    int    side  = 0
+    int    q     = 0
+    int    mBar  = na
+    label  lb    = na
+
+f_ctt_cls(float pen) =>
+    na(pen) ? CQ_WEAK : pen >= ctt_deepAtr ? CQ_STR : pen >= ctt_minAtr ? CQ_VAL : CQ_WEAK
+
+// ═══════════════════════════════ MODULE 3 · CRT (§ CANDLE RANGE THEORY)
+// Runs in the timeframe context it is called from. `dsp` is the displacement
+// verdict for THIS direction, computed once by the caller — a ta.* call inside
+// a conditional branch of a function is what produces silently wrong built-in
+// state, so nothing rolling is computed in here.
+f_ctt_crt(CttSt s, int dir, float a, bool dsp) =>
+    int  q   = 0
+    bool cf  = false
+    bool isL = dir == 1
+    // terminal states clear on a LATER bar, so a confirmation is always visible
+    // for one full bar before the machine re-arms
+    if (s.st == CS_CNF or s.st == CS_INV) and bar_index > nz(s.eBar, bar_index)
+        s.st := CS_IDLE
+    if s.st == CS_ARM and bar_index - nz(s.aBar, bar_index) > ctt_life
+        s.st := CS_IDLE
+    else if (s.st == CS_SWP or s.st == CS_RCL) and bar_index - nz(s.sBar, bar_index) > ctt_life
+        s.st   := CS_INV
+        s.eBar := bar_index
+    else if (s.st == CS_SWP or s.st == CS_RCL) and (isL ? close < s.ext : close > s.ext)
+        s.st   := CS_INV                  // closed beyond the swept extreme = expansion
+        s.eBar := bar_index
+    // arm on the CLOSED reference candle: only a closed candle is authoritative
+    if s.st == CS_IDLE and not na(a) and nz(high[1] - low[1], 0) >= ctt_crtRng * a
+        s.st   := CS_ARM
+        s.hi   := high[1]
+        s.lo   := low[1]
+        s.mid  := (high[1] + low[1]) / 2
+        s.aBar := bar_index - 1
+        s.ext  := na
+        s.pen  := na
+        s.cls  := 0
+        s.rBar := na
+        s.eBar := na
+    // the manipulation leg — the arming bar IS the model's second candle, so the
+    // sweep may fire in the same call while chronology stays reference < sweep
+    if s.st == CS_ARM and bar_index > nz(s.aBar, bar_index)
+        bool  hit = isL ? low < s.lo : high > s.hi
+        bool  ins = close > s.lo and close < s.hi
+        float pn  = isL ? (s.lo - low) / a : (high - s.hi) / a
+        if hit and ins
+            s.st   := CS_SWP
+            s.sBar := bar_index
+            s.ext  := isL ? low : high
+            s.pen  := pn
+            s.cls  := f_ctt_cls(pn)
+    else if s.st == CS_SWP and bar_index > s.sBar
+        if isL ? close > s.mid : close < s.mid
+            s.st   := CS_RCL
+            s.rBar := bar_index
+    else if s.st == CS_RCL and bar_index > s.rBar
+        if dsp and (isL ? close > s.mid : close < s.mid)
+            s.st   := CS_CNF
+            s.eBar := bar_index
+            q      := s.cls
+            s.q    := q
+            cf     := true
+    [cf, q]
+
+// ═══════════════════════════════ MODULE 4 · TBS (§ TURTLE SOUP)
+// `lvl` / `age` are the rolling extreme and its age, computed by the caller.
+// `dsp` and `flip` are this direction's displacement and delivery-flip verdicts.
+f_ctt_tbs(CttSt s, int dir, float a, float lvl, int age, bool dsp, bool flip) =>
+    int  q   = 0
+    bool cf  = false
+    bool isL = dir == 1
+    if (s.st == CS_CNF or s.st == CS_INV) and bar_index > nz(s.eBar, bar_index)
+        s.st := CS_IDLE
+    if (s.st == CS_SWP or s.st == CS_RCL) and bar_index - nz(s.sBar, bar_index) > ctt_life
+        s.st   := CS_INV
+        s.eBar := bar_index
+    else if (s.st == CS_SWP or s.st == CS_RCL) and (isL ? close < s.ext : close > s.ext)
+        s.st   := CS_INV
+        s.eBar := bar_index
+    // an extreme is only resting liquidity once it has AGED
+    if s.st == CS_IDLE and not na(lvl) and age >= ctt_tbsAge
+        s.st   := CS_ARM
+        s.lo   := lvl
+        s.aBar := bar_index
+        s.ext  := na
+        s.pen  := na
+        s.cls  := 0
+        s.rBar := na
+        s.eBar := na
+    if s.st == CS_ARM
+        // the resting extreme drifts as the window rolls: re-anchor while
+        // nothing has been taken, never after a sweep
+        if not na(lvl) and age >= ctt_tbsAge and lvl != s.lo
+            s.lo := lvl
+        bool  hit = isL ? low < s.lo : high > s.lo
+        bool  bk  = isL ? close > s.lo : close < s.lo
+        float pn  = isL ? (s.lo - low) / a : (high - s.lo) / a
+        if hit and bk
+            s.st   := CS_SWP
+            s.sBar := bar_index
+            s.ext  := isL ? low : high
+            s.pen  := pn
+            s.cls  := f_ctt_cls(pn)
+    else if s.st == CS_SWP and bar_index > s.sBar
+        // a DECISIVE reclaim, not a marginal one
+        if isL ? close > s.lo + 0.25 * a : close < s.lo - 0.25 * a
+            s.st   := CS_RCL
+            s.rBar := bar_index
+            if ctt_tbsMode == "Reclaim only"
+                s.st   := CS_CNF
+                s.eBar := bar_index
+                q      := s.cls
+                s.q    := q
+                cf     := true
+    else if s.st == CS_RCL and bar_index > s.rBar
+        bool ok = ctt_tbsMode == "Reclaim + delivery flip" ? flip : dsp
+        if ok
+            s.st   := CS_CNF
+            s.eBar := bar_index
+            q      := s.cls
+            s.q    := q
+            cf     := true
+    [cf, q]
+
+// ═══════════════════════════════ MODULE 5 · TWS (§ THREE-WAVE SEQUENCE)
+// `ref` is the rolling window extreme, computed by the caller.
+f_ctt_tws(CttSt s, int dir, float a, float ref, bool dsp) =>
+    int  q   = 0
+    bool cf  = false
+    bool isL = dir == 1
+    if (s.st == CS_CNF or s.st == CS_INV) and bar_index > nz(s.eBar, bar_index)
+        s.st := CS_IDLE
+    if s.st == CS_W1 and bar_index - nz(s.aBar, bar_index) > ctt_twsWin
+        s.st   := CS_INV
+        s.eBar := bar_index
+    else if s.st == CS_W2 and bar_index - nz(s.sBar, bar_index) > ctt_twsWin
+        s.st   := CS_INV
+        s.eBar := bar_index
+    else if s.st == CS_W2 and (isL ? close < s.lo : close > s.lo)
+        s.st   := CS_INV                  // acceptance beyond wave 2 = a trend
+        s.eBar := bar_index
+    if s.st == CS_IDLE and not na(ref) and (isL ? low <= ref : high >= ref)
+        s.st   := CS_W1
+        s.hi   := isL ? low : high
+        s.aBar := bar_index
+        s.lo   := na
+        s.pen  := na
+        s.cls  := 0
+        s.eBar := na
+    else if s.st == CS_W1 and bar_index > nz(s.aBar, bar_index)
+        bool deep = isL ? low <= s.hi - ctt_twsDeep * a : high >= s.hi + ctt_twsDeep * a
+        bool rej  = isL ? close > s.hi : close < s.hi
+        if deep and rej
+            s.st   := CS_W2
+            s.lo   := isL ? low : high
+            s.sBar := bar_index
+            s.pen  := math.abs(s.lo - s.hi) / a
+            s.cls  := f_ctt_cls(s.pen)
+    else if s.st == CS_W2 and bar_index > nz(s.sBar, bar_index)
+        bool res = dsp and (isL ? close > s.hi : close < s.hi)
+        if res
+            s.st   := CS_CNF
+            s.eBar := bar_index
+            q      := s.cls
+            s.q    := q
+            cf     := true
+    [cf, q]
+
+// ═══════════════════════════ MODULE 6 · ONE TIMEFRAME'S SCAN (runs in HTF context)
+// Everything this returns is indexed [1], i.e. the LAST CLOSED bar of the
+// requested timeframe. That single detail is what makes the layer
+// non-repainting: the developing HTF candle is never published, with or without
+// lookahead — and the calls below use lookahead_off as well.
+f_cttScan() =>
+    float a  = ta.atr(ctt_atrLen)
+    float rg = high - low
+    float bd = math.abs(close - open)
+    bool  bl = close > open
+    bool  br = close < open
+    bool  sU = rg > 0 and close >= high - 0.30 * rg
+    bool  sD = rg > 0 and close <= low  + 0.30 * rg
+    bool  dU = bl and bd >= ctt_dispAtr * a and sU
+    bool  dD = br and bd >= ctt_dispAtr * a and sD
+    // delivery flip = a displacement close through the previous candle's open
+    bool  fU = bl and bd >= ctt_dispAtr * a and close > nz(open[1], open)
+    bool  fD = br and bd >= ctt_dispAtr * a and close < nz(open[1], open)
+    float tl = ta.lowest(low,   ctt_tbsLen)[1]
+    float th = ta.highest(high, ctt_tbsLen)[1]
+    int   la = -ta.lowestbars(low,   ctt_tbsLen)[1] + 1
+    int   ha = -ta.highestbars(high, ctt_tbsLen)[1] + 1
+    float wl = ta.lowest(low,   ctt_twsWin)[1]
+    float wh = ta.highest(high, ctt_twsWin)[1]
+    var CttSt cu = CttSt.new()
+    var CttSt cd = CttSt.new()
+    var CttSt tu = CttSt.new()
+    var CttSt td = CttSt.new()
+    var CttSt wu = CttSt.new()
+    var CttSt wd = CttSt.new()
+    [ccu, qcu] = f_ctt_crt(cu,  1, a, dU)
+    [ccd, qcd] = f_ctt_crt(cd, -1, a, dD)
+    [ctu, qtu] = f_ctt_tbs(tu,  1, a, tl, la, dU, fU)
+    [ctd, qtd] = f_ctt_tbs(td, -1, a, th, ha, dD, fD)
+    [cwu, qwu] = f_ctt_tws(wu,  1, a, wl, dU)
+    [cwd, qwd] = f_ctt_tws(wd, -1, a, wh, dD)
+    int   dC = ccu ? 1 : ccd ? -1 : 0
+    int   qC = ccu ? qcu : ccd ? qcd : 0
+    float cH = ccu ? cu.hi  : cd.hi
+    float cL = ccu ? cu.lo  : cd.lo
+    float cM = ccu ? cu.mid : cd.mid
+    int   dT = ctu ? 1 : ctd ? -1 : 0
+    int   qT = ctu ? qtu : ctd ? qtd : 0
+    float lT = ctu ? tu.lo : td.lo
+    int   dW = cwu ? 1 : cwd ? -1 : 0
+    int   qW = cwu ? qwu : cwd ? qwd : 0
+    float eW = cwu ? wu.hi : wd.hi
+    [dC[1], qC[1], cH[1], cL[1], cM[1], dT[1], qT[1], lT[1], dW[1], qW[1], eW[1], time[1]]
+
+// ═══════════════════════════════════════ MODULE 7 · CHART-SIDE MARKING STATE
+ctt_atr = ta.atr(ctt_atrLen)
+ctt_sz  = ctt_szOpt == "Tiny" ? size.tiny : ctt_szOpt == "Small" ? size.small :
+     ctt_szOpt == "Normal" ? size.normal : size.large
+
+var CttTf ctt15  = CttTf.new(tf = "15M")
+var CttTf ctt30  = CttTf.new(tf = "30M")
+var CttTf ctt60  = CttTf.new(tf = "1H")
+var CttTf ctt240 = CttTf.new(tf = "4H")
+
+// bounded object budgets: both arrays are FIFO-capped, so no leak is possible
+var label[] ctt_lbs = array.new<label>()
+var line[]  ctt_lns = array.new<line>()
+// this bar's event counters, for the alerts: 0 CRT · 1 TBS · 2 TWS · 3 confluence
+var int[]   ctt_ev  = array.new_int(4, 0)
+
+f_ctt_reset() =>
+    array.fill(ctt_ev, 0)
+    0
+
+f_ctt_stars(int q) => q >= CQ_STR ? "★★★" : q == CQ_VAL ? "★★" : "★"
+f_ctt_qTxt(int q)  => q >= CQ_STR ? "STRONG" : q == CQ_VAL ? "VALID" : "WEAK"
+
+f_ctt_name(int m) =>
+    m == 7 ? "CRT + TBS + TWS" : m == 3 ? "CRT + TBS" : m == 5 ? "CRT + TWS" :
+         m == 6 ? "TBS + TWS" : m == 1 ? "CRT" : m == 2 ? "TBS" : "TWS"
+
+f_ctt_bg(int dir, int m) =>
+    int tr = m == 7 ? 0 : (m == 3 or m == 5 or m == 6) ? 20 : 45
+    color.new(dir == 1 ? CTT_BULL : CTT_BEAR, tr)
+
+f_ctt_tip(string tf, int m, int q, int dir) =>
+    "STRUCTURE  " + f_ctt_name(m) +
+         "\nTimeframe  " + tf + " (source timeframe of every leg in this label)" +
+         "\nDirection  " + (dir == 1 ? "bullish — liquidity taken BELOW, then reclaimed" : "bearish — liquidity taken ABOVE, then reclaimed") +
+         "\nQuality    " + f_ctt_qTxt(q) + " (graded from sweep penetration in ATR)" +
+         "\nLifecycle  reference armed → swept → reclaimed → CONFIRMED on the closed " + tf + " candle" +
+         "\nLegs       " + (m % 2 == 1 ? "CRT " : "") + (m % 4 >= 2 ? "TBS " : "") + (m >= 4 ? "TWS" : "") +
+         "\nMarking only — this layer emits no entry, exit, TP, SL or RR."
+
+f_ctt_lbl(float y, string txt, color bg, bool up, string tip) =>
+    label lb = label.new(bar_index, y, txt,
+         style = up ? label.style_label_up : label.style_label_down,
+         color = bg, textcolor = color.white, size = ctt_sz, tooltip = tip)
+    array.push(ctt_lbs, lb)
+    if array.size(ctt_lbs) > ctt_maxLbl
+        label.delete(array.shift(ctt_lbs))
+    lb
+
+f_ctt_rng(float p, string st, color c) =>
+    array.push(ctt_lns, line.new(bar_index, p, bar_index + ctt_rngLen, p, color = c, style = st))
+    if array.size(ctt_lns) > 3 * ctt_maxRng
+        line.delete(array.shift(ctt_lns))
+    true
+
+// ═══════════════════════════════════════ MODULE 8 · APPLY ONE TIMEFRAME'S EVENTS
+// PHASE 15 / 16 duplicate control: work happens only when the requested
+// timeframe publishes a NEW closed bar (its `time` changed), so a confirmation
+// is drawn once and never re-drawn on a tick or on an unchanged HTF bar.
+f_ctt_apply(CttTf s, bool en, int dC, int qC, float cH, float cL, float cM, int dT, int qT, float lT, int dW, int qW, float eW, int htfT) =>
+    if en and htfT != 0 and htfT != s.lastT
+        s.lastT := htfT
+        int mq = ctt_minQ == "Strong" ? CQ_STR : ctt_minQ == "Weak" ? CQ_WEAK : CQ_VAL
+        for k = 0 to 1
+            int  dir = k == 0 ? 1 : -1
+            bool c   = ctt_useCrt and dC == dir and qC >= mq
+            bool t   = ctt_useTbs and dT == dir and qT >= mq
+            bool w   = ctt_useTws and dW == dir and qW >= mq
+            if c or t or w
+                // one label per timeframe per side inside the confluence window;
+                // a second engine UPDATES it instead of stacking a chip
+                bool join = s.side == dir and not na(s.mBar) and not na(s.lb) and bar_index - nz(s.mBar, bar_index) <= ctt_win
+                int  m    = join ? s.mask : 0
+                int  qq   = join ? s.q : 0
+                if c and m % 2 == 0
+                    m += 1
+                if t and m % 4 < 2
+                    m += 2
+                if w and m < 4
+                    m += 4
+                qq := int(math.max(qq, math.max(c ? qC : 0, math.max(t ? qT : 0, w ? qW : 0))))
+                string tx = f_ctt_name(m) + " " + s.tf + " " + f_ctt_stars(qq) + (dir == 1 ? " ▲" : " ▼")
+                color  bg = f_ctt_bg(dir, m)
+                if join
+                    label.set_text(s.lb, tx)
+                    label.set_color(s.lb, bg)
+                    label.set_tooltip(s.lb, f_ctt_tip(s.tf, m, qq, dir))
+                else
+                    float pv = c ? (dir == 1 ? cL : cH) : t ? lT : eW
+                    float y  = na(pv) ? close : pv
+                    float g  = nz(ctt_atr, high - low) * ctt_gap
+                    s.lb := f_ctt_lbl(dir == 1 ? y - g : y + g, tx, bg, dir == 1, f_ctt_tip(s.tf, m, qq, dir))
+                s.mask := m
+                s.side := dir
+                s.q    := qq
+                s.mBar := bar_index
+                if c
+                    array.set(ctt_ev, 0, array.get(ctt_ev, 0) + 1)
+                if t
+                    array.set(ctt_ev, 1, array.get(ctt_ev, 1) + 1)
+                if w
+                    array.set(ctt_ev, 2, array.get(ctt_ev, 2) + 1)
+                if m == 3 or m == 5 or m == 6 or m == 7
+                    array.set(ctt_ev, 3, array.get(ctt_ev, 3) + 1)
+                // the CRT reference range, frozen at the sweep, so it never moves
+                if c and ctt_showRng and not na(cH) and not na(cL) and not na(cM)
+                    f_ctt_rng(cH, line.style_solid,  f_ctt_bg(dir, 1))
+                    f_ctt_rng(cM, line.style_dotted, f_ctt_bg(dir, 1))
+                    f_ctt_rng(cL, line.style_solid,  f_ctt_bg(dir, 1))
+    s.mask
+
+// ═══════════════════════════════ MODULE 9 · THE FOUR TIMEFRAME CONTEXTS
+// PHASE 12 · a timeframe LOWER than the chart is never requested — the request
+// falls back to the chart timeframe and the draw gate below is false, so 15M
+// structure can never be printed as 30M, or 1H as 4H.
+ctt_sec  = timeframe.in_seconds(timeframe.period)
+ctt_tf15 = ctt_sec > 900   ? timeframe.period : "15"
+ctt_tf30 = ctt_sec > 1800  ? timeframe.period : "30"
+ctt_tf60 = ctt_sec > 3600  ? timeframe.period : "60"
+ctt_tf24 = ctt_sec > 14400 ? timeframe.period : "240"
+ctt_ok15 = ctt_t15  and ctt_sec <= 900
+ctt_ok30 = ctt_t30  and ctt_sec <= 1800
+ctt_ok60 = ctt_t60  and ctt_sec <= 3600
+ctt_ok24 = ctt_t240 and ctt_sec <= 14400
+
+// Pine forbids a conditional request.security, and tuple destructuring may not
+// live inside an if / for block — so all four calls and all four destructures
+// are unconditional, at global scope, and the gating happens at the draw.
+[c1d, c1q, c1h, c1l, c1m, t1d, t1q, t1l, w1d, w1q, w1e, x1] = request.security(syminfo.tickerid, ctt_tf15, f_cttScan(), lookahead = barmerge.lookahead_off)
+[c2d, c2q, c2h, c2l, c2m, t2d, t2q, t2l, w2d, w2q, w2e, x2] = request.security(syminfo.tickerid, ctt_tf30, f_cttScan(), lookahead = barmerge.lookahead_off)
+[c3d, c3q, c3h, c3l, c3m, t3d, t3q, t3l, w3d, w3q, w3e, x3] = request.security(syminfo.tickerid, ctt_tf60, f_cttScan(), lookahead = barmerge.lookahead_off)
+[c4d, c4q, c4h, c4l, c4m, t4d, t4q, t4l, w4d, w4q, w4e, x4] = request.security(syminfo.tickerid, ctt_tf24, f_cttScan(), lookahead = barmerge.lookahead_off)
+
+ctt_zero = f_ctt_reset()
+f_ctt_apply(ctt15,  ctt_ok15, int(nz(c1d, 0)), int(nz(c1q, 0)), c1h, c1l, c1m, int(nz(t1d, 0)), int(nz(t1q, 0)), t1l, int(nz(w1d, 0)), int(nz(w1q, 0)), w1e, int(nz(x1, 0)))
+f_ctt_apply(ctt30,  ctt_ok30, int(nz(c2d, 0)), int(nz(c2q, 0)), c2h, c2l, c2m, int(nz(t2d, 0)), int(nz(t2q, 0)), t2l, int(nz(w2d, 0)), int(nz(w2q, 0)), w2e, int(nz(x2, 0)))
+f_ctt_apply(ctt60,  ctt_ok60, int(nz(c3d, 0)), int(nz(c3q, 0)), c3h, c3l, c3m, int(nz(t3d, 0)), int(nz(t3q, 0)), t3l, int(nz(w3d, 0)), int(nz(w3q, 0)), w3e, int(nz(x3, 0)))
+f_ctt_apply(ctt240, ctt_ok24, int(nz(c4d, 0)), int(nz(c4q, 0)), c4h, c4l, c4m, int(nz(t4d, 0)), int(nz(t4q, 0)), t4l, int(nz(w4d, 0)), int(nz(w4q, 0)), w4e, int(nz(x4, 0)))
+
+// ═══════════════════════════════════════ MODULE 10 · ALERTS (DETECTION ONLY)
+// Structure alerts. No entry, exit, direction call, TP, SL or RR anywhere.
+ctt_aCrt = array.get(ctt_ev, 0) > 0
+ctt_aTbs = array.get(ctt_ev, 1) > 0
+ctt_aTws = array.get(ctt_ev, 2) > 0
+ctt_aCnf = array.get(ctt_ev, 3) > 0
+alertcondition(ctt_aCrt, "[CTT] CRT confirmed (15M/30M/1H/4H)", "CRT confirmed on a closed higher-timeframe candle of {{ticker}} — reference range swept, mid reclaimed, displacement. Structure only.")
+alertcondition(ctt_aTbs, "[CTT] TBS confirmed (15M/30M/1H/4H)", "Turtle soup confirmed on a closed higher-timeframe candle of {{ticker}} — aged extreme swept, decisively reclaimed, confirmation rule met. Structure only.")
+alertcondition(ctt_aTws, "[CTT] TWS confirmed (15M/30M/1H/4H)", "TWS three-wave sequence confirmed on a closed higher-timeframe candle of {{ticker}} — interaction, rejected deeper manipulation, reclaim with displacement. Structure only.")
+alertcondition(ctt_aCnf, "[CTT] Confluence (CRT/TBS/TWS ≥ 2)", "Two or three of CRT / TBS / TWS confirmed on the SAME timeframe and side of {{ticker}} inside the confluence window. Structure only.")

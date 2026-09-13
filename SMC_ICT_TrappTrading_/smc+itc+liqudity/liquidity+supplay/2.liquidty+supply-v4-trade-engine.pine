@@ -1,0 +1,3167 @@
+//@version=6
+// ─────────────────────────────────────────────────────────────────────────────
+// Liquidity + Supply/Demand + Price Action Setups [MTF] — v4 "TRADE ENGINE"
+//
+// Built from v2. v2 was a COLLECTION OF SIGNAL GENERATORS: 11 engines could
+// each independently declare an entry, OR'd into anyLong / anyShort. v4 keeps
+// every v2 visual and every v2 concept but re-wires the file into:
+//
+//        VISUAL ENGINE  →  CONFLUENCE ENGINE  →  TRADE ENGINE  →  SIGNAL
+//
+// The VISUAL layer still draws everything it drew before (zones, FVG, pools,
+// BOS/CHoCH, CISD, IFC, CRT, turtle soup, trendlines, OTE, sessions, opens,
+// order-flow halves, HTF POI). NOTHING draws an entry any more. The TRADE
+// ENGINE is the only authority that can print LONG / SHORT / A+ / SL / TP.
+//
+// ── v4 ARCHITECTURE ──────────────────────────────────────────────────────────
+//  ARCH-1  SETUP STATE MACHINE (one live setup per direction):
+//            0 no setup → 1 HTF context → 2 liquidity target → 3 liquidity
+//            raided → 4 valid POI → 5 LTF MSS/CHoCH/CISD → 6 displacement →
+//            7 fresh FVG locked → 8 FVG retest = ENTRY → 9 invalidated /
+//            consumed. A setup CANNOT skip a state, so HTF POI → ENTRY,
+//            FVG → ENTRY, CRT → ENTRY and Turtle-soup → ENTRY are all
+//            structurally impossible on the narrative path.
+//  ARCH-2  LIQUIDITY REGISTRY with a real lifecycle per pool:
+//            CREATED → VALIDATED → RAIDED → REACTION → CONSUMED, and a
+//            liquidity-INTENT read (which pool is price hunting next).
+//            A raid is BOUND to one setup; a stale or failed raid expires.
+//  ARCH-3  PROTECTED STRUCTURE REBUILT. v2's protected swing was a running
+//            min/max of every low/high since the last event (see BUG-1); v4
+//            uses the actual pivot that ORIGINATED the leg, tracked per scale.
+//            Internal and external structure are now semantically separate:
+//            external = context / major BOS-CHoCH / protected levels,
+//            internal = MSS / execution confirmation only.
+//  ARCH-4  QUALITY TIERS on every POI (T1 A+ / T2 / T3 visual-only) and a
+//            full FVG lifecycle (created → active → 50% mitigated → filled →
+//            invalidated). A 50% tap is SETUP PREPARATION, never an entry.
+//  ARCH-5  SCORE REBUILT 25/25/20/20/10 with every event counted ONCE
+//            (v2 paid a single displacement candle up to 3 times, see BUG-12).
+//            Score is ALIGNMENT, never win probability, and score alone can
+//            never produce an A+ — the sequence must be complete.
+//  ARCH-6  MASTER ARBITRATION: FEM > Sweep+POI+MSS > S/D retest > CRT >
+//            Turtle soup > Trendline sweep > generic price action. Exactly
+//            ONE final LONG and ONE final SHORT per bar, never both.
+//  ARCH-7  STRUCTURAL SL HIERARCHY (raid wick → protected swing → FVG
+//            invalidation → POI edge → ATR fallback) and a LIQUIDITY TP
+//            ladder (internal liquidity → opposing FVG/OB → external
+//            liquidity) that refuses to park a target behind an un-raided
+//            opposing pool.
+//  ARCH-8  DEBUG MODE prints the state machine per direction and the exact
+//            reason an entry was blocked.
+//  ARCH-9  CONFIRMED-ONLY by default. Every state latch is gated on
+//            barstate.isconfirmed; developing setups can be previewed as a
+//            dim "⋯" mark that changes no state and raises no alert.
+//
+// ── BUGS FOUND IN v2 AND FIXED HERE (full detail in AUDIT-v4.md) ─────────────
+//  BUG-1   f_structure's "protected swing" was legLo/legHi = a running
+//          min/max of every low/high since the last structural event, updated
+//          on EVERY TICK and reset only inside the confirmed+displacement
+//          branch. Consequences: (a) right after a BOS the protected low was
+//          the BOS bar's own low, so a one-bar pullback printed "CHoCH";
+//          (b) during a long stretch with no qualifying displacement break it
+//          decayed toward the all-time low, making CHoCH impossible;
+//          (c) intrabar wicks poisoned it permanently. v4 tracks the real
+//          originating pivot.  [MODULE 4]
+//  BUG-2   The break latch was consumed by NON-displacement closes. STEP 3 set
+//          resBroken := true on any confirmed close through the swing high,
+//          but f_structure only read that break when body >= structDisp·ATR.
+//          A weak close through a swing high therefore BURNED the level and
+//          the BOS could never register. v4 latches inside the structure
+//          engine and classifies a weak close-through as a liquidity RUN.
+//  BUG-3   Internal and external structure were OR'd into one trigger memory
+//          (lastChUpBar := bar_index if chochUp OR eChochUp), so an internal
+//          inducement CHoCH satisfied the A+ "Context" and "Trigger" layers.
+//          v4 keeps two memories and uses external for context, internal for
+//          execution only.
+//  BUG-4   Zone lifecycle mutated on unconfirmed bars: z.touched, z.touchBar,
+//          z.tapped50 and z.tap50Bar all updated intrabar, so a wick that the
+//          bar closed away from still opened the confirmWin window. Classic
+//          realtime-vs-history divergence. v4 gates the whole loop.
+//  BUG-5   z.signaled := true was set INSIDE the zone loop, before longOK /
+//          shortOK (bias, killzone, volatility window, score, cooldown) were
+//          applied. A zone was therefore CONSUMED by a signal that never
+//          printed. Same class: wState := 0 (setup ①/②) and femL := 0 (FEM)
+//          reset before gating. v4 only consumes state when the TRADE ENGINE
+//          actually emits.
+//  BUG-6   Display toggles gated trade logic: showEq off ⇒ no EQ pools ⇒ the
+//          engineered-liquidity score term is permanently 0; showSesHL off ⇒
+//          session raids invisible to the score; showZones off ⇒ no POIs at
+//          all; showRB off ⇒ no rejection blocks. v4 computes the model
+//          regardless of what is drawn (Phase 28 separation).
+//  BUG-7   EQH/EQL needed only two pivots within eqTol·ATR — no time
+//          separation, no reaction test — and registered the pool at
+//          math.max(ph, prevPH), i.e. at the HIGHER of the two, so the level
+//          was pre-swept by construction. v4 requires ATR tolerance + minimum
+//          bar separation + a reaction at both legs, and uses the mean.
+//  BUG-8   The EQ scan deleted the pool on ANY penetration (sweep or full
+//          break) and, on a sweep, OVERWROTE the global lastBslBar/lastBslLvl
+//          — so an EQH raid silently stole the sweep context that another
+//          setup was using. v4 has per-pool state; nothing is global.
+//  BUG-9   sslInPlay = recentSsl and close - lastSslLvl <= SWEEP_CTX_ATR·ATR
+//          had no lower bound: once price closed BELOW the swept low (the
+//          sweep failed and became a breakdown) the term went negative and
+//          still read "in play", paying 10 liquidity points to LONGS.
+//  BUG-10  No sweep→setup binding at all. lastSslBar/lastSslLvl were single
+//          global slots, so ANY long producer within sweepLook bars inherited
+//          the raid: "old liquidity sweep → new entry" was reachable by
+//          construction.
+//  BUG-11  sigSLLong / sigSLShort were ONE shared slot written by six engines
+//          (zone, ①, trendline, CRT, turtle soup, FEM) — last writer wins.
+//          A FEM entry could be drawn with a turtle-soup stop. Engines that
+//          fired and were then silenced by the filters still overwrote it.
+//          v4 computes the stop from the WINNING producer only.
+//  BUG-12  Score double-counting: a CISD candle is by definition a
+//          displacement close, so one candle paid 7 (CISD) + 6 (displacement)
+//          and, if it also broke a pivot, +7 (MSS) = 20/20 of the Trigger
+//          layer. Liquidity paid 10 (sweep) + 5 (quality of the SAME sweep) +
+//          5 (the EQ pool that SET that sweep, see BUG-8) = 20/20. Execution
+//          paid 5 for zoneBullConf, which for an IFC bar is again the same
+//          candle. v4 pays each event once and requires independent evidence.
+//  BUG-13  A+ had no sequence: htfB>0 + (extDir>0 or recentChUp) + sweep +
+//          near-a-zone + (recentChUp or recentCisdUp) + confirm — all
+//          satisfiable with zero causal order, and recentChUp satisfied BOTH
+//          the Context and the Trigger term. No displacement stage, no FVG
+//          stage, no retest stage. v4's A+ = the machine reached state 8.
+//  BUG-14  anyLong/anyShort was a blind OR of 11 producers. One candle could
+//          print 11 setups, one label, the stop of whichever engine wrote
+//          last, and fire every alertcondition at once. Long and short could
+//          both fire on the same bar (only the trade DRAWING was suppressed;
+//          labels, alerts and cooldown stamps still went out).
+//  BUG-15  HTF CRT / turtle soup were TWO HTF bars late: f_crtTbsHtf()
+//          returned _crtB[1] and request.security(lookahead_off) already
+//          delivers the last CLOSED HTF bar. On 5m→1H the "distribution
+//          candle" was an hour old. Same defect in f_bias (nz(...[1])) made
+//          the MTF bias two HTF bars stale. v4 removes the redundant [1] and
+//          documents the remaining one-bar confirmation delay honestly.
+//  BUG-16  htfB = filtBias != 0 ? filtBias : b60 — with the bias FILTER off
+//          the score's "HTF context" silently became 1H even on a 4H chart
+//          (a LOWER timeframe), and turning the filter on changed the score.
+//          v4 separates the CONTEXT timeframe from the FILTER timeframe.
+//  BUG-17  f_htfPoi: any 3-candle HTF gap became a POI (no displacement, no
+//          HTF-direction filter, session-open gaps included), only one POI
+//          per side was kept, and when a POI died bTop/bBot were cleared but
+//          bBar/bIn were not, so the touch counter kept comparing to a stale
+//          bar. FEM would happily buy an HTF demand POI in a bearish HTF.
+//  BUG-18  FEM accepted a plain INTERNAL BOS as its delivery shift, had no
+//          displacement stage, locked the LATEST post-tap FVG rather than the
+//          first, and its retest "confirmation" (zoneBullConf ⊇ ifcBull)
+//          is near-tautological on a retest bar. v4 routes FEM through the
+//          state machine: MSS/CHoCH outranks BOS, displacement is mandatory.
+//  BUG-19  Trendlines: every bar resting within NEAR_LVL_ATR of the line
+//          incremented the touch count, so "validated (≥2 touches)" was
+//          reached by two ADJACENT bars; the sweep branch incremented before
+//          testing, so the first pierce of a once-touched line fired; and
+//          tlUpTouch was not reset when the line broke, so a brand-new line
+//          inherited the old count and fired on its first pierce. Slope also
+//          divided by (bar_index - pivLen - prevPHBar) with no zero guard.
+//  BUG-20  CRT and turtle soup had NO location filter — a mid-range CRT
+//          ranked identically to one at an external pool. Phase 14 filter
+//          added (HTF POI / EQ pool / PD-session extreme / external swing /
+//          OTE / premium-discount extreme).
+//  BUG-21  Zone dedupe deleted and replaced a SPENT (signaled) zone with a
+//          fresh overlapping one, which immediately re-armed the same price
+//          area for another entry. v4 keeps spent zones as spent.
+//  BUG-22  Zone cap compared with > and deleted at most ONE zone per bar, in
+//          array order — and rejection blocks are pushed with a historical
+//          left edge, so array order ≠ age order. v4 prunes by age, fully.
+//  BUG-23  bullPin required upWick <= body: on the cleanest rejection candles
+//          (near-zero body) that is false, so perfect hammers were rejected.
+//          v4 uses an ATR-relative opposite-wick cap.
+//  BUG-24  masterCd / minScore / killzone / volatility-window gates were
+//          applied to the LABEL flags but the underlying state machines had
+//          already advanced or reset. See BUG-5.
+//
+// v2 features PRESERVED (nothing below was removed):
+//   ① Breakout Rejection Trap  ② Pin Bar Liquidity Trap  ③ Inside Bar Breakout
+//   ④ Doji Reversal  ⑤ Supply/Demand + FVG zones  ⑥ Sweeps + MTF bias
+//   ⑦ BOS/CHoCH (internal + external)  ⑧ EQH/EQL pools  ⑨ Dealing range
+//   premium/discount + OTE 62–79%  ⑩ Killzones  ⑪ Dynamic trendlines
+//   ⑫ CRT  ⑬ Turtle soup  · CISD · IFC · HTF CRT/TBS · HTF FVG POI · FEM
+//   · rejection blocks · breaker/mitigation flips · order-flow halves
+//   · session H/L liquidity · 00:00 + 08:30 opening prices · Silver Bullet
+//   · scheduled volatility windows · MTF dashboard · TP ladder · alerts
+//
+// Signals evaluate on CLOSED bars. Use "Once per bar close" alerts.
+// The alignment score is NOT a win probability and this file makes no claim
+// of accuracy or profitability. Educational tool. Backtest before live use.
+// ─────────────────────────────────────────────────────────────────────────────
+indicator("Liquidity + S/D + Price Action Setups [MTF] v4 TE", "LQ-SD-PA v4 TE", overlay = true,
+     max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// ═════════════════════════════════════════════════════════ MODULE 1 · INPUTS
+// Grouped per the decision hierarchy: Master → General → Structure →
+// Liquidity → Supply/Demand → FVG → HTF → Entry engine → FEM → CRT/TBS →
+// Patterns → Trendlines → Sessions → Silver Bullet → Volatility → Range →
+// Risk → Dashboard → Debug.
+// ═════════════════════════════════════════════════════════════════════════════
+grpMaster = "① Master"
+entryMode = input.string("Narrative + confluence", "Entry mode",
+     options = ["Narrative only (A+)", "Narrative + confluence", "All engines (legacy)"],
+     group = grpMaster,
+     tooltip = "Narrative only: the ONLY entries are setups whose state machine completed HTF → liquidity target → raid → POI → MSS → displacement → FVG → retest. Fewest, highest quality.\nNarrative + confluence (default): the machine plus S/D retest, CRT and turtle soup — but each of those must still show a bound raid, a POI, a trigger and displacement.\nAll engines: adds trendline sweeps and the four price-action patterns under the same confluence gate. Most signals, lowest average quality.")
+confirmOnly = input.bool(true, "Confirmed signals only (non-repainting)", group = grpMaster,
+     tooltip = "ON (default): every state transition and every signal commits on bar CLOSE only. OFF does not make signals earlier — it only enables the dim developing-setup preview below. State never advances intrabar either way.")
+showDev  = input.bool(false, "Preview developing setups (dim ⋯ mark, no alert)", group = grpMaster,
+     tooltip = "Draws a faint ⋯ when a setup is one condition away from entry on the CURRENT unclosed bar. Changes no state, raises no alert, and can disappear before the close — that is the point of showing it dim.")
+minTier  = input.int(2, "Minimum POI tier for a trade (1 = A+ only, 3 = any)", minval = 1, maxval = 3, group = grpMaster,
+     tooltip = "Tier 1 = sweep + displacement + MSS + FVG + HTF alignment (+OTE). Tier 2 = displacement + FVG + structure alignment. Tier 3 = zone/FVG geometry only — VISUAL INFORMATION, never tradable above this setting.")
+needHtfAlign = input.bool(true, "Require HTF context alignment", group = grpMaster)
+
+grpG = "② General"
+pivLen     = input.int(5,     "Pivot length (internal swings)",        minval = 2,  group = grpG)
+atrLen     = input.int(14,    "ATR length",                            minval = 1,  group = grpG)
+biasLen    = input.int(50,    "Bias EMA length (MTF table)",           minval = 5,  group = grpG)
+trendLen   = input.int(200,   "Chart trend EMA (Doji setup context)",  minval = 10, group = grpG)
+showLevels = input.bool(true, "Show last swing high/low key levels",   group = grpG)
+showSweeps = input.bool(true, "Mark liquidity sweeps (◆)",             group = grpG)
+biasFilter = input.string("Off", "Bias filter — block counter-trend signals",
+     options = ["Off", "5", "15", "60", "240", "D"], group = grpG)
+
+grpM = "③ Structure"
+showStruct = input.bool(true,  "Label BOS / CHoCH", group = grpM)
+structFilt = input.bool(false, "Filter signals by structure direction", group = grpM)
+extPiv     = input.int(12, "External structure pivot length", minval = 5, group = grpM,
+     tooltip = "EXTERNAL = major swings: context, major BOS/CHoCH, protected levels, dealing range. INTERNAL (the pivot length above) = MSS / execution confirmation ONLY. v4 never lets an internal CHoCH satisfy a context requirement (BUG-3).")
+showOF     = input.bool(true, "Order-flow zigzag (internal legs)", group = grpM)
+structDisp = input.float(0.5, "Structural break body ≥ ATR × (0 = any close)", step = 0.1, minval = 0, group = grpM,
+     tooltip = "A BOS / CHoCH only counts with a displacement body. A weak close through a level is classified as a liquidity RUN and does NOT burn the level (BUG-2).")
+showProt   = input.bool(true, "Plot protected swing (external structure)", group = grpM,
+     tooltip = "The protected low (bull) / high (bear) = the actual originating PIVOT of the leg that produced the last BOS — not a running min/max (BUG-1).")
+showRuns   = input.bool(false, "Mark weak close-throughs as liquidity runs (run)", group = grpM)
+
+grpLQ = "④ Liquidity"
+showEq     = input.bool(true, "Draw equal highs / lows (EQH / EQL)", group = grpLQ)
+eqTol      = input.float(0.15, "Equal level tolerance (ATR ×)", step = 0.05, minval = 0.05, group = grpLQ)
+eqMinSep   = input.int(5,  "EQH/EQL minimum bar separation", minval = 2, group = grpLQ,
+     tooltip = "Two pivots this many bars apart or less are one double-top, not an engineered pool (BUG-7).")
+eqNeedReact = input.bool(true, "EQH/EQL require a reaction at both legs", group = grpLQ)
+sweepLook  = input.int(15, "Raid stays bindable for (bars)", minval = 1, group = grpLQ,
+     tooltip = "A liquidity raid can seed a setup for this many bars. After that the raid is STALE and no setup may claim it (BUG-10).")
+poolLife   = input.int(300, "Pool max age (bars, 0 = never expire)", minval = 0, group = grpLQ)
+reactWin   = input.int(6,  "Bars allowed for a reaction after a raid", minval = 1, group = grpLQ)
+showPools  = input.bool(true, "Draw the liquidity registry (targets + raids)", group = grpLQ)
+poolMaxN   = input.int(28, "Max pools tracked", minval = 6, maxval = 60, group = grpLQ)
+showSesHL  = input.bool(true, "Session high / low liquidity lines", group = grpLQ)
+showPD     = input.bool(true, "Previous day high / low (PDH / PDL)", group = grpLQ)
+
+grpZ = "⑤ Supply / Demand"
+showZones  = input.bool(true,   "Draw zones",                          group = grpZ)
+dispFactor = input.float(1.2,   "Displacement body ≥ ATR ×", step = 0.1, minval = 0.5, group = grpZ)
+maxZoneAtr = input.float(2.0,   "Max zone height (ATR ×)",   step = 0.5, minval = 0.5, group = grpZ)
+maxZones   = input.int(6,       "Max zones per side", minval = 1, maxval = 20, group = grpZ)
+needSweep  = input.bool(false,  "S/D retest producer also needs a bound raid", group = grpZ)
+showNext   = input.bool(true,   "Highlight NEXT buy / sell zone", group = grpZ)
+confirmWin = input.int(5,       "Max bars from 50% tap to confirmation", minval = 1, maxval = 20, group = grpZ)
+showFlip   = input.bool(true,   "Flip violated zones into breaker / mitigation blocks", group = grpZ,
+     tooltip = "v4 requires a CAUSAL chain on the SAME zone: the zone was created, price returned into it, a liquidity event happened AT it, displacement broke it and structure shifted → BREAKER. Any other failure → MITIGATION. v2 used unrelated recent flags (Phase 12).")
+showRB     = input.bool(true,   "Rejection blocks (swing-point wick POIs)", group = grpZ)
+showTier   = input.bool(true,   "Show tier tag on zones (T1/T2/T3)", group = grpZ)
+
+grpFV = "⑥ FVG"
+showFvgState = input.bool(true, "Annotate FVG lifecycle (fresh / 50% / filled)", group = grpFV)
+fvgFillDead  = input.bool(true, "A fully filled FVG stops being a POI", group = grpFV,
+     tooltip = "A 50% tap is SETUP PREPARATION, not an entry. A 100% fill means the imbalance is gone — v4 retires it as a POI but keeps the box for context (Phase 10).")
+
+grpH = "⑦ HTF"
+htfSel    = input.string("Auto", "HTF for CRT / TBS / POI", options = ["Auto", "15", "30", "60", "240", "D"], group = grpH)
+htfCtxSel = input.string("Auto", "HTF for CONTEXT (bias / structure / PD)", options = ["Auto", "15", "30", "60", "240", "D"], group = grpH,
+     tooltip = "Separate from the bias FILTER so turning the filter on no longer changes the score (BUG-16). Auto: 1m→15m, 5m→1H, 15m→4H, 30m/1H+→D.")
+useHtfCrt = input.bool(true, "HTF CRT + Turtle-soup producers", group = grpH)
+showPoi   = input.bool(true, "Draw live HTF FVG POI boxes", group = grpH)
+hPoiMaxAge   = input.int(40, "HTF POI max age (HTF candles)", minval = 5, group = grpH)
+hPoiMaxTouch = input.int(3,  "HTF POI max candles inside before expiry", minval = 1, group = grpH)
+hPoiDisp     = input.float(0.8, "HTF FVG min displacement body (ATR ×)", step = 0.1, minval = 0, group = grpH,
+     tooltip = "BUG-17: v2 accepted any 3-candle HTF gap, session-open gaps included.")
+hPoiNeedDir  = input.bool(true, "HTF POI must agree with HTF direction", group = grpH)
+
+grpE = "⑧ Entry engine"
+setupLife = input.int(60, "Setup max life (bars) before invalidation", minval = 10, group = grpE)
+mssWin    = input.int(12, "Max bars: raid→POI, and POI→MSS", minval = 2, group = grpE,
+     tooltip = "Used twice: the POI must be confirmed within this many bars of the raid, and the MSS within this many bars of the POI. A reaction that takes longer than this is not a reaction to that raid.")
+dispWin   = input.int(10, "Max bars from MSS to displacement", minval = 1, group = grpE)
+fvgWin    = input.int(10, "Max bars from displacement to the FVG", minval = 1, group = grpE)
+retestWin = input.int(25, "Max bars from the FVG to its retest", minval = 2, group = grpE)
+poiBindAtr = input.float(2.0, "POI must sit within this of the raid (ATR ×)", step = 0.25, minval = 0.25, group = grpE,
+     tooltip = "Causality guard: the POI has to be AT the liquidity event, not somewhere else on the chart (Phase 7 / BUG-10).")
+mssNeedChoch = input.bool(false, "MSS must be a CHoCH (reject CISD-only shifts)", group = grpE)
+retestDepth = input.float(0.5, "FVG retest depth required (0.5 = 50%)", step = 0.1, minval = 0.0, maxval = 1.0, group = grpE)
+minScore = input.int(0, "Min alignment score (0 = off)", minval = 0, maxval = 100, group = grpE,
+     tooltip = "Context 25 · Liquidity 25 · POI 20 · Trigger 20 · Execution 10. ALIGNMENT of the narrative — NOT win probability, and never sufficient on its own.")
+masterCd = input.int(6, "Cooldown after a final signal, per direction (bars)", minval = 0, group = grpE)
+
+grpF = "⑨ Fractal entry model (FEM)"
+useFEM  = input.bool(true, "◎ Enable FEM (HTF POI is the setup's POI)", group = grpF,
+     tooltip = "FEM is no longer a separate chain that can fire on its own. It is the state machine running with the HTF FVG POI as the POI stage, which is why it outranks every other producer (Phase 15 / BUG-18).")
+femWait = input.int(40, "Max bars from HTF POI tap to execution", minval = 5, group = grpF)
+
+grpC = "⑩ CISD / CRT / Turtle soup"
+showCisd   = input.bool(true,  "Label CISD (change in state of delivery)", group = grpC)
+cisdAsConf = input.bool(false, "Accept CISD as retest confirmation", group = grpC)
+showCRT    = input.bool(true,  "⑫ CRT 3-candle model", group = grpC)
+showTBS    = input.bool(true,  "⑬ Turtle soup (N-bar extreme sweep)", group = grpC)
+showIFC    = input.bool(true,  "Mark IFC candles (grab + displacement)", group = grpC)
+tbsLen     = input.int(20, "⑬ Turtle soup lookback (bars)", minval = 5, group = grpC)
+crtRangeAtr = input.float(1.2, "⑫ Min candle-1 range (ATR ×)", step = 0.1, minval = 0.5, group = grpC)
+crtDispAtr  = input.float(0.5, "⑫ Min candle-3 body (ATR ×)",  step = 0.1, minval = 0.1, group = grpC)
+tbsAgeMin   = input.int(4,  "⑬ Swept extreme min age (bars)", minval = 1, group = grpC)
+sigCooldown = input.int(10, "⑫⑬ Cooldown per direction (bars)", minval = 0, group = grpC)
+crtNeedLoc  = input.bool(true, "⑫⑬ Require a LOCATION (pool / OTE / PD extreme)", group = grpC,
+     tooltip = "BUG-20: a mid-range CRT is not a liquidity reversal. ON = the pattern must sit at an HTF POI, an EQ pool, a session/PD extreme, an external swing, or in OTE / a premium-discount extreme.")
+
+grpS = "⑪ Price action patterns"
+showS1     = input.bool(true,  "① Breakout Rejection Trap (growing wicks)",  group = grpS)
+showS2     = input.bool(true,  "② Pin Bar Liquidity Trap (shrinking wicks)", group = grpS)
+showS3     = input.bool(true,  "③ Inside Bar Breakout",                      group = grpS)
+showS4     = input.bool(true,  "④ Doji Reversal",                            group = grpS)
+minWickAtr = input.float(0.3,  "Min significant wick (ATR ×)", step = 0.1, group = grpS)
+maxAfterBrk = input.int(8,     "Max bars watched after breakout", minval = 3, group = grpS)
+ibBodyAtr  = input.float(1.0,  "③ Min mother-candle body (ATR ×)", step = 0.1, group = grpS)
+dojiPct    = input.float(25,   "④ Doji body ≤ % of range", step = 5, minval = 5, maxval = 50, group = grpS)
+dojiMin    = input.int(3,      "④ Min dojis in window", minval = 2, maxval = 5, group = grpS)
+
+grpL = "⑫ Dynamic trendlines"
+showTL     = input.bool(true, "Draw dynamic trendlines (pivot pairs)", group = grpL)
+tlSweepEnt = input.bool(true, "Trendline sweep is a producer", group = grpL)
+tlNeedConf = input.bool(true, "Require confirmation candle at the line", group = grpL)
+tlTouchMin = input.int(0, "Extra reactions required before a sweep counts", minval = 0, maxval = 5, group = grpL)
+tlValidate = input.bool(true, "Candidate → validated: need a prior REACTION", group = grpL,
+     tooltip = "BUG-19: v2 counted every bar resting near the line as a touch, so two adjacent bars 'validated' a line. v4 counts a REACTION (tag, then at least tlMinSep bars before the next one counts) and resets the count when the line breaks.")
+tlMinSep   = input.int(4, "Minimum bars between two trendline reactions", minval = 1, group = grpL)
+tlAnchorSep = input.int(6, "Minimum bars between the two anchors", minval = 2, group = grpL)
+
+grpK = "⑬ Sessions / Killzones (New York time)"
+useKZ   = input.bool(false, "Only signal inside killzones (intraday charts)", group = grpK)
+paintKZ = input.bool(false, "Shade killzones", group = grpK)
+asiaSes = input.session("2000-0000", "Asia", group = grpK)
+lonSes  = input.session("0200-0500", "London", group = grpK)
+nySes   = input.session("0700-1000", "New York AM", group = grpK)
+showOpens = input.bool(true, "00:00 midnight + 08:30 open lines", group = grpK)
+
+grpSB = "⑭ Silver Bullet"
+sbRole   = input.string("Filter only (recommended)", "Silver Bullet role",
+     options = ["Off", "Filter only (recommended)", "Boost score only"], group = grpSB,
+     tooltip = "The window is NEVER a signal (Phase 20). Filter only: a window entry must still complete the full narrative and gets the SB tag. Boost score only: the window adds session points and nothing else.")
+sbOnlyIn = input.bool(false, "Restrict ALL entries to the Silver Bullet windows", group = grpSB)
+sbSesLO  = input.session("0300-0400", "Silver Bullet — London open", group = grpSB)
+sbSesAM  = input.session("1000-1100", "Silver Bullet — NY AM", group = grpSB)
+sbSesPM  = input.session("1400-1500", "Silver Bullet — NY PM", group = grpSB)
+
+grpN = "⑮ Scheduled volatility windows (NY time) — NOT a live calendar"
+useNews   = input.bool(true,  "Block LONG / SHORT signals inside the windows", group = grpN,
+     tooltip = "Fixed clock windows around the usual 08:30 / 10:00 / Wednesday 14:00 US release slots. This is a SCHEDULED VOLATILITY FILTER, not an economic calendar — not every 08:30 is CPI/NFP and not every Wednesday is FOMC. Edit the sessions to match the week. Day codes: 1=Sun … 7=Sat.")
+paintNews = input.bool(true,  "Shade the windows", group = grpN)
+news1Ses  = input.session("0825-0845:23456", "Window #1 — 08:30 US data slot", group = grpN)
+news2Ses  = input.session("0955-1010:23456", "Window #2 — 10:00 US data slot", group = grpN)
+news3Ses  = input.session("1355-1435:4",     "Window #3 — 14:00 FOMC slot (Wednesdays)", group = grpN)
+
+grpO = "⑯ Dealing range / OTE"
+showRange = input.bool(true, "Show range EQ + OTE 62–79% box", group = grpO)
+showFlow  = input.bool(true, "Shade order-flow areas (premium / discount)", group = grpO)
+rangeSrc  = input.string("External", "Dealing range swings", options = ["External", "Internal"], group = grpO)
+
+grpR = "⑰ Risk · SL / TP"
+showTrade = input.bool(true, "Show entry / SL / TP of the last final signal", group = grpR)
+tpMode    = input.string("Liquidity ladder", "Take-profit mode",
+     options = ["Liquidity ladder", "Next level", "R multiple"], group = grpR,
+     tooltip = "Liquidity ladder (v4): TP1 = internal liquidity · TP2 = opposing FVG / OB · TP3 = external liquidity, each with an R floor and clamped short of un-raided opposing pools. Next level / R multiple keep the v2 behaviour.")
+rrMult    = input.float(2.0, "Take-profit R multiple (fallback + TP2 floor)", step = 0.5, minval = 0.5, group = grpR)
+minRiskAtr = input.float(0.25, "Minimum stop distance (ATR ×)", step = 0.05, minval = 0.05, group = grpR)
+maxRiskAtr = input.float(3.0,  "Maximum stop distance (ATR ×)", step = 0.25, minval = 0.5, group = grpR,
+     tooltip = "A structural level further than this is rejected and the hierarchy falls through to the next candidate. This is what stops an HTF-sized stop from being applied to a 5m entry.")
+atrStopMult = input.float(1.0, "ATR fallback stop (ATR ×)", step = 0.25, minval = 0.25, group = grpR)
+tpClamp   = input.bool(true, "Clamp a TP that sits behind an un-raided opposing pool", group = grpR)
+
+grpD = "⑱ Dashboard / UI"
+showDash = input.bool(true, "Show MTF bias dashboard", group = grpD)
+uiSizeOpt  = input.string("Tiny", "Signal label size", options = ["Tiny", "Small"], group = grpD)
+uiTrans    = input.int(25, "Signal label transparency", minval = 0, maxval = 80, group = grpD)
+uiMicroBig = input.bool(true, "Readable micro-marks (cisd / ifc / BOS / session tags)", group = grpD)
+showReason = input.bool(true, "Print the machine-readable reason on the entry label", group = grpD)
+
+grpDB = "⑲ Debug"
+showDebug = input.bool(false, "Show state-machine debug panel", group = grpDB,
+     tooltip = "Per direction: HTF CONTEXT / LIQ TARGET / SWEEP / POI / MSS / DISPLACEMENT / FVG / RETEST / ENTRY, plus the exact reason an entry was blocked.")
+dbgPos    = input.string("Bottom right", "Debug panel position",
+     options = ["Bottom right", "Bottom left", "Middle right", "Top left"], group = grpDB)
+
+// ═══════════════════════════════════════ MODULE 2 · CONSTANTS + HELPERS
+// Named constants only — no magic numbers in the engines below.
+// ═════════════════════════════════════════════════════════════════════════════
+var float RUNAWAY_ATR      = 3.0    // breakout ran this far past the level → no trap, stop watching
+var float NEAR_LVL_ATR     = 0.25   // tolerance for "price is at the level"
+var float SL_PAD_ATR       = 0.25   // stop padding beyond the structural level
+var float STRONG_CLOSE_PCT = 0.30   // close in the outer 30 % of its candle = displacement-grade close
+var float CISD_NEUTRAL_PCT = 0.10   // body ≤ 10 % of range = neutral candle → ends a CISD series
+var float PIN_OPP_PCT      = 0.35   // pin bar: opposite wick ≤ 35 % of range (BUG-23 — no body dependence)
+var int   TRIG_LOOK        = 10     // bars a structure shift / CISD stays a live trigger for the score
+var int   IFC_LOOK         = 3      // prior bars whose extreme an IFC candle must take
+var float BRK_BODY_ATR     = 0.5    // min body for a meaningful breakout / rejection close
+var int   IB_WAIT_BARS     = 4      // bars allowed for the inside-bar break to happen
+var int   TRADE_BARS       = 15     // length of entry/SL/TP lines
+var int   DOJI_WINDOW      = 5      // lookback window for counting dojis
+var float OTE_1            = 0.62   // optimal trade entry — shallow bound
+var float OTE_2            = 0.79   // optimal trade entry — deep bound
+var float PD_EXTREME       = 0.25   // within 25 % of a range extreme = premium/discount extreme
+var float POOL_CONSUME_ATR = 4.0    // price this far from a reacted pool → pool consumed
+var color COL_BULL         = #089981
+var color COL_BEAR         = #f23645
+var color COL_NEU          = #787b86
+
+// pool kinds — kept as ints so the registry stays a flat numeric array
+var int PK_SWING = 0
+var int PK_EXT   = 1
+var int PK_EQ    = 2
+var int PK_SES   = 3
+var int PK_PD    = 4
+
+// pool lifecycle states
+var int PS_NEW   = 0    // CREATED
+var int PS_VAL   = 1    // VALIDATED (has been respected at least once)
+var int PS_RAID  = 2    // RAIDED (wick through, close back inside)
+var int PS_REACT = 3    // REVERSAL CONFIRMED (displacement / MSS away from it)
+var int PS_DONE  = 4    // CONSUMED (broken, expired, or spent by a setup)
+
+// setup machine states — the ONLY path to an entry
+var int ST_NONE  = 0
+var int ST_CTX   = 1
+var int ST_TGT   = 2
+var int ST_RAID  = 3
+var int ST_POI   = 4
+var int ST_MSS   = 5
+var int ST_DISP  = 6
+var int ST_FVG   = 7
+var int ST_ENTRY = 8
+var int ST_DEAD  = 9
+
+// producer ranks (MASTER SIGNAL PRIORITY — lower wins)
+var int PR_FEM  = 1
+var int PR_MACH = 2
+var int PR_SD   = 3
+var int PR_CRT  = 4
+var int PR_TBS  = 5
+var int PR_TL   = 6
+var int PR_PA   = 7
+
+// micro-mark rendering (cisd / ifc / BOS / CHoCH / session tags)
+mkSize  = uiMicroBig ? size.small : size.tiny
+mkTrans = uiMicroBig ? 0 : 35
+
+// chip = text on a solid pill — readable on any candle background
+f_chip(bool below, string txt, color bg, color tc, string sz) =>
+    label.new(bar_index, na, txt,
+         yloc = below ? yloc.belowbar : yloc.abovebar,
+         style = below ? label.style_label_up : label.style_label_down,
+         color = bg, textcolor = tc, size = sz)
+
+f_recent(int b, int look) => not na(b) and bar_index - b <= look
+f_join(string acc, string part) => acc == "" ? part : acc + "\n" + part
+f_add(string acc, string part) => acc == "" ? part : acc + " + " + part
+f_tick(bool ok) => ok ? "✓" : "✗"
+
+// ═══════════════════════════════ MODULE 3 · CORE SERIES + CANDLE ANATOMY
+// Candle psychology, confirmation candles, CISD, IFC. Every state latch in
+// this file is gated on `confirmed` (ARCH-9) — nothing advances intrabar.
+// ═════════════════════════════════════════════════════════════════════════════
+atr     = ta.atr(atrLen)
+body    = math.abs(close - open)
+rng     = high - low
+upWick  = high - math.max(open, close)
+dnWick  = math.min(open, close) - low
+bullBar = close > open
+bearBar = close < open
+
+confirmed = barstate.isconfirmed
+// developing preview is only ever offered on the live, unclosed bar
+devBar    = showDev and barstate.islast and not barstate.isconfirmed
+
+emaTrend  = ta.ema(close, trendLen)
+chartBias = close > emaTrend ? 1 : -1
+
+// BUG-23: the opposite-wick cap is a fraction of RANGE, not of body. A clean
+// hammer has a near-zero body, which made v2's `upWick <= body` test false.
+bullPin    = rng > 0 and dnWick >= 2 * body and dnWick >= 0.45 * rng and upWick <= PIN_OPP_PCT * rng and dnWick >= minWickAtr * atr
+bearPin    = rng > 0 and upWick >= 2 * body and upWick >= 0.45 * rng and dnWick <= PIN_OPP_PCT * rng and upWick >= minWickAtr * atr
+bullEngulf = bullBar and bearBar[1] and close >= open[1] and open <= close[1] and body > body[1]
+bearEngulf = bearBar and bullBar[1] and close <= open[1] and open >= close[1] and body > body[1]
+bullConfirm = bullPin or bullEngulf
+bearConfirm = bearPin or bearEngulf
+doji        = rng > 0 and body <= dojiPct / 100 * rng
+
+// displacement = a real expansion candle closing in its own outer third.
+// One definition, used by every engine (v2 had three near-duplicates).
+strongUp = rng > 0 and close >= high - STRONG_CLOSE_PCT * rng
+strongDn = rng > 0 and close <= low + STRONG_CLOSE_PCT * rng
+dispUpBar = bullBar and body >= dispFactor * atr and strongUp
+dispDnBar = bearBar and body >= dispFactor * atr and strongDn
+
+// ---- CISD: change in state of delivery ---------------------------------------
+// The OPEN of the first candle of the most recent consecutive bull / bear run.
+// A confirmed displacement close through that origin open = delivery flipped.
+// A neutral candle (body ≤ CISD_NEUTRAL_PCT of range) ends BOTH series.
+cisdNeutral = rng == 0 or body <= CISD_NEUTRAL_PCT * rng
+cisdBull    = bullBar and not cisdNeutral
+cisdBear    = bearBar and not cisdNeutral
+var float bullRunOpen = na
+var float bearRunOpen = na
+var int   bullRunLen  = 0
+var int   bearRunLen  = 0
+var bool  cisdDnDone  = false
+var bool  cisdUpDone  = false
+if confirmed
+    if cisdNeutral
+        bullRunOpen := na
+        bearRunOpen := na
+        bullRunLen  := 0
+        bearRunLen  := 0
+    if cisdBull and not cisdBull[1]
+        bullRunOpen := open
+        bullRunLen  := 1
+        cisdDnDone  := false
+    else if cisdBull
+        bullRunLen += 1
+    if cisdBear and not cisdBear[1]
+        bearRunOpen := open
+        bearRunLen  := 1
+        cisdUpDone  := false
+    else if cisdBear
+        bearRunLen += 1
+cisdDn = confirmed and not na(bullRunOpen) and not cisdDnDone and cisdBear and close < bullRunOpen and bullRunLen >= 2 and body >= BRK_BODY_ATR * atr and strongDn
+cisdUp = confirmed and not na(bearRunOpen) and not cisdUpDone and cisdBull and close > bearRunOpen and bearRunLen >= 2 and body >= BRK_BODY_ATR * atr and strongUp
+if cisdDn
+    cisdDnDone := true
+if cisdUp
+    cisdUpDone := true
+if showCisd and cisdDn
+    f_chip(false, "CISD", color.new(COL_BEAR, 55), color.white, mkSize)
+if showCisd and cisdUp
+    f_chip(true, "CISD", color.new(COL_BULL, 55), color.white, mkSize)
+
+// ---- IFC candle: institutional funding candle --------------------------------
+// Takes a REAL pool (the prior IFC_LOOK-bar extreme) with meaningful
+// penetration, then closes past the prior candle's midpoint in the outer
+// STRONG_CLOSE_PCT of its own range with a displacement body.
+prevMid  = (high[1] + low[1]) / 2
+ifcPoolL = ta.lowest(low, IFC_LOOK)[1]
+ifcPoolH = ta.highest(high, IFC_LOOK)[1]
+ifcBull = low < ifcPoolL and ifcPoolL - low >= NEAR_LVL_ATR * atr and bullBar and close > prevMid and strongUp and body >= BRK_BODY_ATR * atr
+ifcBear = high > ifcPoolH and high - ifcPoolH >= NEAR_LVL_ATR * atr and bearBar and close < prevMid and strongDn and body >= BRK_BODY_ATR * atr
+if showIFC and ifcBull and confirmed
+    f_chip(true, "IFC", color.new(color.gray, 55), color.new(COL_BULL, 0), mkSize)
+if showIFC and ifcBear and confirmed
+    f_chip(false, "IFC", color.new(color.gray, 55), color.new(COL_BEAR, 0), mkSize)
+
+// retest confirmation used by the POI / trendline / machine execution stages
+zoneBullConf = bullConfirm or ifcBull or (cisdAsConf and cisdUp)
+zoneBearConf = bearConfirm or ifcBear or (cisdAsConf and cisdDn)
+
+// ═════════════════════════════ MODULE 4 · STRUCTURE (INTERNAL + EXTERNAL)
+// ARCH-3 / BUG-1 / BUG-2. One engine, two INDEPENDENT instances:
+//   EXTERNAL (extPiv) — context, major BOS / CHoCH, protected levels, range.
+//   INTERNAL (pivLen) — MSS / execution confirmation ONLY.
+// The protected swing is the ACTUAL ORIGINATING PIVOT of the leg that made
+// the last BOS, not a running min/max. A weak (non-displacement) close through
+// a level is a liquidity RUN: it is reported, it does NOT set the break latch,
+// and the level therefore stays available for a real structural break later.
+// ═════════════════════════════════════════════════════════════════════════════
+type Struct
+    int   dir       = 0
+    float swHi      = na    // latest confirmed pivot high (BOS-up level)
+    int   swHiBar   = na
+    float swLo      = na    // latest confirmed pivot low  (BOS-dn level)
+    int   swLoBar   = na
+    bool  hiBroken  = false // once-per-level structural latch
+    bool  loBroken  = false
+    bool  hiRun     = false // once-per-level weak-run latch (BUG-2)
+    bool  loRun     = false
+    float protLo    = na    // protected low  = origin pivot of the last bull leg
+    int   protLoBar = na
+    float protHi    = na
+    int   protHiBar = na
+    int   bosUpBar  = na
+    int   bosDnBar  = na
+    int   chUpBar   = na
+    int   chDnBar   = na
+    int   pivHiCnt  = 0
+    int   pivLoCnt  = 0
+    float evLvlUp   = na    // the level the last bullish event actually broke
+    float evLvlDn   = na
+
+// Mutates the passed instance (a UDT field write is a reference write, not a
+// global assignment, so this is legal inside a function) and reports the event.
+f_structUpdate(Struct s, float pvH, float pvL, simple int pvLen) =>
+    bool bosU = false
+    bool bosD = false
+    bool chU  = false
+    bool chD  = false
+    bool runU = false
+    bool runD = false
+    if confirmed
+        // 1) register newly confirmed pivots — these are the ONLY structural levels
+        if not na(pvH)
+            s.swHi     := pvH
+            s.swHiBar  := bar_index - pvLen
+            s.hiBroken := false
+            s.hiRun    := false
+            s.pivHiCnt += 1
+        if not na(pvL)
+            s.swLo     := pvL
+            s.swLoBar  := bar_index - pvLen
+            s.loBroken := false
+            s.loRun    := false
+            s.pivLoCnt += 1
+        bool disp = body >= structDisp * atr
+        // 2) CHoCH first — a displaced close through the PROTECTED swing
+        if s.dir == 1 and not na(s.protLo) and close < s.protLo and disp
+            chD          := true
+            s.dir        := -1
+            s.chDnBar    := bar_index
+            s.evLvlDn    := s.protLo
+            s.protHi     := s.swHi          // origin of the new down-leg
+            s.protHiBar  := s.swHiBar
+            s.protLo     := na
+            s.protLoBar  := na
+            s.loBroken   := false
+        else if s.dir == -1 and not na(s.protHi) and close > s.protHi and disp
+            chU          := true
+            s.dir        := 1
+            s.chUpBar    := bar_index
+            s.evLvlUp    := s.protHi
+            s.protLo     := s.swLo          // origin of the new up-leg
+            s.protLoBar  := s.swLoBar
+            s.protHi     := na
+            s.protHiBar  := na
+            s.hiBroken   := false
+        // 3) BOS — a displaced close through the latest pivot in the trend
+        else if not na(s.swHi) and not s.hiBroken and close > s.swHi and s.dir >= 0
+            if disp
+                bosU        := true
+                s.hiBroken  := true
+                s.dir       := 1
+                s.bosUpBar  := bar_index
+                s.evLvlUp   := s.swHi
+                s.protLo    := s.swLo       // the pivot low that originated this leg
+                s.protLoBar := s.swLoBar
+            else if not s.hiRun
+                runU     := true            // liquidity run: level NOT burned (BUG-2)
+                s.hiRun  := true
+        else if not na(s.swLo) and not s.loBroken and close < s.swLo and s.dir <= 0
+            if disp
+                bosD        := true
+                s.loBroken  := true
+                s.dir       := -1
+                s.bosDnBar  := bar_index
+                s.evLvlDn   := s.swLo
+                s.protHi    := s.swHi
+                s.protHiBar := s.swHiBar
+            else if not s.loRun
+                runD     := true
+                s.loRun  := true
+        // 4) counter-trend pivot breaks with no protected level yet (first leg)
+        else if s.dir == 1 and na(s.protLo) and not na(s.swLo) and not s.loBroken and close < s.swLo and disp
+            chD         := true
+            s.dir       := -1
+            s.chDnBar   := bar_index
+            s.evLvlDn   := s.swLo
+            s.loBroken  := true
+            s.protHi    := s.swHi
+            s.protHiBar := s.swHiBar
+        else if s.dir == -1 and na(s.protHi) and not na(s.swHi) and not s.hiBroken and close > s.swHi and disp
+            chU         := true
+            s.dir       := 1
+            s.chUpBar   := bar_index
+            s.evLvlUp   := s.swHi
+            s.hiBroken  := true
+            s.protLo    := s.swLo
+            s.protLoBar := s.swLoBar
+    [bosU, bosD, chU, chD, runU, runD]
+
+// ---- internal scale (execution) ----------------------------------------------
+ph = ta.pivothigh(high, pivLen, pivLen)
+pl = ta.pivotlow(low, pivLen, pivLen)
+var Struct sInt = Struct.new()
+[bosUp, bosDn, chochUp, chochDn, runUp, runDn] = f_structUpdate(sInt, ph, pl, pivLen)
+
+// ---- external scale (context) -------------------------------------------------
+eph = ta.pivothigh(high, extPiv, extPiv)
+epl = ta.pivotlow(low, extPiv, extPiv)
+var Struct sExt = Struct.new()
+[eBosUp, eBosDn, eChochUp, eChochDn, eRunUp, eRunDn] = f_structUpdate(sExt, eph, epl, extPiv)
+
+msDir    = sInt.dir
+extDir   = sExt.dir
+protLowI  = sInt.protLo
+protHighI = sInt.protHi
+protLowE  = sExt.protLo
+protHighE = sExt.protHi
+lastRes  = sInt.swHi          // latest internal swing high — buy-side liquidity above
+lastSup  = sInt.swLo          // latest internal swing low  — sell-side liquidity below
+lastResBar = sInt.swHiBar
+lastSupBar = sInt.swLoBar
+extRes   = sExt.swHi
+extSup   = sExt.swLo
+extResBar = sExt.swHiBar
+extSupBar = sExt.swLoBar
+
+// structural break flags reused by the pattern engines (①②③) — these must be
+// the STRUCTURAL breaks, so a weak run no longer arms a pattern watch.
+brokeUp = bosUp or eBosUp or chochUp or eChochUp
+brokeDn = bosDn or eBosDn or chochDn or eChochDn
+// the level the break actually took (needed by the ①/②/③ watch state machines)
+brkUpLvl = bosUp or chochUp ? sInt.evLvlUp : eBosUp or eChochUp ? sExt.evLvlUp : na
+brkDnLvl = bosDn or chochDn ? sInt.evLvlDn : eBosDn or eChochDn ? sExt.evLvlDn : na
+
+// ---- separate trigger memories: internal ≠ external (BUG-3) -------------------
+var int iChUpBar   = na
+var int iChDnBar   = na
+var int iBosUpBar  = na
+var int iBosDnBar  = na
+var int eChUpBar   = na
+var int eChDnBar   = na
+var int eBosUpBar2 = na
+var int eBosDnBar2 = na
+var int cisdUpBar  = na
+var int cisdDnBar  = na
+var int dispUpBar2 = na
+var int dispDnBar2 = na
+if confirmed
+    if chochUp
+        iChUpBar := bar_index
+    if chochDn
+        iChDnBar := bar_index
+    if bosUp
+        iBosUpBar := bar_index
+    if bosDn
+        iBosDnBar := bar_index
+    if eChochUp
+        eChUpBar := bar_index
+    if eChochDn
+        eChDnBar := bar_index
+    if eBosUp
+        eBosUpBar2 := bar_index
+    if eBosDn
+        eBosDnBar2 := bar_index
+    if cisdUp
+        cisdUpBar := bar_index
+    if cisdDn
+        cisdDnBar := bar_index
+    if dispUpBar
+        dispUpBar2 := bar_index
+    if dispDnBar
+        dispDnBar2 := bar_index
+
+recentIChUp  = f_recent(iChUpBar, TRIG_LOOK)
+recentIChDn  = f_recent(iChDnBar, TRIG_LOOK)
+recentEChUp  = f_recent(eChUpBar, TRIG_LOOK)
+recentEChDn  = f_recent(eChDnBar, TRIG_LOOK)
+recentIBosUp = f_recent(iBosUpBar, TRIG_LOOK)
+recentIBosDn = f_recent(iBosDnBar, TRIG_LOOK)
+recentEBosUp = f_recent(eBosUpBar2, TRIG_LOOK)
+recentEBosDn = f_recent(eBosDnBar2, TRIG_LOOK)
+recentCisdUp = f_recent(cisdUpBar, TRIG_LOOK)
+recentCisdDn = f_recent(cisdDnBar, TRIG_LOOK)
+recentDispUp = f_recent(dispUpBar2, 3)
+recentDispDn = f_recent(dispDnBar2, 3)
+// MSS = an INTERNAL change of character or a CISD. Execution grade only.
+mssUp = chochUp or cisdUp
+mssDn = chochDn or cisdDn
+recentMssUp = recentIChUp or recentCisdUp
+recentMssDn = recentIChDn or recentCisdDn
+// structure direction preferring the external narrative (context)
+structDir = extDir != 0 ? extDir : msDir
+
+// ---- structure marks: external bright, internal muted, runs optional ---------
+if showStruct and (eBosUp or eChochUp)
+    f_chip(true, eChochUp ? "CHoCH" : "BOS", color.new(COL_BULL, 15), color.white, size.small)
+if showStruct and (eBosDn or eChochDn)
+    f_chip(false, eChochDn ? "CHoCH" : "BOS", color.new(COL_BEAR, 15), color.white, size.small)
+if showStruct and (bosUp or chochUp)
+    f_chip(true, chochUp ? "iCHoCH" : "ibos", color.new(color.gray, 60), color.new(COL_BULL, 0), size.tiny)
+if showStruct and (bosDn or chochDn)
+    f_chip(false, chochDn ? "iCHoCH" : "ibos", color.new(color.gray, 60), color.new(COL_BEAR, 0), size.tiny)
+if showRuns and (runUp or eRunUp)
+    f_chip(true, "run", color.new(COL_NEU, 70), color.new(color.white, 20), size.tiny)
+if showRuns and (runDn or eRunDn)
+    f_chip(false, "run", color.new(COL_NEU, 70), color.new(color.white, 20), size.tiny)
+
+// ---- order-flow zigzag (internal legs) ---------------------------------------
+var float zzPrevP = na
+var int   zzPrevB = na
+var zzLines = array.new<line>()
+if showOF and confirmed and (not na(ph) or not na(pl))
+    float p = not na(ph) ? ph : pl
+    int   b = bar_index - pivLen
+    if not na(zzPrevP)
+        array.push(zzLines, line.new(zzPrevB, zzPrevP, b, p,
+             color = p > zzPrevP ? color.new(COL_BULL, 35) : color.new(COL_BEAR, 35), width = 1))
+        if array.size(zzLines) > 40
+            line.delete(array.get(zzLines, 0))
+            array.remove(zzLines, 0)
+    zzPrevP := p
+    zzPrevB := b
+
+// ═══════════════════════ MODULE 5 · SESSIONS · KILLZONES · SILVER BULLET
+// Session state is computed ALWAYS; the display toggles only affect drawing
+// (BUG-6 — in v2 turning a display off silently disabled score terms).
+// ═════════════════════════════════════════════════════════════════════════════
+f_inSes(simple string ses) =>
+    not na(time(timeframe.period, ses, "America/New_York"))
+
+inAsia = f_inSes(asiaSes)
+inLon  = f_inSes(lonSes)
+inNY   = f_inSes(nySes)
+inSbLO = f_inSes(sbSesLO)
+inSbAM = f_inSes(sbSesAM)
+inSbPM = f_inSes(sbSesPM)
+inSB   = inSbLO or inSbAM or inSbPM
+inKZ   = inAsia or inLon or inNY or inSB
+kzOK   = not useKZ or not timeframe.isintraday or inKZ
+
+// SCHEDULED VOLATILITY FILTER — fixed clock slots, NOT a live economic
+// calendar. Named and documented as such (Phase 21).
+inVol  = f_inSes(news1Ses) or f_inSes(news2Ses) or f_inSes(news3Ses)
+volOK  = not useNews or not timeframe.isintraday or not inVol
+
+// Silver Bullet is a FILTER, never a signal (Phase 20).
+sbActive = sbRole != "Off" and timeframe.isintraday and inSB
+sbGate   = not sbOnlyIn or not timeframe.isintraday or inSB
+
+// ---- opening prices: 00:00 midnight + 08:30 NY -------------------------------
+inMidWin = f_inSes("0000-0005")
+in830Win = f_inSes("0830-0835")
+newMid  = inMidWin and not inMidWin[1]
+new830  = in830Win and not in830Win[1]
+
+var float midOpen    = na
+var float ny830Open  = na
+var line  midLn      = na
+var label midLb      = na
+var line  ny830Ln    = na
+var label ny830Lb    = na
+var int   lastMidBar = na
+var int   last830Bar = na
+
+// a bar's OPEN is fixed on its first tick → safe to draw immediately, but the
+// re-entry guard keeps it to one draw per bar
+if timeframe.isintraday and newMid and (na(lastMidBar) or lastMidBar != bar_index)
+    lastMidBar := bar_index
+    midOpen    := open
+    if showOpens
+        line.delete(midLn)
+        label.delete(midLb)
+        midLn := line.new(bar_index, open, bar_index + 1, open,
+             color = color.new(color.white, 45), style = line.style_dotted, extend = extend.right)
+        midLb := label.new(bar_index, open, "00:00", style = label.style_label_left,
+             color = color.new(color.gray, 80), textcolor = color.new(color.white, mkTrans), size = size.tiny)
+if timeframe.isintraday and new830 and (na(last830Bar) or last830Bar != bar_index)
+    last830Bar := bar_index
+    ny830Open  := open
+    if showOpens
+        line.delete(ny830Ln)
+        label.delete(ny830Lb)
+        ny830Ln := line.new(bar_index, open, bar_index + 1, open,
+             color = color.new(color.orange, 45), style = line.style_dotted, extend = extend.right)
+        ny830Lb := label.new(bar_index, open, "08:30", style = label.style_label_left,
+             color = color.new(color.orange, 80), textcolor = color.new(color.white, mkTrans), size = size.tiny)
+
+// ---- session extremes: tracked live, FROZEN on the session close -------------
+// The frozen level is resting liquidity and is handed to the pool registry;
+// raid / break detection lives there, so every pool kind shares one lifecycle.
+type Ses
+    float hi    = na
+    float lo    = na
+    float fhi   = na
+    float flo   = na
+    bool  fresh = false
+    line  hiLn  = na
+    line  loLn  = na
+    label hiLb  = na
+    label loLb  = na
+
+f_sesTrack(Ses s, bool active, string tag, color col) =>
+    s.fresh := false
+    if active
+        if not active[1]
+            s.hi := high
+            s.lo := low
+        else
+            s.hi := math.max(nz(s.hi, high), high)
+            s.lo := math.min(nz(s.lo, low), low)
+    if not active and active[1] and confirmed and not na(s.hi)
+        s.fhi   := s.hi
+        s.flo   := s.lo
+        s.fresh := true
+        if showSesHL
+            line.delete(s.hiLn)
+            line.delete(s.loLn)
+            label.delete(s.hiLb)
+            label.delete(s.loLb)
+            s.hiLn := line.new(bar_index, s.fhi, bar_index + 1, s.fhi, color = color.new(col, 35), extend = extend.right)
+            s.loLn := line.new(bar_index, s.flo, bar_index + 1, s.flo, color = color.new(col, 35), extend = extend.right)
+            s.hiLb := label.new(bar_index, s.fhi, tag + " H", style = label.style_label_left,
+                 color = color.new(col, 85), textcolor = color.new(color.white, mkTrans), size = size.tiny)
+            s.loLb := label.new(bar_index, s.flo, tag + " L", style = label.style_label_left,
+                 color = color.new(col, 85), textcolor = color.new(color.white, mkTrans), size = size.tiny)
+    s.fresh
+
+var Ses sesAsia = Ses.new()
+var Ses sesLon  = Ses.new()
+var Ses sesNY   = Ses.new()
+asiaFresh = f_sesTrack(sesAsia, inAsia and timeframe.isintraday, "Asia", color.purple)
+lonFresh  = f_sesTrack(sesLon,  inLon  and timeframe.isintraday, "Lon",  color.blue)
+nyFresh   = f_sesTrack(sesNY,   inNY   and timeframe.isintraday, "NY",   color.orange)
+
+// ═══════════════════════════════════ MODULE 6 · HTF CONTEXT ENGINE
+// Phase 4. The HTF answers "WHERE is price likely to react?", never "BUY".
+// Every request.security uses lookahead_off and NO extra [1] — v2 stacked a
+// redundant [1] on top of lookahead_off and was two HTF bars stale (BUG-15).
+// The remaining delay is the honest one: an HTF bar is only usable once it has
+// closed, so an HTF event surfaces on the first chart bar after that close.
+// ═════════════════════════════════════════════════════════════════════════════
+f_autoHtf() =>
+    switch timeframe.period
+        "1"   => "15"
+        "2"   => "30"
+        "3"   => "30"
+        "5"   => "60"
+        "10"  => "120"
+        "15"  => "240"
+        "30"  => "240"
+        "60"  => "D"
+        "120" => "D"
+        "240" => "D"
+        => "D"
+
+htfTf    = htfSel    == "Auto" ? f_autoHtf() : htfSel
+htfCtxTf = htfCtxSel == "Auto" ? f_autoHtf() : htfCtxSel
+htfLive  = htfTf != timeframe.period
+
+// ---- MTF bias row (dashboard + optional counter-trend filter) ----------------
+f_bias(simple string tf) =>
+    request.security(syminfo.tickerid, tf, close > ta.ema(close, biasLen) ? 1 : -1,
+         lookahead = barmerge.lookahead_off)
+
+b5   = nz(f_bias("5"),   0)
+b15  = nz(f_bias("15"),  0)
+b60  = nz(f_bias("60"),  0)
+b240 = nz(f_bias("240"), 0)
+bD   = nz(f_bias("D"),   0)
+
+filtBias = switch biasFilter
+    "5"   => b5
+    "15"  => b15
+    "60"  => b60
+    "240" => b240
+    "D"   => bD
+    => 0
+
+// ---- HTF context bundle: direction, external swings, premium / discount -----
+// BUG-16: the CONTEXT timeframe is now independent of the FILTER timeframe, so
+// enabling the counter-trend filter no longer changes the score.
+f_htfCtx() =>
+    _dir = close > ta.ema(close, biasLen) ? 1 : -1
+    _ph  = ta.pivothigh(high, 3, 3)
+    _pl  = ta.pivotlow(low, 3, 3)
+    var float _hi = na
+    var float _lo = na
+    if not na(_ph)
+        _hi := _ph
+    if not na(_pl)
+        _lo := _pl
+    _w  = not na(_hi) and not na(_lo) and _hi > _lo ? _hi - _lo : na
+    _pd = na(_w) ? na : (close - _lo) / _w
+    [_dir, _hi, _lo, _pd]
+
+[htfDirRaw, htfSwHi, htfSwLo, htfPdRaw] = request.security(syminfo.tickerid, htfCtxTf, f_htfCtx(),
+     lookahead = barmerge.lookahead_off)
+htfDir = nz(htfDirRaw, 0)
+htfPd  = htfPdRaw
+
+// ---- previous day high / low (external liquidity) ---------------------------
+// The [1] inside the request is what makes lookahead_on safe here: only the
+// COMPLETED previous day is ever read, on historical and realtime bars alike.
+[pdhRaw, pdlRaw] = request.security(syminfo.tickerid, "D", [high[1], low[1]],
+     lookahead = barmerge.lookahead_on)
+newDay = ta.change(time("D")) != 0
+
+// ---- HTF CRT + turtle soup (validated, one HTF bar of confirmation) ---------
+f_crtTbsHtf() =>
+    _atr  = ta.atr(atrLen)
+    _rng  = high - low
+    _body = math.abs(close - open)
+    _bull = close > open
+    _bear = close < open
+    _c1big = _rng[2] >= crtRangeAtr * _atr
+    _crtB  = _c1big and low[1] < low[2] and close[1] > low[2] and close[1] < high[2] and low[2] - low[1] >= minWickAtr * _atr and _bull and close > high[1] and _body >= crtDispAtr * _atr
+    _crtS  = _c1big and high[1] > high[2] and close[1] < high[2] and close[1] > low[2] and high[1] - high[2] >= minWickAtr * _atr and _bear and close < low[1] and _body >= crtDispAtr * _atr
+    _tl    = ta.lowest(low, tbsLen)[1]
+    _th    = ta.highest(high, tbsLen)[1]
+    _loAge = -ta.lowestbars(low, tbsLen)[1] + 1
+    _hiAge = -ta.highestbars(high, tbsLen)[1] + 1
+    _tbsB  = low < _tl and close > _tl and _bull and _loAge >= tbsAgeMin and close >= low + 0.5 * _rng
+    _tbsS  = high > _th and close < _th and _bear and _hiAge >= tbsAgeMin and close <= high - 0.5 * _rng
+    [_crtB, _crtS, _tbsB, _tbsS, time, low, high]
+
+[hCrtB, hCrtS, hTbsB, hTbsS, hT, hLo, hHi] = request.security(syminfo.tickerid, htfTf, f_crtTbsHtf(),
+     lookahead = barmerge.lookahead_off)
+newHtfBar = htfLive and not na(hT) and hT != nz(hT[1])
+
+// ---- HTF FVG POI (the fractal model's "where") ------------------------------
+// BUG-17: displacement required, HTF-direction filter, and the bar/touch
+// counters are reset when the POI dies.
+f_htfPoi() =>
+    _atr = ta.atr(atrLen)
+    _dir = close > ta.ema(close, biasLen) ? 1 : -1
+    _dU  = close[1] > open[1] and math.abs(close[1] - open[1]) >= hPoiDisp * _atr
+    _dD  = close[1] < open[1] and math.abs(close[1] - open[1]) >= hPoiDisp * _atr
+    var float bTop = na
+    var float bBot = na
+    var int   bBar = na
+    var int   bIn  = 0
+    var float sTop = na
+    var float sBot = na
+    var int   sBar = na
+    var int   sIn  = 0
+    if low > high[2] and _dU and (not hPoiNeedDir or _dir > 0)
+        bTop := low
+        bBot := high[2]
+        bBar := bar_index
+        bIn  := 0
+    if high < low[2] and _dD and (not hPoiNeedDir or _dir < 0)
+        sBot := high
+        sTop := low[2]
+        sBar := bar_index
+        sIn  := 0
+    if not na(bTop) and not na(bBar) and bar_index > bBar and low <= bTop
+        bIn += 1
+    if not na(sTop) and not na(sBar) and bar_index > sBar and high >= sBot
+        sIn += 1
+    if not na(bBot) and (close < bBot or bar_index - bBar > hPoiMaxAge or bIn > hPoiMaxTouch)
+        bTop := na
+        bBot := na
+        bBar := na
+        bIn  := 0
+    if not na(sTop) and (close > sTop or bar_index - sBar > hPoiMaxAge or sIn > hPoiMaxTouch)
+        sTop := na
+        sBot := na
+        sBar := na
+        sIn  := 0
+    [bTop, bBot, sTop, sBot, bIn, sIn]
+
+[hPoiBTop, hPoiBBot, hPoiSTop, hPoiSBot, hPoiBIn, hPoiSIn] = request.security(syminfo.tickerid, htfTf, f_htfPoi(),
+     lookahead = barmerge.lookahead_off)
+
+// HTF context verdict, per direction. This is CONTEXT — it enables a setup,
+// it never triggers one.
+htfCtxLong  = not needHtfAlign or htfDir > 0 or (not na(htfPd) and htfPd <= 0.5) or not na(hPoiBTop)
+htfCtxShort = not needHtfAlign or htfDir < 0 or (not na(htfPd) and htfPd >= 0.5) or not na(hPoiSTop)
+
+// ═════════════════════════════════ MODULE 7 · LIQUIDITY REGISTRY (ARCH-2)
+// Every meaningful level becomes a POOL with a real lifecycle:
+//   CREATED → VALIDATED → RAIDED → REACTION CONFIRMED → CONSUMED
+// A raid is BOUND to at most one setup (BUG-10), dies if there is no reaction
+// inside reactWin, and dies the moment price closes the wrong side of the
+// level (which is what made v2's "in play" test wrong, BUG-9).
+// ═════════════════════════════════════════════════════════════════════════════
+type Pool
+    float  px         = na
+    int    kind       = 0
+    bool   buySide    = true
+    int    bornBar    = na
+    int    state      = 0
+    int    raidBar    = na
+    float  raidExt    = na
+    bool   raidStrong = false
+    int    reactBar   = na
+    int    brkBar     = na     // bar the level was BROKEN (close beyond) on
+    int    bound      = 0      // setup id that claimed this raid (0 = free)
+    line   ln         = na
+    string tag        = ""
+
+var pools = array.new<Pool>()
+
+f_poolVisible(int kind) =>
+    kind == PK_SES ? false :
+         kind == PK_EQ ? (showPools and showEq) :
+         kind == PK_PD ? (showPools and showPD) :
+         showPools
+
+f_poolCol(int kind, bool buySide) =>
+    kind == PK_EQ ? (buySide ? color.new(COL_BEAR, 25) : color.new(COL_BULL, 25)) :
+         kind == PK_PD ? color.new(color.yellow, 35) :
+         kind == PK_EXT ? (buySide ? color.new(COL_BEAR, 40) : color.new(COL_BULL, 40)) :
+         color.new(COL_NEU, 62)
+
+f_poolStyle(int kind) =>
+    kind == PK_EQ ? line.style_dotted : kind == PK_SWING ? line.style_dashed : line.style_solid
+
+// registers a pool unless a live pool of the same side already sits there
+f_poolPush(float px, int kind, bool buySide, string tag, int startBar, bool validated) =>
+    bool ok = not na(px)
+    if ok and array.size(pools) > 0
+        for i = 0 to array.size(pools) - 1
+            Pool q = array.get(pools, i)
+            if q.state < PS_DONE and q.buySide == buySide and math.abs(q.px - px) <= eqTol * atr
+                ok := false
+                break
+    if ok
+        Pool p = Pool.new(px = px, kind = kind, buySide = buySide, bornBar = startBar,
+             state = validated ? PS_VAL : PS_NEW, tag = tag)
+        // the line is always created (never na → no setter guards anywhere) and
+        // simply drawn fully transparent when its display group is off
+        p.ln := line.new(startBar, px, bar_index + 1, px,
+             color = f_poolVisible(kind) ? f_poolCol(kind, buySide) : color.new(color.gray, 100),
+             style = f_poolStyle(kind), width = kind == PK_EQ or kind == PK_PD ? 2 : 1,
+             extend = extend.right)
+        array.push(pools, p)
+        while array.size(pools) > poolMaxN
+            Pool o = array.get(pools, 0)
+            line.delete(o.ln)
+            array.remove(pools, 0)
+    ok
+
+// PHASE 7 lifecycle scan — one pass per confirmed bar over the whole registry.
+// The `confirmed` guard lives INSIDE the function on purpose: Pine evaluates
+// both branches of a ternary, so gating the CALL would still have mutated pool
+// state on every intrabar tick.
+f_poolScan() =>
+    int raided = 0
+    if confirmed and array.size(pools) > 0
+        for i = array.size(pools) - 1 to 0
+            Pool p = array.get(pools, i)
+            if p.state == PS_DONE
+                if poolLife > 0 and bar_index - p.bornBar > poolLife + 50
+                    line.delete(p.ln)
+                    array.remove(pools, i)
+                continue
+            if poolLife > 0 and bar_index - p.bornBar > poolLife
+                p.state := PS_DONE
+                line.set_extend(p.ln, extend.none)
+                line.set_x2(p.ln, bar_index)
+                line.set_style(p.ln, line.style_dotted)
+                continue
+            // ---- penetration handling: RAID (wick, close back) vs BREAK
+            if p.buySide
+                if high > p.px
+                    if close < p.px
+                        if p.state <= PS_VAL
+                            p.state      := PS_RAID
+                            p.raidBar    := bar_index
+                            p.raidExt    := high
+                            p.raidStrong := close <= high - 0.5 * rng
+                            raided += 1
+                            line.set_extend(p.ln, extend.none)
+                            line.set_x2(p.ln, bar_index)
+                            line.set_style(p.ln, line.style_dashed)
+                        else
+                            p.raidExt := math.max(nz(p.raidExt, high), high)
+                    else
+                        p.state  := PS_DONE           // BROKEN → expansion, not a raid
+                        p.brkBar := bar_index
+                        line.set_extend(p.ln, extend.none)
+                        line.set_x2(p.ln, bar_index)
+                        line.set_style(p.ln, line.style_dotted)
+                        continue
+                else if p.state == PS_NEW and high >= p.px - NEAR_LVL_ATR * atr
+                    p.state := PS_VAL                 // approached and respected
+            else
+                if low < p.px
+                    if close > p.px
+                        if p.state <= PS_VAL
+                            p.state      := PS_RAID
+                            p.raidBar    := bar_index
+                            p.raidExt    := low
+                            p.raidStrong := close >= low + 0.5 * rng
+                            raided += 1
+                            line.set_extend(p.ln, extend.none)
+                            line.set_x2(p.ln, bar_index)
+                            line.set_style(p.ln, line.style_dashed)
+                        else
+                            p.raidExt := math.min(nz(p.raidExt, low), low)
+                    else
+                        p.state  := PS_DONE
+                        p.brkBar := bar_index
+                        line.set_extend(p.ln, extend.none)
+                        line.set_x2(p.ln, bar_index)
+                        line.set_style(p.ln, line.style_dotted)
+                        continue
+                else if p.state == PS_NEW and low <= p.px + NEAR_LVL_ATR * atr
+                    p.state := PS_VAL
+            // ---- reaction / staleness: a raid does NOT stay valid forever
+            if p.state == PS_RAID
+                if p.buySide and close > p.px
+                    p.state := PS_DONE                // raid failed → became a break
+                else if not p.buySide and close < p.px
+                    p.state := PS_DONE
+                else if bar_index - p.raidBar > reactWin
+                    p.state := PS_DONE                // no reaction in time → stale
+                else if p.buySide ? (dispDnBar or mssDn) : (dispUpBar or mssUp)
+                    p.state    := PS_REACT
+                    p.reactBar := bar_index
+            else if p.state == PS_REACT
+                if p.buySide and close > p.px
+                    p.state := PS_DONE
+                else if not p.buySide and close < p.px
+                    p.state := PS_DONE
+                else if bar_index - p.raidBar > sweepLook or math.abs(close - p.px) > POOL_CONSUME_ATR * atr
+                    p.state := PS_DONE
+    raided
+
+// ---- pivot memory (EQH / EQL construction + reaction depth) -----------------
+var float lastPhVal  = na
+var int   lastPhBar  = na
+var float lastPlVal  = na
+var int   lastPlBar  = na
+var float sinceHiMin = na     // deepest pullback since the last pivot high
+var float sinceLoMax = na     // highest pullback since the last pivot low
+if confirmed
+    sinceHiMin := na(sinceHiMin) ? low  : math.min(sinceHiMin, low)
+    sinceLoMax := na(sinceLoMax) ? high : math.max(sinceLoMax, high)
+
+if confirmed and not na(ph)
+    int pbH = bar_index - pivLen
+    // BUG-7: ATR tolerance AND time separation AND a real reaction between the
+    // two highs. The pool sits at the MEAN of the pair, not at the higher one.
+    if not na(lastPhVal) and math.abs(ph - lastPhVal) <= eqTol * atr and pbH - lastPhBar >= eqMinSep
+        bool reactH = not eqNeedReact or (not na(sinceHiMin) and math.min(ph, lastPhVal) - sinceHiMin >= math.max(eqTol * atr * 2, 0.5 * atr))
+        if reactH
+            f_poolPush((ph + lastPhVal) / 2, PK_EQ, true, "EQH", lastPhBar, true)
+    lastPhVal  := ph
+    lastPhBar  := pbH
+    sinceHiMin := ta.lowest(low, pivLen)
+    f_poolPush(ph, PK_SWING, true, "SH", pbH, false)
+if confirmed and not na(pl)
+    int pbL = bar_index - pivLen
+    if not na(lastPlVal) and math.abs(pl - lastPlVal) <= eqTol * atr and pbL - lastPlBar >= eqMinSep
+        bool reactL = not eqNeedReact or (not na(sinceLoMax) and sinceLoMax - math.max(pl, lastPlVal) >= math.max(eqTol * atr * 2, 0.5 * atr))
+        if reactL
+            f_poolPush((pl + lastPlVal) / 2, PK_EQ, false, "EQL", lastPlBar, true)
+    lastPlVal  := pl
+    lastPlBar  := pbL
+    sinceLoMax := ta.highest(high, pivLen)
+    f_poolPush(pl, PK_SWING, false, "SL", pbL, false)
+
+// external swings, session extremes and PDH / PDL are pre-VALIDATED pools —
+// known resting liquidity, not candidates
+if confirmed and not na(eph)
+    f_poolPush(eph, PK_EXT, true, "EXT-H", bar_index - extPiv, true)
+if confirmed and not na(epl)
+    f_poolPush(epl, PK_EXT, false, "EXT-L", bar_index - extPiv, true)
+if asiaFresh
+    f_poolPush(sesAsia.fhi, PK_SES, true,  "Asia H", bar_index, true)
+    f_poolPush(sesAsia.flo, PK_SES, false, "Asia L", bar_index, true)
+if lonFresh
+    f_poolPush(sesLon.fhi, PK_SES, true,  "Lon H", bar_index, true)
+    f_poolPush(sesLon.flo, PK_SES, false, "Lon L", bar_index, true)
+if nyFresh
+    f_poolPush(sesNY.fhi, PK_SES, true,  "NY H", bar_index, true)
+    f_poolPush(sesNY.flo, PK_SES, false, "NY L", bar_index, true)
+if confirmed and newDay and timeframe.isintraday
+    f_poolPush(pdhRaw, PK_PD, true,  "PDH", bar_index, true)
+    f_poolPush(pdlRaw, PK_PD, false, "PDL", bar_index, true)
+
+// the lifecycle runs AFTER registration so a level created on this bar cannot
+// be "raided" by the very bar that created it
+poolRaids = f_poolScan()
+
+// ---- one pass for LIQUIDITY INTENT (Phase 6) + this bar's pool events -------
+float  tgtBuy     = na     // nearest live buy-side pool ABOVE price  → bearish intent
+float  tgtSell    = na     // nearest live sell-side pool BELOW price → bullish intent
+string tgtBuyTag  = ""
+string tgtSellTag = ""
+bool   sesHiBroke = false
+bool   sesLoBroke = false
+bool   poolBrkUp  = false
+bool   poolBrkDn  = false
+// raid CLASSES live on this side right now — two DIFFERENT pools of different
+// classes are independent evidence, one pool is not (BUG-12)
+bool   raidExtLo  = false      // external liquidity (EXT swing / PDH-PDL / session) taken below
+bool   raidEqLo   = false      // engineered liquidity (EQL) taken below
+bool   raidExtHi  = false
+bool   raidEqHi   = false
+if array.size(pools) > 0
+    for i = 0 to array.size(pools) - 1
+        Pool p = array.get(pools, i)
+        if (p.state == PS_RAID or p.state == PS_REACT) and f_recent(p.raidBar, sweepLook)
+            bool isExtK = p.kind == PK_EXT or p.kind == PK_PD or p.kind == PK_SES
+            if p.buySide
+                raidExtHi := raidExtHi or isExtK
+                raidEqHi  := raidEqHi  or p.kind == PK_EQ
+            else
+                raidExtLo := raidExtLo or isExtK
+                raidEqLo  := raidEqLo  or p.kind == PK_EQ
+        if p.state <= PS_VAL
+            if p.buySide and p.px > close and (na(tgtBuy) or p.px < tgtBuy)
+                tgtBuy    := p.px
+                tgtBuyTag := p.tag
+            if not p.buySide and p.px < close and (na(tgtSell) or p.px > tgtSell)
+                tgtSell    := p.px
+                tgtSellTag := p.tag
+        if p.brkBar == bar_index
+            if p.buySide
+                poolBrkUp := true
+                sesHiBroke := sesHiBroke or p.kind == PK_SES
+            else
+                poolBrkDn := true
+                sesLoBroke := sesLoBroke or p.kind == PK_SES
+
+// ---- bindable raid lookup (the setup machine's liquidity stage) --------------
+// dir 1 (long) wants a SELL-side pool that has been raided; dir -1 wants a
+// buy-side one. Freshest qualifying raid wins; already-bound raids are skipped.
+// Returns the POOL OBJECT, never an array index: f_poolScan can remove pools,
+// which would silently re-point a stored index at a different pool.
+f_findRaid(int dir, bool freeOnly) =>
+    Pool   bp   = na
+    float  bpx  = na
+    int    bbar = na
+    float  bext = na
+    bool   bstr = false
+    int    bknd = 0
+    string btag = ""
+    if array.size(pools) > 0
+        for i = 0 to array.size(pools) - 1
+            Pool p = array.get(pools, i)
+            bool sideOk = dir == 1 ? not p.buySide : p.buySide
+            if sideOk and (p.state == PS_RAID or p.state == PS_REACT) and (p.bound == 0 or not freeOnly) and f_recent(p.raidBar, sweepLook)
+                if na(bp) or p.raidBar > bbar
+                    bp   := p
+                    bpx  := p.px
+                    bbar := p.raidBar
+                    bext := p.raidExt
+                    bstr := p.raidStrong
+                    bknd := p.kind
+                    btag := p.tag
+    [bp, bpx, bbar, bext, bstr, bknd, btag]
+
+// FREE raids — only these can seed a new setup (one raid, one setup: BUG-10)
+[raidLoPool, raidLoPx, raidLoBar, raidLoExt, raidLoStrong, raidLoKind, raidLoTag] = f_findRaid(1, true)
+[raidHiPool, raidHiPx, raidHiBar, raidHiExt, raidHiStrong, raidHiKind, raidHiTag] = f_findRaid(-1, true)
+// ANY live raid (bound or free) — zone grading, scoring and the dashboard read
+// this one, so a raid already claimed by a setup still reads as "in play"
+[anyLoPool, anyLoPx, anyLoBar, anyLoExt, anyLoStrong, anyLoKind, anyLoTag] = f_findRaid(1, false)
+[anyHiPool, anyHiPx, anyHiBar, anyHiExt, anyHiStrong, anyHiKind, anyHiTag] = f_findRaid(-1, false)
+
+// convenience flags used by the score, the S/D producer and the dashboard
+sslInPlay = not na(anyLoPool)
+bslInPlay = not na(anyHiPool)
+recentSsl = sslInPlay
+recentBsl = bslInPlay
+sslStrong = sslInPlay and anyLoStrong
+bslStrong = bslInPlay and anyHiStrong
+engLoRaid = raidEqLo or raidExtLo
+engHiRaid = raidEqHi or raidExtHi
+extLoRaid = raidExtLo
+extHiRaid = raidExtHi
+
+// ---- the ◆ / ◈ sweep marks v2 drew: kept, now sourced from the registry -----
+sslSweep  = confirmed and not na(lastSup) and low < lastSup and close > lastSup
+bslSweep  = confirmed and not na(lastRes) and high > lastRes and close < lastRes
+eqlSwept  = confirmed and sslInPlay and anyLoBar == bar_index and anyLoKind == PK_EQ
+eqhSwept  = confirmed and bslInPlay and anyHiBar == bar_index and anyHiKind == PK_EQ
+sesLoRaid = confirmed and sslInPlay and anyLoBar == bar_index and anyLoKind == PK_SES
+sesHiRaid = confirmed and bslInPlay and anyHiBar == bar_index and anyHiKind == PK_SES
+
+// ════════════════════════ MODULE 8 · DEALING RANGE · PREMIUM / DISCOUNT · OTE
+// External swings by default (the real impulse leg); internal is the fallback
+// until an external pair exists. OTE only projects against a FRESH leg.
+// ═════════════════════════════════════════════════════════════════════════════
+useExtRng = rangeSrc == "External" and not na(extRes) and not na(extSup)
+rngHi     = useExtRng ? extRes    : lastRes
+rngLo     = useExtRng ? extSup    : lastSup
+rngHiBar  = useExtRng ? extResBar : lastResBar
+rngLoBar  = useExtRng ? extSupBar : lastSupBar
+rangeOK   = not na(rngHi) and not na(rngLo) and rngHi > rngLo
+bullRange = rangeOK and not na(rngHiBar) and not na(rngLoBar) and rngHiBar > rngLoBar
+bearRange = rangeOK and not na(rngHiBar) and not na(rngLoBar) and rngLoBar > rngHiBar
+rngW    = rangeOK ? rngHi - rngLo : na
+eqLvl   = rangeOK ? rngLo + rngW / 2 : na
+pdPos   = rangeOK ? (close - rngLo) / rngW : na
+oteBuyTop  = rangeOK ? rngHi - OTE_1 * rngW : na
+oteBuyBot  = rangeOK ? rngHi - OTE_2 * rngW : na
+oteSellBot = rangeOK ? rngLo + OTE_1 * rngW : na
+oteSellTop = rangeOK ? rngLo + OTE_2 * rngW : na
+inOTEbuy   = bullRange and close <= oteBuyTop  and close >= oteBuyBot
+inOTEsell  = bearRange and close >= oteSellBot and close <= oteSellTop
+// premium / discount EXTREMES — the only place a counter-trend fade belongs
+inDiscExt  = rangeOK and pdPos <= PD_EXTREME
+inPremExt  = rangeOK and pdPos >= 1 - PD_EXTREME
+discOK     = not rangeOK or pdPos <= 0.5
+premOK     = not rangeOK or pdPos >= 0.5
+
+// ═══════════════ MODULE 9 · SUPPLY / DEMAND + FVG (LIFECYCLE + TIERS)
+// ARCH-4 / Phase 9 / Phase 10. Every POI carries a lifecycle state and a
+// quality tier. TIER 3 is VISUAL INFORMATION ONLY — it can never produce a
+// trade above the "Minimum POI tier" setting. A 50 % tap is SETUP
+// PREPARATION, never an entry. The whole update loop is confirmed-gated
+// (BUG-4) and nothing here consumes a zone — only the TRADE ENGINE can
+// (BUG-5).
+// ═════════════════════════════════════════════════════════════════════════════
+type Zone
+    box    bx
+    line   mid
+    bool   isSupply
+    int    state       = 0     // 0 fresh · 1 touched · 2 fifty · 3 filled · 4 dead
+    int    tier        = 3
+    int    bornBar     = na
+    int    touchBar    = -1
+    int    tap50Bar    = -1
+    bool   signaled    = false
+    bool   flipped     = false
+    bool   isFvg       = true
+    float  deepest     = na    // deepest penetration reached (fill tracking)
+    bool   retBeforeFail = false
+    bool   liqBeforeFail = false
+    string kindTxt     = ""
+
+var zones = array.new<Zone>()
+
+f_tierTxt(int t) => t == 1 ? "T1" : t == 2 ? "T2" : "T3"
+
+// tier grading at creation (Phase 9). Each ingredient is checked ONCE.
+f_gradeZone(bool isSupply) =>
+    bool liq  = isSupply ? bslInPlay : sslInPlay
+    bool mss  = isSupply ? recentMssDn : recentMssUp
+    bool htfA = isSupply ? (htfDir <= 0) : (htfDir >= 0)
+    bool ote  = isSupply ? inOTEsell : inOTEbuy
+    bool strc = isSupply ? structDir <= 0 : structDir >= 0
+    bool disp = isSupply ? dispDnBar[1] or dispDnBar[2] : dispUpBar[1] or dispUpBar[2]
+    int t = 3
+    if liq and disp and mss and htfA and (ote or (isSupply ? premOK : discOK))
+        t := 1
+    else if disp and strc
+        t := 2
+    [t, liq]
+
+// The box IS the zone's data container, so a zone is ALWAYS created and
+// `showZones` only controls whether it is visible (BUG-6 / Phase 28).
+f_newZone(bool isSupply, float top, float bot, int tier, string kind, int lft, bool isFvg) =>
+    c   = isSupply ? COL_BEAR : COL_BULL
+    txt = showZones ? (kind != "" ? kind : (isSupply ? "SUPPLY" : "DEMAND")) + (showTier ? " " + f_tierTxt(tier) : "") : ""
+    x1  = lft != 0 ? lft : bar_index - 2
+    bx  = box.new(x1, top, bar_index + 1, bot,
+         border_color = showZones ? color.new(c, tier == 1 ? 35 : 55) : color.new(c, 100),
+         bgcolor = showZones ? color.new(c, tier == 1 ? 90 : 93) : color.new(c, 100),
+         text = txt, text_color = color.new(c, showZones ? 35 : 100), text_size = size.tiny,
+         text_halign = text.align_right,
+         text_valign = isSupply ? text.align_top : text.align_bottom)
+    md  = line.new(x1, (top + bot) / 2, bar_index + 1, (top + bot) / 2,
+         color = color.new(c, showZones ? 72 : 100), style = line.style_dotted)
+    Zone.new(bx = bx, mid = md, isSupply = isSupply, tier = tier, bornBar = bar_index,
+         isFvg = isFvg, kindTxt = kind)
+
+// ---- cap zones per side: prune the OLDEST, fully (BUG-22) ------------------
+// Runs FIRST, on the set the previous bar left behind. Pruning after the update
+// loop could delete a box that the loop had just handed to the trade engine as
+// a candidate, and the engine would then be styling a deleted drawing.
+if confirmed
+    for side = 0 to 1
+        bool sup = side == 1
+        int  cnt = 0
+        if array.size(zones) > 0
+            for i = 0 to array.size(zones) - 1
+                Zone z = array.get(zones, i)
+                if z.isSupply == sup
+                    cnt += 1
+        while cnt > maxZones
+            int oldIx  = -1
+            int oldBar = na
+            for i = 0 to array.size(zones) - 1
+                Zone z = array.get(zones, i)
+                if z.isSupply == sup and (oldIx == -1 or nz(z.bornBar, 0) < oldBar)
+                    oldIx  := i
+                    oldBar := nz(z.bornBar, 0)
+            if oldIx == -1
+                break
+            Zone o = array.get(zones, oldIx)
+            box.delete(o.bx)
+            line.delete(o.mid)
+            array.remove(zones, oldIx)
+            cnt -= 1
+
+// ---- POI candidates produced by the 50 % engine (NOT signals) ---------------
+sdCandLong  = false
+sdCandShort = false
+// zone REFERENCES, not indices: the loop below and the age-prune both remove
+// zones, which would re-point a stored index at a different zone
+Zone  sdZoneL   = na
+Zone  sdZoneS   = na
+float sdTopLong = na
+float sdBotLong = na
+int   sdTierL   = 3
+float sdTopShort = na
+float sdBotShort = na
+int   sdTierS    = 3
+// a raid level sitting AT a zone this bar (used for the breaker causal chain)
+raidNearBar = confirmed and ((sslInPlay and anyLoBar == bar_index) or (bslInPlay and anyHiBar == bar_index))
+raidNearPx  = sslInPlay and anyLoBar == bar_index ? anyLoPx : anyHiPx
+
+if confirmed and array.size(zones) > 0
+    for i = array.size(zones) - 1 to 0
+        Zone z = array.get(zones, i)
+        float top  = box.get_top(z.bx)
+        float bot  = box.get_bottom(z.bx)
+        float midP = (top + bot) / 2
+        float hgt  = math.max(top - bot, syminfo.mintick)
+        // a liquidity event AT this zone, recorded on the zone itself — this
+        // is what makes the BREAKER classification causal (Phase 12)
+        if raidNearBar and not na(raidNearPx) and raidNearPx <= top + poiBindAtr * atr and raidNearPx >= bot - poiBindAtr * atr
+            z.liqBeforeFail := true
+        if z.isSupply
+            if high >= bot
+                if z.state == 0
+                    z.touchBar := bar_index
+                if z.state < 1
+                    z.state := 1
+                z.deepest := math.max(nz(z.deepest, bot), high)
+                z.retBeforeFail := true
+            fillS = (nz(z.deepest, bot) - bot) / hgt
+            if fillS >= 1 and z.state < 3
+                z.state := 3
+                if showFvgState
+                    box.set_bgcolor(z.bx, color.new(COL_BEAR, 96))
+            else if fillS >= 0.5 and z.state < 2
+                z.state := 2
+            // edge-triggered 50 % tap: re-arms only after price leaves the zone
+            if high < bot
+                z.tap50Bar := -1
+            if high >= midP and z.tap50Bar == -1
+                z.tap50Bar := bar_index
+            // VIOLATION: confirmed close through the zone → breaker / mitigation
+            if close > top
+                if showFlip and not z.flipped
+                    // Phase 12 causal chain, all recorded on THIS zone:
+                    // it was created, price RETURNED into it, a liquidity event
+                    // happened AT it, and the failure came with displacement +
+                    // a structure shift. Anything less is a mitigation block.
+                    bool isBrk = z.retBeforeFail and z.liqBeforeFail and dispUpBar and (recentIChUp or recentEChUp or recentEBosUp)
+                    z.isSupply := false
+                    z.flipped  := true
+                    z.state    := 0
+                    z.touchBar := -1
+                    z.tap50Bar := -1
+                    z.deepest  := na
+                    z.signaled := false
+                    z.retBeforeFail := false
+                    z.liqBeforeFail := false
+                    z.tier     := isBrk ? 2 : 3
+                    z.kindTxt  := isBrk ? "BREAKER ▲" : "MITIGATION ▲"
+                    box.set_border_color(z.bx, color.new(COL_BULL, 55))
+                    box.set_bgcolor(z.bx, color.new(COL_BULL, 93))
+                    box.set_text(z.bx, z.kindTxt + (showTier ? " " + f_tierTxt(z.tier) : ""))
+                    box.set_text_color(z.bx, color.new(COL_BULL, 35))
+                    box.set_text_valign(z.bx, text.align_bottom)
+                    line.set_color(z.mid, color.new(COL_BULL, 72))
+                else
+                    box.delete(z.bx)
+                    line.delete(z.mid)
+                    array.remove(zones, i)
+                continue
+            // 50 % engine → CANDIDATE only. Freshest / best tier wins.
+            bool eligS = not z.signaled and z.tier <= minTier and (not fvgFillDead or z.state < 3)
+            if eligS and z.tap50Bar >= 0 and bar_index - z.tap50Bar <= confirmWin and zoneBearConf and high >= bot
+                if not needSweep or bslInPlay
+                    if not sdCandShort or z.tier < sdTierS
+                        sdCandShort := true
+                        sdZoneS     := z
+                        sdTopShort  := top
+                        sdBotShort  := bot
+                        sdTierS     := z.tier
+        else
+            if low <= top
+                if z.state == 0
+                    z.touchBar := bar_index
+                if z.state < 1
+                    z.state := 1
+                z.deepest := math.min(nz(z.deepest, top), low)
+                z.retBeforeFail := true
+            fillD = (top - nz(z.deepest, top)) / hgt
+            if fillD >= 1 and z.state < 3
+                z.state := 3
+                if showFvgState
+                    box.set_bgcolor(z.bx, color.new(COL_BULL, 96))
+            else if fillD >= 0.5 and z.state < 2
+                z.state := 2
+            if low > top
+                z.tap50Bar := -1
+            if low <= midP and z.tap50Bar == -1
+                z.tap50Bar := bar_index
+            if close < bot
+                if showFlip and not z.flipped
+                    bool isBrkD = z.retBeforeFail and z.liqBeforeFail and dispDnBar and (recentIChDn or recentEChDn or recentEBosDn)
+                    z.isSupply := true
+                    z.flipped  := true
+                    z.state    := 0
+                    z.touchBar := -1
+                    z.tap50Bar := -1
+                    z.deepest  := na
+                    z.signaled := false
+                    z.retBeforeFail := false
+                    z.liqBeforeFail := false
+                    z.tier     := isBrkD ? 2 : 3
+                    z.kindTxt  := isBrkD ? "BREAKER ▼" : "MITIGATION ▼"
+                    box.set_border_color(z.bx, color.new(COL_BEAR, 55))
+                    box.set_bgcolor(z.bx, color.new(COL_BEAR, 93))
+                    box.set_text(z.bx, z.kindTxt + (showTier ? " " + f_tierTxt(z.tier) : ""))
+                    box.set_text_color(z.bx, color.new(COL_BEAR, 35))
+                    box.set_text_valign(z.bx, text.align_top)
+                    line.set_color(z.mid, color.new(COL_BEAR, 72))
+                else
+                    box.delete(z.bx)
+                    line.delete(z.mid)
+                    array.remove(zones, i)
+                continue
+            bool eligD = not z.signaled and z.tier <= minTier and (not fvgFillDead or z.state < 3)
+            if eligD and z.tap50Bar >= 0 and bar_index - z.tap50Bar <= confirmWin and zoneBullConf and low <= top
+                if not needSweep or sslInPlay
+                    if not sdCandLong or z.tier < sdTierL
+                        sdCandLong  := true
+                        sdZoneL     := z
+                        sdTopLong   := top
+                        sdBotLong   := bot
+                        sdTierL     := z.tier
+
+// ---- create new zones (displacement + FVG) ----------------------------------
+bullFVG = low > high[2]
+bearFVG = high < low[2]
+zDispUp = bullBar[1] and body[1] >= dispFactor * atr
+zDispDn = bearBar[1] and body[1] >= dispFactor * atr
+newDemand = bullFVG and zDispUp
+newSupply = bearFVG and zDispDn
+
+if newDemand and confirmed
+    float zTop = low
+    float zBot = math.max(high[2], low - maxZoneAtr * atr)
+    [tD, liqD] = f_gradeZone(false)
+    bool dupD = false
+    if array.size(zones) > 0
+        for i = array.size(zones) - 1 to 0
+            Zone z = array.get(zones, i)
+            if not z.isSupply and not (zBot > box.get_top(z.bx) or zTop < box.get_bottom(z.bx))
+                // BUG-21: a SPENT zone is never replaced by a fresh overlapping
+                // one — that re-armed the same price for a second entry.
+                if z.signaled or z.tier <= tD
+                    dupD := true
+                else
+                    box.delete(z.bx)
+                    line.delete(z.mid)
+                    array.remove(zones, i)
+    if not dupD
+        array.push(zones, f_newZone(false, zTop, zBot, tD, "", 0, true))
+
+if newSupply and confirmed
+    float zBot2 = high
+    float zTop2 = math.min(low[2], high + maxZoneAtr * atr)
+    [tS, liqS] = f_gradeZone(true)
+    bool dupS = false
+    if array.size(zones) > 0
+        for i = array.size(zones) - 1 to 0
+            Zone z = array.get(zones, i)
+            if z.isSupply and not (zBot2 > box.get_top(z.bx) or zTop2 < box.get_bottom(z.bx))
+                if z.signaled or z.tier <= tS
+                    dupS := true
+                else
+                    box.delete(z.bx)
+                    line.delete(z.mid)
+                    array.remove(zones, i)
+    if not dupS
+        array.push(zones, f_newZone(true, zTop2, zBot2, tS, "", 0, true))
+
+// ---- rejection blocks: swing-point wick POIs --------------------------------
+// The pivot must have SWEPT liquidity and price must have DISPLACED away.
+rbSwpH = high[pivLen] > ta.highest(high, pivLen * 2)[pivLen + 1]
+rbDspH = ta.lowest(low, pivLen) <= high[pivLen] - dispFactor * atr
+rbSwpL = low[pivLen] < ta.lowest(low, pivLen * 2)[pivLen + 1]
+rbDspL = ta.highest(high, pivLen) >= low[pivLen] + dispFactor * atr
+rbNew = false
+if showRB and confirmed
+    if not na(ph)
+        float rbTop = high[pivLen]
+        float rbBot = math.max(open[pivLen], close[pivLen])
+        if rbTop - rbBot >= minWickAtr * atr and rbSwpH and rbDspH
+            bool rbDup = false
+            if array.size(zones) > 0
+                for i = array.size(zones) - 1 to 0
+                    Zone z = array.get(zones, i)
+                    if z.isSupply and not (rbBot > box.get_top(z.bx) or rbTop < box.get_bottom(z.bx))
+                        rbDup := true
+                        break
+            if not rbDup
+                array.push(zones, f_newZone(true, rbTop, rbBot, structDir <= 0 ? 2 : 3, "REJECTION ▼", bar_index - pivLen, false))
+                rbNew := true
+    if not na(pl)
+        float rbBot2 = low[pivLen]
+        float rbTop2 = math.min(open[pivLen], close[pivLen])
+        if rbTop2 - rbBot2 >= minWickAtr * atr and rbSwpL and rbDspL
+            bool rbDup2 = false
+            if array.size(zones) > 0
+                for i = array.size(zones) - 1 to 0
+                    Zone z = array.get(zones, i)
+                    if not z.isSupply and not (rbBot2 > box.get_top(z.bx) or rbTop2 < box.get_bottom(z.bx))
+                        rbDup2 := true
+                        break
+            if not rbDup2
+                array.push(zones, f_newZone(false, rbTop2, rbBot2, structDir >= 0 ? 2 : 3, "REJECTION ▲", bar_index - pivLen, false))
+                rbNew := true
+
+// ---- NEXT eligible buy / sell POI -------------------------------------------
+float nbTop = na
+float nbBot = na
+float nsTop = na
+float nsBot = na
+bool  nbFresh = false
+bool  nsFresh = false
+int   nbTier  = 3
+int   nsTier  = 3
+if array.size(zones) > 0
+    for i = 0 to array.size(zones) - 1
+        Zone z = array.get(zones, i)
+        float t = box.get_top(z.bx)
+        float b = box.get_bottom(z.bx)
+        bool  ok = not z.signaled and (not fvgFillDead or z.state < 3)
+        if ok and not z.isSupply and b <= close and (na(nbTop) or t > nbTop)
+            nbTop   := t
+            nbBot   := b
+            nbFresh := z.state == 0 or z.touchBar == bar_index
+            nbTier  := z.tier
+        if ok and z.isSupply and t >= close and (na(nsBot) or b < nsBot)
+            nsTop   := t
+            nsBot   := b
+            nsFresh := z.state == 0 or z.touchBar == bar_index
+            nsTier  := z.tier
+
+touchNextBuy  = confirmed and not na(nbTop) and not na(nbTop[1]) and low <= nbTop and low[1] > nbTop[1]
+touchNextSell = confirmed and not na(nsBot) and not na(nsBot[1]) and high >= nsBot and high[1] < nsBot[1]
+
+// ═════════════════════════════════ MODULE 10 · DYNAMIC TRENDLINES (stricter)
+// BUG-19. Two anchors ≥ tlAnchorSep bars apart make a CANDIDATE (dotted). A
+// REACTION (tag, then at least tlMinSep bars before the next one counts)
+// validates it (solid). A sweep needs: wick through + close back across +
+// confirmation. A confirmed close through kills the line AND resets its
+// reaction count, so a fresh line never inherits an old one's credit.
+// ═════════════════════════════════════════════════════════════════════════════
+var float tlUpSlope = na
+var float tlUpPrice = na
+var int   tlUpBar   = na
+var int   tlUpReact = 0
+var int   tlUpLastR = na
+var line  tlUpLn    = na
+var float tlDnSlope = na
+var float tlDnPrice = na
+var int   tlDnBar   = na
+var int   tlDnReact = 0
+var int   tlDnLastR = na
+var line  tlDnLn    = na
+var float tlPrevPH  = na
+var int   tlPrevPHB = na
+var float tlPrevPL  = na
+var int   tlPrevPLB = na
+
+if confirmed and not na(ph)
+    int pbT = bar_index - pivLen
+    if not na(tlPrevPH) and not na(tlPrevPHB) and ph < tlPrevPH and pbT - tlPrevPHB >= tlAnchorSep and (na(tlDnSlope) or tlDnReact == 0)
+        line.delete(tlDnLn)
+        tlDnLn    := na
+        tlDnSlope := (ph - tlPrevPH) / math.max(pbT - tlPrevPHB, 1)
+        tlDnPrice := ph
+        tlDnBar   := pbT
+        tlDnReact := 0
+        tlDnLastR := na
+        if showTL
+            tlDnLn := line.new(tlPrevPHB, tlPrevPH, pbT, ph,
+                 color = color.new(COL_BEAR, 30), width = 2, extend = extend.right,
+                 style = tlValidate ? line.style_dotted : line.style_solid)
+    tlPrevPH  := ph
+    tlPrevPHB := pbT
+if confirmed and not na(pl)
+    int pbT2 = bar_index - pivLen
+    if not na(tlPrevPL) and not na(tlPrevPLB) and pl > tlPrevPL and pbT2 - tlPrevPLB >= tlAnchorSep and (na(tlUpSlope) or tlUpReact == 0)
+        line.delete(tlUpLn)
+        tlUpLn    := na
+        tlUpSlope := (pl - tlPrevPL) / math.max(pbT2 - tlPrevPLB, 1)
+        tlUpPrice := pl
+        tlUpBar   := pbT2
+        tlUpReact := 0
+        tlUpLastR := na
+        if showTL
+            tlUpLn := line.new(tlPrevPLB, tlPrevPL, pbT2, pl,
+                 color = color.new(COL_BULL, 30), width = 2, extend = extend.right,
+                 style = tlValidate ? line.style_dotted : line.style_solid)
+    tlPrevPL  := pl
+    tlPrevPLB := pbT2
+
+float tlUpVal = not na(tlUpSlope) ? tlUpPrice + tlUpSlope * (bar_index - tlUpBar) : na
+float tlDnVal = not na(tlDnSlope) ? tlDnPrice + tlDnSlope * (bar_index - tlDnBar) : na
+
+tlCandLong  = false
+tlCandShort = false
+tlUpBreak   = false
+tlDnBreak   = false
+float tlSlLong  = na
+float tlSlShort = na
+
+if not na(tlUpVal) and confirmed
+    if close < tlUpVal
+        tlUpBreak := true
+        if not na(tlUpLn)
+            line.set_extend(tlUpLn, extend.none)
+            line.set_x2(tlUpLn, bar_index)
+            line.set_style(tlUpLn, line.style_dashed)
+        tlUpLn    := na
+        tlUpSlope := na
+        tlUpReact := 0             // BUG-19: credit does NOT carry to the next line
+        tlUpLastR := na
+    else
+        bool sep = na(tlUpLastR) or bar_index - tlUpLastR >= tlMinSep
+        if low < tlUpVal
+            if sep
+                tlUpReact += 1
+                tlUpLastR := bar_index
+            if tlSweepEnt and tlUpReact > tlTouchMin and (not tlValidate or tlUpReact >= 2) and (not tlNeedConf or zoneBullConf) and strongUp
+                tlCandLong := true
+                tlSlLong   := low - SL_PAD_ATR * atr
+        else if low <= tlUpVal + NEAR_LVL_ATR * atr and sep
+            tlUpReact += 1
+            tlUpLastR := bar_index
+
+if not na(tlDnVal) and confirmed
+    if close > tlDnVal
+        tlDnBreak := true
+        if not na(tlDnLn)
+            line.set_extend(tlDnLn, extend.none)
+            line.set_x2(tlDnLn, bar_index)
+            line.set_style(tlDnLn, line.style_dashed)
+        tlDnLn    := na
+        tlDnSlope := na
+        tlDnReact := 0
+        tlDnLastR := na
+    else
+        bool sep2 = na(tlDnLastR) or bar_index - tlDnLastR >= tlMinSep
+        if high > tlDnVal
+            if sep2
+                tlDnReact += 1
+                tlDnLastR := bar_index
+            if tlSweepEnt and tlDnReact > tlTouchMin and (not tlValidate or tlDnReact >= 2) and (not tlNeedConf or zoneBearConf) and strongDn
+                tlCandShort := true
+                tlSlShort   := high + SL_PAD_ATR * atr
+        else if high >= tlDnVal - NEAR_LVL_ATR * atr and sep2
+            tlDnReact += 1
+            tlDnLastR := bar_index
+
+if tlValidate and not na(tlUpLn) and tlUpReact >= 1
+    line.set_style(tlUpLn, line.style_solid)
+if tlValidate and not na(tlDnLn) and tlDnReact >= 1
+    line.set_style(tlDnLn, line.style_solid)
+
+// ═══════════════════════════ MODULE 11 · PATTERN PRODUCERS (candidates only)
+// Everything in this module produces a CANDIDATE. None of it can print an
+// entry, none of it writes a stop, and none of it consumes its own state on
+// firing — the TRADE ENGINE does that, and only if it actually emits (BUG-5).
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ---- ① breakout rejection trap / ② pin-bar liquidity trap -------------------
+var int   wState   = 0
+var float wLevel   = na
+var int   wStart   = na
+var float wExtreme = na
+var bool  wFired   = false
+var wicks = array.new<float>()
+
+pa1Long  = false
+pa1Short = false
+pa2Long  = false
+pa2Short = false
+float paSlLong  = na
+float paSlShort = na
+
+// arm only when idle, and only off a STRUCTURAL break (a weak run no longer
+// arms a trap watch — BUG-2 made every weak close-through arm one)
+if wState == 0 and brokeUp and body >= BRK_BODY_ATR * atr and confirmed and not na(brkUpLvl)
+    wState   := 1
+    wLevel   := brkUpLvl
+    wStart   := bar_index
+    wExtreme := high
+    wFired   := false
+    array.clear(wicks)
+else if wState == 0 and brokeDn and body >= BRK_BODY_ATR * atr and confirmed and not na(brkDnLvl)
+    wState   := -1
+    wLevel   := brkDnLvl
+    wStart   := bar_index
+    wExtreme := low
+    wFired   := false
+    array.clear(wicks)
+
+if wState == 1 and confirmed
+    array.push(wicks, upWick)
+    wExtreme := math.max(wExtreme, high)
+else if wState == -1 and confirmed
+    array.push(wicks, dnWick)
+    wExtreme := math.min(wExtreme, low)
+
+growing    = false
+shrinking  = false
+grewPrev   = false
+shrankPrev = false
+if array.size(wicks) >= 3
+    wA = array.get(wicks, array.size(wicks) - 3)
+    wB = array.get(wicks, array.size(wicks) - 2)
+    wC = array.get(wicks, array.size(wicks) - 1)
+    growing   := wC > wB and wB > wA and wB >= minWickAtr * atr
+    shrinking := wA > wB and wB > wC and wA >= minWickAtr * atr
+if array.size(wicks) >= 4
+    pA = array.get(wicks, array.size(wicks) - 4)
+    pB = array.get(wicks, array.size(wicks) - 3)
+    pC = array.get(wicks, array.size(wicks) - 2)
+    grewPrev   := pC > pB and pB > pA and pB >= minWickAtr * atr
+    shrankPrev := pA > pB and pB > pC and pA >= minWickAtr * atr
+
+if wState == 1 and confirmed and not wFired
+    if showS1 and (growing or grewPrev) and bearBar and close < wLevel and body >= BRK_BODY_ATR * atr
+        pa1Short  := true
+        paSlShort := wExtreme + SL_PAD_ATR * atr
+        wFired    := true
+    else if showS2 and (shrinking or shrankPrev) and bullConfirm
+        pa2Long := true
+        wFired  := true
+if wState == -1 and confirmed and not wFired
+    if showS1 and (growing or grewPrev) and bullBar and close > wLevel and body >= BRK_BODY_ATR * atr
+        pa1Long  := true
+        paSlLong := wExtreme - SL_PAD_ATR * atr
+        wFired   := true
+    else if showS2 and (shrinking or shrankPrev) and bearConfirm
+        pa2Short := true
+        wFired   := true
+// expiry / runaway — the watch dies on its own schedule, not on a signal
+if wState != 0 and confirmed
+    if bar_index - wStart > maxAfterBrk
+        wState := 0
+    else if wState == 1 and close > wLevel + RUNAWAY_ATR * atr
+        wState := 0
+    else if wState == -1 and close < wLevel - RUNAWAY_ATR * atr
+        wState := 0
+
+// ---- ③ inside-bar breakout ---------------------------------------------------
+var int   ibStage = 0
+var float mHigh   = na
+var float mLow    = na
+var float ibHigh  = na
+var float ibLow   = na
+var int   ibStart = na
+
+pa3Long  = false
+pa3Short = false
+mMid = (mHigh + mLow) / 2
+
+if confirmed
+    if ibStage == 1
+        if high < mHigh and low > mLow and low >= mMid
+            ibHigh  := high
+            ibLow   := low
+            ibStart := bar_index
+            ibStage := 2
+        else
+            ibStage := 0
+    else if ibStage == 2
+        if close > ibHigh
+            if bullBar and body >= BRK_BODY_ATR * atr and strongUp and structDir >= 0 and htfDir >= 0
+                pa3Long := showS3
+            ibStage := 0
+        else if close < ibLow or bar_index - ibStart > IB_WAIT_BARS
+            ibStage := 0
+    else if ibStage == -1
+        if high < mHigh and low > mLow and high <= mMid
+            ibHigh  := high
+            ibLow   := low
+            ibStart := bar_index
+            ibStage := -2
+        else
+            ibStage := 0
+    else if ibStage == -2
+        if close < ibLow
+            if bearBar and body >= BRK_BODY_ATR * atr and strongDn and structDir <= 0 and htfDir <= 0
+                pa3Short := showS3
+            ibStage := 0
+        else if close > ibHigh or bar_index - ibStart > IB_WAIT_BARS
+            ibStage := 0
+    if showS3 and ibStage == 0 and brokeUp and body >= ibBodyAtr * atr
+        ibStage := 1
+        mHigh   := high
+        mLow    := low
+        ibStart := bar_index
+    else if showS3 and ibStage == 0 and brokeDn and body >= ibBodyAtr * atr
+        ibStage := -1
+        mHigh   := high
+        mLow    := low
+        ibStart := bar_index
+
+// ---- ④ doji reversal at a key level -----------------------------------------
+dojiRecent     = math.sum(doji ? 1 : 0, DOJI_WINDOW)
+ctxBias        = msDir != 0 ? msDir : chartBias
+dojiCompressed = ta.sma(rng, DOJI_WINDOW)[1] <= atr
+dojiRaidRes    = not na(lastRes) and ta.highest(high, DOJI_WINDOW) > lastRes
+dojiRaidSup    = not na(lastSup) and ta.lowest(low, DOJI_WINDOW) < lastSup
+
+pa4Long  = false
+pa4Short = false
+if showS4 and confirmed
+    atRes    = not na(lastRes) and high >= lastRes - NEAR_LVL_ATR * atr and close <= lastRes + NEAR_LVL_ATR * atr
+    atSup    = not na(lastSup) and low <= lastSup + NEAR_LVL_ATR * atr and close >= lastSup - NEAR_LVL_ATR * atr
+    driftUp  = close[1] > close[DOJI_WINDOW + 1]
+    driftDn  = close[1] < close[DOJI_WINDOW + 1]
+    dispConf = body >= BRK_BODY_ATR * atr
+    if ctxBias == -1 and dojiRecent[1] >= dojiMin and atRes and driftUp and dojiCompressed and dojiRaidRes and bearConfirm and dispConf
+        pa4Short := true
+    if ctxBias == 1 and dojiRecent[1] >= dojiMin and atSup and driftDn and dojiCompressed and dojiRaidSup and bullConfirm and dispConf
+        pa4Long := true
+
+// ---- ⑫ CRT + ⑬ turtle soup, WITH a location filter (Phase 14 / BUG-20) -----
+// "At a location" = at an HTF FVG POI, at an engineered / external pool that
+// was just raided, in OTE, or at a premium / discount extreme. A mid-range
+// pattern is drawn but is not tradable while crtNeedLoc is on.
+atHtfPoiL = not na(hPoiBTop) and low  <= hPoiBTop + poiBindAtr * atr and high >= hPoiBBot - poiBindAtr * atr
+atHtfPoiS = not na(hPoiSTop) and high >= hPoiSBot - poiBindAtr * atr and low  <= hPoiSTop + poiBindAtr * atr
+locLong   = not crtNeedLoc or atHtfPoiL or engLoRaid or extLoRaid or inOTEbuy  or inDiscExt
+locShort  = not crtNeedLoc or atHtfPoiS or engHiRaid or extHiRaid or inOTEsell or inPremExt
+
+var int lastCrtLongBar  = na
+var int lastCrtShortBar = na
+var int lastTbsLongBar  = na
+var int lastTbsShortBar = na
+crtLongCd  = na(lastCrtLongBar)  or bar_index - lastCrtLongBar  > sigCooldown
+crtShortCd = na(lastCrtShortBar) or bar_index - lastCrtShortBar > sigCooldown
+tbsLongCd  = na(lastTbsLongBar)  or bar_index - lastTbsLongBar  > sigCooldown
+tbsShortCd = na(lastTbsShortBar) or bar_index - lastTbsShortBar > sigCooldown
+
+crtC1Big     = rng[2] >= crtRangeAtr * atr
+crtBullSetup = crtC1Big and low[1] < low[2] and close[1] > low[2] and close[1] < high[2] and low[2] - low[1] >= minWickAtr * atr
+crtBearSetup = crtC1Big and high[1] > high[2] and close[1] < high[2] and close[1] > low[2] and high[1] - high[2] >= minWickAtr * atr
+
+crtRawLong  = showCRT and confirmed and crtBullSetup and bullBar and close > high[1] and body >= crtDispAtr * atr
+crtRawShort = showCRT and confirmed and crtBearSetup and bearBar and close < low[1] and body >= crtDispAtr * atr
+crtCandLong  = crtRawLong  and crtLongCd  and locLong
+crtCandShort = crtRawShort and crtShortCd and locShort
+float crtSlLong  = crtRawLong  ? low[1]  - SL_PAD_ATR * atr : na
+float crtSlShort = crtRawShort ? high[1] + SL_PAD_ATR * atr : na
+
+tbsLow     = ta.lowest(low, tbsLen)[1]
+tbsHigh    = ta.highest(high, tbsLen)[1]
+tbsLowAge  = -ta.lowestbars(low, tbsLen)[1] + 1
+tbsHighAge = -ta.highestbars(high, tbsLen)[1] + 1
+
+tbsRawLong  = showTBS and confirmed and low < tbsLow and close > tbsLow and bullBar and tbsLowAge >= tbsAgeMin and close >= low + 0.5 * rng
+tbsRawShort = showTBS and confirmed and high > tbsHigh and close < tbsHigh and bearBar and tbsHighAge >= tbsAgeMin and close <= high - 0.5 * rng
+tbsCandLong  = tbsRawLong  and tbsLongCd  and locLong
+tbsCandShort = tbsRawShort and tbsShortCd and locShort
+float tbsSlLong  = tbsRawLong  ? low  - SL_PAD_ATR * atr : na
+float tbsSlShort = tbsRawShort ? high + SL_PAD_ATR * atr : na
+
+// visual marks for the raw patterns — drawn even when the location filter
+// blocks the trade, because the pattern IS information (Phase 28)
+if showCRT and (crtRawLong or crtRawShort)
+    f_chip(crtRawLong, "crt" + (crtRawLong ? (locLong ? "" : " ·loc✗") : (locShort ? "" : " ·loc✗")),
+         color.new(crtRawLong ? COL_BULL : COL_BEAR, 65), color.white, size.tiny)
+if showTBS and (tbsRawLong or tbsRawShort)
+    f_chip(tbsRawLong, "tsoup" + (tbsRawLong ? (locLong ? "" : " ·loc✗") : (locShort ? "" : " ·loc✗")),
+         color.new(tbsRawLong ? COL_BULL : COL_BEAR, 65), color.white, size.tiny)
+
+// ---- HTF CRT / turtle soup (one HTF bar of honest confirmation delay) -------
+hCandCrtLong   = useHtfCrt and confirmed and newHtfBar and hCrtB and locLong
+hCandCrtShort  = useHtfCrt and confirmed and newHtfBar and hCrtS and locShort
+hCandTbsLong   = useHtfCrt and confirmed and newHtfBar and hTbsB and locLong
+hCandTbsShort  = useHtfCrt and confirmed and newHtfBar and hTbsS and locShort
+// the HTF pattern's own invalidation level, sized on the HTF candle
+float hSlLong  = not na(hLo) ? hLo - SL_PAD_ATR * atr : na
+float hSlShort = not na(hHi) ? hHi + SL_PAD_ATR * atr : na
+
+// ══════════════════════════════════ MODULE 12 · SETUP STATE MACHINE (ARCH-1)
+// The ONLY path to a narrative entry. One live setup per direction.
+//
+//   0 NO SETUP → 1 HTF CONTEXT → 2 LIQUIDITY TARGET → 3 LIQUIDITY RAIDED
+//   → 4 VALID POI → 5 LTF MSS / CHoCH / CISD → 6 DISPLACEMENT
+//   → 7 FRESH FVG LOCKED → 8 FVG RETEST = ENTRY → 9 CONSUMED / INVALIDATED
+//
+// A state is never skipped, so "HTF POI → ENTRY", "FVG → ENTRY",
+// "CRT → ENTRY" and "old sweep + new POI → ENTRY" are all unreachable here.
+// Each stage carries its own expiry, so a stale raid cannot be resurrected.
+// Nothing in this module emits: it reports [entry, blockReason] and the TRADE
+// ENGINE decides.
+// ═════════════════════════════════════════════════════════════════════════════
+type Setup
+    int    dir       = 0
+    int    st        = 0
+    int    id        = 0
+    int    bornBar   = na
+    float  tgtPx     = na
+    string tgtTag    = ""
+    float  liqPx     = na
+    int    liqBar    = na
+    float  liqExt    = na
+    bool   liqStrong = false
+    int    liqKind   = 0
+    string liqTag    = ""
+    Pool   pool      = na
+    float  poiTop    = na
+    float  poiBot    = na
+    int    poiTier   = 3
+    bool   poiFresh  = false
+    bool   poiIsHtf  = false
+    int    poiBar    = na
+    int    mssBar    = na
+    bool   mssChoch  = false
+    int    dispBar   = na
+    float  fvgTop    = na
+    float  fvgBot    = na
+    int    fvgBar    = na
+    int    retestBar = na
+    bool   sbWindow  = false
+
+f_setupReset(Setup s) =>
+    s.st        := ST_NONE
+    s.tgtPx     := na
+    s.tgtTag    := ""
+    s.liqPx     := na
+    s.liqBar    := na
+    s.liqExt    := na
+    s.liqStrong := false
+    s.liqKind   := 0
+    s.liqTag    := ""
+    s.pool      := na
+    s.poiTop    := na
+    s.poiBot    := na
+    s.poiTier   := 3
+    s.poiFresh  := false
+    s.poiIsHtf  := false
+    s.poiBar    := na
+    s.mssBar    := na
+    s.mssChoch  := false
+    s.dispBar   := na
+    s.fvgTop    := na
+    s.fvgBot    := na
+    s.fvgBar    := na
+    s.retestBar := na
+    s.sbWindow  := false
+    true
+
+f_setupAdvance(Setup s, int dir) =>
+    bool   entry = false
+    string blk   = ""
+    bool   isL   = dir == 1
+    if confirmed
+        // ── 9 · terminal states are cleared at the START of the next bar so the
+        //      engine always had one full bar to consume an ENTRY
+        if s.st == ST_ENTRY or s.st == ST_DEAD
+            if s.retestBar != bar_index
+                f_setupReset(s)
+        // ── invalidation, checked before any advance (Phase 7 / Phase 3 · 9)
+        if s.st > ST_NONE and s.st < ST_ENTRY
+            if bar_index - s.bornBar > setupLife
+                blk := "setup expired"
+                f_setupReset(s)
+            else if isL ? eChochDn : eChochUp
+                blk := "opposite external CHoCH"
+                f_setupReset(s)
+            else if s.st >= ST_RAID and not na(s.liqExt) and (isL ? close < s.liqExt : close > s.liqExt)
+                blk := "raid failed (closed beyond the wick)"
+                f_setupReset(s)
+            else if s.st >= ST_POI and s.poiIsHtf and bar_index - s.poiBar > femWait
+                blk := "FEM window expired"
+                f_setupReset(s)
+            else if s.st >= ST_POI and not na(s.poiBot) and (isL ? close < s.poiBot - NEAR_LVL_ATR * atr : close > s.poiTop + NEAR_LVL_ATR * atr)
+                blk := "POI invalidated"
+                f_setupReset(s)
+        // ── 0 → 1 · HTF CONTEXT
+        if s.st == ST_NONE
+            if isL ? htfCtxLong : htfCtxShort
+                f_setupReset(s)
+                s.st      := ST_CTX
+                s.dir     := dir
+                s.id      := bar_index * 2 + (isL ? 1 : 2)
+                s.bornBar := bar_index
+            else
+                blk := "HTF context not aligned"
+        // ── 1 → 2 · LIQUIDITY TARGET IDENTIFIED (what is price hunting?)
+        if s.st == ST_CTX
+            float t = isL ? tgtSell : tgtBuy
+            if not na(t)
+                s.st     := ST_TGT
+                s.tgtPx  := t
+                s.tgtTag := isL ? tgtSellTag : tgtBuyTag
+            else
+                blk := "no liquidity target"
+        // ── 2 → 3 · LIQUIDITY RAIDED (and BOUND to this setup — BUG-10)
+        if s.st == ST_TGT
+            Pool bp = isL ? raidLoPool : raidHiPool
+            if not na(bp)
+                s.st        := ST_RAID
+                s.liqPx     := isL ? raidLoPx     : raidHiPx
+                s.liqBar    := isL ? raidLoBar    : raidHiBar
+                s.liqExt    := isL ? raidLoExt    : raidHiExt
+                s.liqStrong := isL ? raidLoStrong : raidHiStrong
+                s.liqKind   := isL ? raidLoKind   : raidHiKind
+                s.liqTag    := isL ? raidLoTag    : raidHiTag
+                bp.bound := s.id
+                s.pool   := bp
+            else
+                blk := "no fresh liquidity raid"
+        // ── 3 → 4 · VALID POI CONFIRMED, and it must sit AT the raid
+        if s.st == ST_RAID
+            if bar_index - s.liqBar > mssWin
+                blk := "raid went stale before a POI"
+                f_setupReset(s)
+            else
+                float hTop = isL ? hPoiBTop : hPoiSTop
+                float hBot = isL ? hPoiBBot : hPoiSBot
+                bool  hTap = useFEM and not na(hTop) and (isL ? low <= hTop and close > hBot : high >= hBot and close < hTop) and math.abs((isL ? hBot : hTop) - s.liqExt) <= poiBindAtr * atr
+                if hTap
+                    s.st       := ST_POI
+                    s.poiTop   := hTop
+                    s.poiBot   := hBot
+                    s.poiTier  := 1
+                    s.poiFresh := (isL ? nz(hPoiBIn, 0) : nz(hPoiSIn, 0)) == 0
+                    s.poiIsHtf := true
+                    s.poiBar   := bar_index
+                else
+                    // chart-TF POI: the best eligible zone containing the raid
+                    float zTopB  = na
+                    float zBotB  = na
+                    int   zTierB = 9
+                    bool  zFrB   = false
+                    if array.size(zones) > 0
+                        for i = 0 to array.size(zones) - 1
+                            Zone z = array.get(zones, i)
+                            bool sideOk = isL ? not z.isSupply : z.isSupply
+                            bool live   = not z.signaled and (not fvgFillDead or z.state < 3) and z.tier <= minTier
+                            if sideOk and live and z.tier < zTierB
+                                float zt = box.get_top(z.bx)
+                                float zb = box.get_bottom(z.bx)
+                                if s.liqExt <= zt + poiBindAtr * atr and s.liqExt >= zb - poiBindAtr * atr
+                                    zTopB  := zt
+                                    zBotB  := zb
+                                    zTierB := z.tier
+                                    zFrB   := z.state <= 1
+                    if not na(zTopB)
+                        s.st       := ST_POI
+                        s.poiTop   := zTopB
+                        s.poiBot   := zBotB
+                        s.poiTier  := zTierB
+                        s.poiFresh := zFrB
+                        s.poiIsHtf := false
+                        s.poiBar   := bar_index
+                    else
+                        blk := "no valid POI at the raid"
+        // ── 4 → 5 · LTF MSS / CHoCH / CISD (execution-grade structure only)
+        if s.st == ST_POI
+            if bar_index - s.poiBar > mssWin
+                blk := "MSS window expired"
+                f_setupReset(s)
+            else
+                bool ch = isL ? chochUp : chochDn
+                bool ci = isL ? cisdUp : cisdDn
+                if ch or (ci and not mssNeedChoch)
+                    s.st       := ST_MSS
+                    s.mssBar   := bar_index
+                    s.mssChoch := ch
+                else
+                    blk := "MSS / CHoCH missing"
+        // ── 5 → 6 · DISPLACEMENT
+        if s.st == ST_MSS
+            if bar_index - s.mssBar > dispWin
+                blk := "displacement window expired"
+                f_setupReset(s)
+            else if isL ? dispUpBar : dispDnBar
+                s.st      := ST_DISP
+                s.dispBar := bar_index
+            else
+                blk := "displacement missing"
+        // ── 6 → 7 · the FIRST FVG the displacement leg left behind, LOCKED
+        if s.st == ST_DISP
+            if bar_index - s.dispBar > fvgWin
+                blk := "no FVG after displacement"
+                f_setupReset(s)
+            else if (isL ? bullFVG : bearFVG) and bar_index >= s.dispBar
+                s.st     := ST_FVG
+                s.fvgTop := isL ? low : low[2]
+                s.fvgBot := isL ? high[2] : high
+                s.fvgBar := bar_index
+            else
+                blk := "awaiting the FVG"
+        // ── 7 → 8 · FVG RETEST = ENTRY (never the creation bar)
+        if s.st == ST_FVG
+            float h  = math.max(s.fvgTop - s.fvgBot, syminfo.mintick)
+            float nd = isL ? s.fvgTop - retestDepth * h : s.fvgBot + retestDepth * h
+            if isL ? close < s.fvgBot : close > s.fvgTop
+                blk := "FVG invalidated"
+                f_setupReset(s)
+            else if bar_index - s.fvgBar > retestWin
+                blk := "retest window expired"
+                f_setupReset(s)
+            else if bar_index > s.fvgBar and (isL ? low <= nd and close > s.fvgBot : high >= nd and close < s.fvgTop) and (isL ? zoneBullConf or strongUp : zoneBearConf or strongDn)
+                s.st        := ST_ENTRY
+                s.retestBar := bar_index
+                s.sbWindow  := sbActive
+                entry       := true
+            else
+                blk := "awaiting the FVG retest"
+    [entry, blk]
+
+var Setup upS = Setup.new()
+var Setup dnS = Setup.new()
+[machLong,  blkLong]  = f_setupAdvance(upS, 1)
+[machShort, blkShort] = f_setupAdvance(dnS, -1)
+
+// ═══════════════════════════════════ MODULE 13 · ALIGNMENT SCORE (ARCH-5)
+// Phase 16 weights, and every event is paid ONCE:
+//   CONTEXT   25 = HTF direction 8 · external structure 8 · premium/discount 5 · session 4
+//   LIQUIDITY 25 = external liquidity 10 · engineered liquidity 7 · raid quality 8
+//   POI       20 = HTF POI 8 · freshness 4 · FVG/OB quality 4 · OTE 4
+//   TRIGGER   20 = MSS/CHoCH 8 · displacement 6 · CISD 6
+//   EXECUTION 10 = FVG retest 6 · rejection quality 4
+//
+// BUG-12 is fixed in the TRIGGER layer: displacement only pays if it happened
+// on a DIFFERENT bar from the MSS, and CISD only if it happened on a different
+// bar from the CHoCH. In v2 one candle could collect all three. External and
+// engineered liquidity are mutually exclusive by pool kind, so the same raid
+// can no longer be paid twice there either.
+//
+// The score is ALIGNMENT OF THE NARRATIVE. It is NOT a win probability and it
+// can never, on its own, produce an A+ entry (Phase 17).
+// ═════════════════════════════════════════════════════════════════════════════
+sesPts = not timeframe.isintraday ? 4 : inSB or inNY or inLon ? 4 : inAsia ? 2 : 0
+
+f_score(int dir, int tier, bool isHtfPoi, bool fresh, bool retest) =>
+    bool isL = dir == 1
+    // -- CONTEXT 25
+    int ctx = (isL ? htfDir > 0 : htfDir < 0) ? 8 : 0
+    ctx += (isL ? extDir > 0 : extDir < 0) ? 8 : 0
+    ctx += rangeOK and (isL ? pdPos < 0.5 : pdPos >= 0.5) ? 5 : 0
+    ctx += sesPts
+    // -- LIQUIDITY 25. External and engineered are separate POOLS, so paying
+    //    both is independent evidence; paying one pool twice is not (BUG-12).
+    bool lqExt = isL ? raidExtLo : raidExtHi
+    bool lqEq  = isL ? raidEqLo  : raidEqHi
+    bool lqSt  = isL ? sslStrong : bslStrong
+    int liq = lqExt ? 10 : 0
+    liq += lqEq ? 7 : 0
+    liq += lqSt ? 8 : 0
+    // -- POI 20
+    int poi = isHtfPoi ? 8 : 0
+    poi += fresh ? 4 : 0
+    poi += tier == 1 ? 4 : tier == 2 ? 2 : 0
+    poi += (isL ? inOTEbuy : inOTEsell) ? 4 : 0
+    // -- TRIGGER 20 — independent evidence only (BUG-12)
+    int mB = isL ? iChUpBar   : iChDnBar
+    int cB = isL ? cisdUpBar  : cisdDnBar
+    int dB = isL ? dispUpBar2 : dispDnBar2
+    int bB = isL ? iBosUpBar  : iBosDnBar
+    int trg = f_recent(mB, TRIG_LOOK) ? 8 : f_recent(bB, TRIG_LOOK) ? 4 : 0
+    trg += f_recent(dB, 3) and dB != mB and dB != cB ? 6 : 0
+    trg += f_recent(cB, TRIG_LOOK) and cB != mB ? 6 : 0
+    // -- EXECUTION 10
+    int exe = retest ? 6 : 0
+    exe += (isL ? zoneBullConf or bullPin : zoneBearConf or bearPin) ? 4 : 0
+    [ctx, liq, poi, trg, exe, ctx + liq + poi + trg + exe]
+
+// ═══════════════════════════════ MODULE 14 · BASE GATES (context filters)
+// These filters SILENCE a signal. They never advance or consume state — that
+// was BUG-5 / BUG-24, where a suppressed signal still ate the setup.
+// ═════════════════════════════════════════════════════════════════════════════
+var int lastLongSigBar  = na
+var int lastShortSigBar = na
+longCdOK  = masterCd == 0 or na(lastLongSigBar)  or bar_index - lastLongSigBar  > masterCd
+shortCdOK = masterCd == 0 or na(lastShortSigBar) or bar_index - lastShortSigBar > masterCd
+
+baseLongOK  = filtBias >= 0 and kzOK and volOK and sbGate and longCdOK  and (not structFilt or structDir >= 0)
+baseShortOK = filtBias <= 0 and kzOK and volOK and sbGate and shortCdOK and (not structFilt or structDir <= 0)
+
+// the confluence gate every NON-machine producer must also pass: a raid in
+// play, a trigger, and displacement. Location / POI is each producer's own job.
+confGateLong  = sslInPlay and (recentMssUp or mssUp) and recentDispUp
+confGateShort = bslInPlay and (recentMssDn or mssDn) and recentDispDn
+
+allowMach = true
+allowConf = entryMode != "Narrative only (A+)"
+allowAll  = entryMode == "All engines (legacy)"
+
+// ═════════════════════════════════════ MODULE 15 · TRADE ENGINE (ARCH-6)
+// The ONLY authority that may declare LONG / SHORT. Exactly one producer per
+// direction wins by RANK (FEM > machine > S/D retest > CRT > turtle soup >
+// trendline sweep > price action). If both directions qualify on one bar the
+// higher-ranked one wins and an exact tie mutes BOTH (v2 printed both, BUG-14).
+// ═════════════════════════════════════════════════════════════════════════════
+int    prodL   = 0
+string tagL    = ""
+float  prodSlL = na
+int    tierL   = 3
+bool   htfPoiL = false
+bool   freshL  = false
+bool   retestL = false
+
+int    prodS   = 0
+string tagS    = ""
+float  prodSlS = na
+int    tierS   = 3
+bool   htfPoiS = false
+bool   freshS  = false
+bool   retestS = false
+
+// ---- LONG candidate selection, best rank first ------------------------------
+if allowMach and machLong
+    prodL   := upS.poiIsHtf ? PR_FEM : PR_MACH
+    tagL    := upS.poiIsHtf ? "◎ FEM " + htfTf + "→LTF" : "Sweep+POI+MSS"
+    prodSlL := upS.liqExt
+    tierL   := upS.poiTier
+    htfPoiL := upS.poiIsHtf
+    freshL  := upS.poiFresh
+    retestL := true
+else if allowConf and sdCandLong and confGateLong
+    prodL   := PR_SD
+    tagL    := "Demand 50% retest"
+    prodSlL := sdBotLong
+    tierL   := sdTierL
+    freshL  := nbFresh
+    retestL := true
+else if allowConf and (crtCandLong or hCandCrtLong) and confGateLong
+    prodL   := PR_CRT
+    tagL    := hCandCrtLong and not crtCandLong ? "HTF " + htfTf + " CRT" : "⑫ CRT"
+    prodSlL := crtCandLong ? crtSlLong : hSlLong
+    tierL   := atHtfPoiL ? 1 : 2
+    htfPoiL := atHtfPoiL
+else if allowConf and (tbsCandLong or hCandTbsLong) and confGateLong
+    prodL   := PR_TBS
+    tagL    := hCandTbsLong and not tbsCandLong ? "HTF " + htfTf + " TSoup" : "⑬ TSoup"
+    prodSlL := tbsCandLong ? tbsSlLong : hSlLong
+    tierL   := atHtfPoiL ? 1 : 2
+    htfPoiL := atHtfPoiL
+else if allowAll and tlCandLong and confGateLong
+    prodL   := PR_TL
+    tagL    := "⑪ TL sweep"
+    prodSlL := tlSlLong
+else if allowAll and (pa1Long or pa2Long or pa3Long or pa4Long) and confGateLong
+    prodL   := PR_PA
+    tagL    := pa1Long ? "① Trap" : pa2Long ? "② PinTrap" : pa3Long ? "③ IB" : "④ Doji"
+    prodSlL := paSlLong
+
+// ---- SHORT candidate selection ----------------------------------------------
+if allowMach and machShort
+    prodS   := dnS.poiIsHtf ? PR_FEM : PR_MACH
+    tagS    := dnS.poiIsHtf ? "◎ FEM " + htfTf + "→LTF" : "Sweep+POI+MSS"
+    prodSlS := dnS.liqExt
+    tierS   := dnS.poiTier
+    htfPoiS := dnS.poiIsHtf
+    freshS  := dnS.poiFresh
+    retestS := true
+else if allowConf and sdCandShort and confGateShort
+    prodS   := PR_SD
+    tagS    := "Supply 50% retest"
+    prodSlS := sdTopShort
+    tierS   := sdTierS
+    freshS  := nsFresh
+    retestS := true
+else if allowConf and (crtCandShort or hCandCrtShort) and confGateShort
+    prodS   := PR_CRT
+    tagS    := hCandCrtShort and not crtCandShort ? "HTF " + htfTf + " CRT" : "⑫ CRT"
+    prodSlS := crtCandShort ? crtSlShort : hSlShort
+    tierS   := atHtfPoiS ? 1 : 2
+    htfPoiS := atHtfPoiS
+else if allowConf and (tbsCandShort or hCandTbsShort) and confGateShort
+    prodS   := PR_TBS
+    tagS    := hCandTbsShort and not tbsCandShort ? "HTF " + htfTf + " TSoup" : "⑬ TSoup"
+    prodSlS := tbsCandShort ? tbsSlShort : hSlShort
+    tierS   := atHtfPoiS ? 1 : 2
+    htfPoiS := atHtfPoiS
+else if allowAll and tlCandShort and confGateShort
+    prodS   := PR_TL
+    tagS    := "⑪ TL sweep"
+    prodSlS := tlSlShort
+else if allowAll and (pa1Short or pa2Short or pa3Short or pa4Short) and confGateShort
+    prodS   := PR_PA
+    tagS    := pa1Short ? "① Trap" : pa2Short ? "② PinTrap" : pa3Short ? "③ IB" : "④ Doji"
+    prodSlS := paSlShort
+
+// ---- score the winning candidate of each side -------------------------------
+[ctxL, liqL, poiL, trgL, exeL, scoreLong]  = f_score(1,  tierL, htfPoiL, freshL, retestL)
+[ctxS, liqS, poiS, trgS, exeS, scoreShort] = f_score(-1, tierS, htfPoiS, freshS, retestS)
+
+// A+ = the NARRATIVE completed AND the POI is tier 1. A high score alone can
+// never produce an A+ (Phase 17 / BUG-13).
+aPlusLong  = prodL > 0 and prodL <= PR_MACH and tierL == 1
+aPlusShort = prodS > 0 and prodS <= PR_MACH and tierS == 1
+
+okLong  = prodL > 0 and baseLongOK  and (minScore == 0 or scoreLong  >= minScore) and tierL <= minTier
+okShort = prodS > 0 and baseShortOK and (minScore == 0 or scoreShort >= minScore) and tierS <= minTier
+
+// ---- direction arbitration: never both, never twice -------------------------
+bool bothTie = okLong and okShort and prodL == prodS
+finalLong  = okLong  and not bothTie and (not okShort or prodL < prodS)
+finalShort = okShort and not bothTie and (not okLong  or prodS < prodL)
+
+// the exact reason an entry did NOT print, for the debug panel
+f_blockReason(bool prodOk, bool baseOk, bool cdOk, int score, int tier, bool tie, string machBlk) =>
+    not prodOk           ? machBlk == "" ? "no producer" : machBlk :
+         not cdOk        ? "cooldown" :
+         not baseOk      ? "context filter (bias / KZ / volatility / SB / structure)" :
+         tier > minTier  ? "POI tier " + f_tierTxt(tier) + " below the minimum" :
+         score < minScore ? "score " + str.tostring(score) + " < " + str.tostring(minScore) :
+         tie             ? "equal-rank conflict — both sides muted" : ""
+
+blockLong  = finalLong  ? "" : f_blockReason(prodL > 0, baseLongOK,  longCdOK,  scoreLong,  tierL, bothTie, blkLong)
+blockShort = finalShort ? "" : f_blockReason(prodS > 0, baseShortOK, shortCdOK, scoreShort, tierS, bothTie, blkShort)
+
+// ---- CONSUMPTION: state is spent only now, and only by the winner ----------
+if finalLong
+    lastLongSigBar := bar_index
+    if prodL <= PR_MACH
+        upS.st := ST_DEAD
+        if not na(upS.pool)
+            upS.pool.state := PS_DONE
+    else if prodL == PR_SD and not na(sdZoneL)
+        sdZoneL.signaled := true
+        box.set_bgcolor(sdZoneL.bx, color.new(COL_BULL, 95))
+    else if prodL == PR_CRT
+        lastCrtLongBar := bar_index
+    else if prodL == PR_TBS
+        lastTbsLongBar := bar_index
+    else if prodL == PR_PA
+        wState := 0
+if finalShort
+    lastShortSigBar := bar_index
+    if prodS <= PR_MACH
+        dnS.st := ST_DEAD
+        if not na(dnS.pool)
+            dnS.pool.state := PS_DONE
+    else if prodS == PR_SD and not na(sdZoneS)
+        sdZoneS.signaled := true
+        box.set_bgcolor(sdZoneS.bx, color.new(COL_BEAR, 95))
+    else if prodS == PR_CRT
+        lastCrtShortBar := bar_index
+    else if prodS == PR_TBS
+        lastTbsShortBar := bar_index
+    else if prodS == PR_PA
+        wState := 0
+
+// ---- machine-readable reason string (Phase 29) ------------------------------
+f_reason(int dir, int prod, string tag, int tier, bool htfPoi, string liqTag, bool sb) =>
+    bool isL = dir == 1
+    string r = isL ? "LONG · " : "SHORT · "
+    r += (isL ? (htfDir > 0 ? "HTF Bullish" : htfDir < 0 ? "HTF Bearish" : "HTF Flat") :
+         (htfDir < 0 ? "HTF Bearish" : htfDir > 0 ? "HTF Bullish" : "HTF Flat"))
+    r := f_add(r, (isL ? "SSL raid" : "BSL raid") + (liqTag != "" ? " (" + liqTag + ")" : ""))
+    r := f_add(r, (htfPoi ? "HTF " + htfTf + " POI" : isL ? "Demand POI" : "Supply POI") + " " + f_tierTxt(tier))
+    r := f_add(r, isL ? (upS.mssChoch ? "LTF CHoCH" : "LTF CISD") : (dnS.mssChoch ? "LTF CHoCH" : "LTF CISD"))
+    r := f_add(r, "Displacement")
+    r := f_add(r, prod <= PR_MACH ? "FVG retest" : tag)
+    r := sb ? f_add(r, "Silver Bullet") : r
+    r
+
+reasonLong  = finalLong  ? f_reason(1,  prodL, tagL, tierL, htfPoiL, upS.liqTag, upS.sbWindow) : ""
+reasonShort = finalShort ? f_reason(-1, prodS, tagS, tierS, htfPoiS, dnS.liqTag, dnS.sbWindow) : ""
+
+// ═══════════════════════════════════════ MODULE 16 · RISK (SL / TP) ARCH-7
+// SL HIERARCHY (Phase 23): 1 liquidity-raid wick · 2 protected structural
+// swing · 3 FVG invalidation · 4 POI edge · 5 ATR fallback. The first level
+// that is on the correct side AND inside [minRiskAtr, maxRiskAtr] wins, which
+// is what stops an HTF-sized structural stop from being pinned on an LTF entry.
+// TP LADDER (Phase 24): internal liquidity → opposing FVG/OB → external
+// liquidity, each with an R floor, and no target parked behind an un-raided
+// opposing POI.
+// ═════════════════════════════════════════════════════════════════════════════
+f_slOk(int dir, float entry, float lvl) =>
+    not na(lvl) and (dir == 1 ? lvl < entry : lvl > entry) and math.abs(entry - lvl) >= minRiskAtr * atr and math.abs(entry - lvl) <= maxRiskAtr * atr
+
+f_sl(int dir, float entry, float lvlRaid, float lvlProt, float lvlFvg, float lvlPoi) =>
+    float pad = SL_PAD_ATR * atr
+    float c1 = na(lvlRaid) ? na : dir == 1 ? lvlRaid - pad : lvlRaid + pad
+    float c2 = na(lvlProt) ? na : dir == 1 ? lvlProt - pad : lvlProt + pad
+    float c3 = na(lvlFvg)  ? na : dir == 1 ? lvlFvg  - pad : lvlFvg  + pad
+    float c4 = na(lvlPoi)  ? na : dir == 1 ? lvlPoi  - pad : lvlPoi  + pad
+    float sl = na
+    int   src = 5
+    if f_slOk(dir, entry, c1)
+        sl  := c1
+        src := 1
+    else if f_slOk(dir, entry, c2)
+        sl  := c2
+        src := 2
+    else if f_slOk(dir, entry, c3)
+        sl  := c3
+        src := 3
+    else if f_slOk(dir, entry, c4)
+        sl  := c4
+        src := 4
+    else
+        sl  := dir == 1 ? entry - atrStopMult * atr : entry + atrStopMult * atr
+        src := 5
+    [sl, src]
+
+f_slTxt(int src) =>
+    src == 1 ? "raid wick" : src == 2 ? "protected swing" : src == 3 ? "FVG invalidation" : src == 4 ? "POI edge" : "ATR fallback"
+
+// nearest live pool beyond `from` in the trade direction.
+// scope 0 = internal (minor swings) · 1 = external (EXT / PD / session / EQ)
+f_nextPool(int dir, float from, int scope) =>
+    float best = na
+    if array.size(pools) > 0
+        for i = 0 to array.size(pools) - 1
+            Pool p = array.get(pools, i)
+            bool kindOk = scope == 0 ? p.kind == PK_SWING : p.kind == PK_EXT or p.kind == PK_PD or p.kind == PK_SES or p.kind == PK_EQ
+            bool sideOk = dir == 1 ? p.buySide and p.px > from : not p.buySide and p.px < from
+            if p.state <= PS_VAL and kindOk and sideOk
+                if na(best) or (dir == 1 ? p.px < best : p.px > best)
+                    best := p.px
+    best
+
+// nearest OPPOSING zone edge beyond `from` — the wall a target must respect
+f_nextZone(int dir, float from) =>
+    float best = na
+    if array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            Zone z = array.get(zones, i)
+            if not z.signaled and z.state < 3
+                if dir == 1 and z.isSupply
+                    float b = box.get_bottom(z.bx)
+                    if b > from and (na(best) or b < best)
+                        best := b
+                else if dir == -1 and not z.isSupply
+                    float t = box.get_top(z.bx)
+                    if t < from and (na(best) or t > best)
+                        best := t
+    best
+
+f_tp(int dir, float entry, float risk) =>
+    float t1 = dir == 1 ? entry + risk : entry - risk
+    float t2 = dir == 1 ? entry + rrMult * risk : entry - rrMult * risk
+    float t3 = dir == 1 ? entry + 3 * risk : entry - 3 * risk
+    if tpMode == "Liquidity ladder"
+        float iL = f_nextPool(dir, entry, 0)
+        float zW = f_nextZone(dir, entry)
+        float eL = f_nextPool(dir, entry, 1)
+        if not na(iL) and (dir == 1 ? iL - entry >= risk : entry - iL >= risk)
+            t1 := iL
+        if not na(zW) and (dir == 1 ? zW - entry >= rrMult * risk : entry - zW >= rrMult * risk)
+            t2 := zW
+        if not na(eL) and (dir == 1 ? eL - entry >= 2 * risk : entry - eL >= 2 * risk)
+            t3 := eL
+        // never park a target BEHIND an un-raided opposing POI
+        if tpClamp and not na(zW)
+            float wall = dir == 1 ? zW - NEAR_LVL_ATR * atr : zW + NEAR_LVL_ATR * atr
+            if dir == 1
+                t3 := math.min(t3, math.max(wall, t2))
+            else
+                t3 := math.max(t3, math.min(wall, t2))
+    else if tpMode == "Next level"
+        float tgt = na
+        if dir == 1
+            tgt := not na(nsBot) and nsBot > entry ? nsBot : not na(lastRes) and lastRes > entry ? lastRes : na
+            if not na(tgt) and tgt - entry >= rrMult * risk
+                t3 := tgt
+        else
+            tgt := not na(nbTop) and nbTop < entry ? nbTop : not na(lastSup) and lastSup < entry ? lastSup : na
+            if not na(tgt) and entry - tgt >= rrMult * risk
+                t3 := tgt
+    // keep the ladder monotone
+    if dir == 1
+        t2 := math.max(t2, t1)
+        t3 := math.max(t3, t2)
+    else
+        t2 := math.min(t2, t1)
+        t3 := math.min(t3, t2)
+    [t1, t2, t3]
+
+// ---- resolve the risk of the emitted signal ---------------------------------
+// Both sides are resolved unconditionally at top level (Pine keeps tuple
+// destructuring out of conditional scopes) and the emitted side is selected.
+lvlRaidL = prodL > 0 ? prodSlL : na
+lvlProtL = nz(protLowI, protLowE)
+lvlFvgL  = prodL > 0 and prodL <= PR_MACH ? upS.fvgBot : na
+lvlPoiL  = prodL > 0 and prodL <= PR_MACH ? upS.poiBot : sdBotLong
+[slL, slSrcL] = f_sl(1, close, lvlRaidL, lvlProtL, lvlFvgL, lvlPoiL)
+riskL = math.abs(close - slL)
+[tp1L, tp2L, tp3L] = f_tp(1, close, riskL)
+
+lvlRaidS = prodS > 0 ? prodSlS : na
+lvlProtS = nz(protHighI, protHighE)
+lvlFvgS  = prodS > 0 and prodS <= PR_MACH ? dnS.fvgTop : na
+lvlPoiS  = prodS > 0 and prodS <= PR_MACH ? dnS.poiTop : sdTopShort
+[slS, slSrcS] = f_sl(-1, close, lvlRaidS, lvlProtS, lvlFvgS, lvlPoiS)
+riskS = math.abs(close - slS)
+[tp1S, tp2S, tp3S] = f_tp(-1, close, riskS)
+
+sigDir   = finalLong ? 1 : finalShort ? -1 : 0
+sigEntry = sigDir != 0 ? close : na
+sigSL    = finalLong ? slL : finalShort ? slS : na
+sigSlSrc = finalLong ? slSrcL : finalShort ? slSrcS : 0
+sigTP1   = finalLong ? tp1L : finalShort ? tp1S : na
+sigTP2   = finalLong ? tp2L : finalShort ? tp2S : na
+sigTP3   = finalLong ? tp3L : finalShort ? tp3S : na
+sigRisk  = finalLong ? riskL : finalShort ? riskS : na
+
+// ══════════════════════════════════════════ MODULE 17 · VISUAL ENGINE
+// Everything v2 drew is still drawn here. The one thing that changed is
+// authority: no drawing in this module decides anything, and the only entry
+// mark on the chart is the one the TRADE ENGINE emitted (Phase 28).
+// ═════════════════════════════════════════════════════════════════════════════
+// ---- key level plots ---------------------------------------------------------
+plot(showLevels ? lastRes : na, "Resistance (last swing high)",
+     color = color.new(COL_BEAR, 50), style = plot.style_linebr)
+plot(showLevels ? lastSup : na, "Support (last swing low)",
+     color = color.new(COL_BULL, 50), style = plot.style_linebr)
+plot(showStruct and showProt ? protLowE : na, "Protected low (external)",
+     color = color.new(COL_BULL, 15), style = plot.style_linebr, linewidth = 2)
+plot(showStruct and showProt ? protHighE : na, "Protected high (external)",
+     color = color.new(COL_BEAR, 15), style = plot.style_linebr, linewidth = 2)
+
+// ---- liquidity / structure marks (confirmed bars only — no intrabar flicker)
+plotchar(showSweeps and sslSweep, "Sell-side sweep", "◆", location.belowbar,
+     color.new(COL_BULL, 0), size = size.tiny)
+plotchar(showSweeps and bslSweep, "Buy-side sweep", "◆", location.abovebar,
+     color.new(COL_BEAR, 0), size = size.tiny)
+plotchar(showSweeps and eqlSwept, "EQL pool raided", "◈", location.belowbar,
+     color.new(COL_BULL, 0), size = size.tiny)
+plotchar(showSweeps and eqhSwept, "EQH pool raided", "◈", location.abovebar,
+     color.new(COL_BEAR, 0), size = size.tiny)
+plotchar(showTL and tlUpBreak, "TL break (support line)", "✕", location.belowbar,
+     color.new(COL_BEAR, 20), size = size.tiny)
+plotchar(showTL and tlDnBreak, "TL break (resistance line)", "✕", location.abovebar,
+     color.new(COL_BULL, 20), size = size.tiny)
+plotchar(showSesHL and sesHiRaid, "Session high raided", "▿", location.abovebar,
+     color.new(COL_BEAR, 15), size = size.tiny)
+plotchar(showSesHL and sesLoRaid, "Session low raided", "▵", location.belowbar,
+     color.new(COL_BULL, 15), size = size.tiny)
+plotchar(showSesHL and sesHiBroke, "Session high broken", "⇡", location.abovebar,
+     color.new(COL_BULL, 15), size = size.tiny)
+plotchar(showSesHL and sesLoBroke, "Session low broken", "⇣", location.belowbar,
+     color.new(COL_BEAR, 15), size = size.tiny)
+// the ONLY entry marks on the chart
+plotchar(finalLong,  "TRADE ENGINE · LONG",  "▲", location.belowbar, COL_BULL, size = size.small)
+plotchar(finalShort, "TRADE ENGINE · SHORT", "▼", location.abovebar, COL_BEAR, size = size.small)
+
+// ---- session / volatility shading -------------------------------------------
+bgcolor(paintKZ and timeframe.isintraday and inAsia ? color.new(color.purple, 95) : na, title = "Asia KZ")
+bgcolor(paintKZ and timeframe.isintraday and inLon  ? color.new(color.blue,   94) : na, title = "London KZ")
+bgcolor(paintKZ and timeframe.isintraday and inNY   ? color.new(color.orange, 94) : na, title = "NY AM KZ")
+bgcolor(paintKZ and timeframe.isintraday and inSB   ? color.new(color.teal,   92) : na, title = "Silver Bullet KZ")
+bgcolor(paintNews and timeframe.isintraday and inVol ? color.new(color.red,   90) : na, title = "Scheduled volatility window")
+
+// ---- the single entry label --------------------------------------------------
+sigSize = uiSizeOpt == "Tiny" ? size.tiny : size.small
+
+if finalLong
+    string t = (aPlusLong ? "A+ " : "") + "LONG " + str.tostring(scoreLong) + "\n" + tagL +
+         (tierL == 1 ? " · T1" : tierL == 2 ? " · T2" : " · T3") + (upS.sbWindow ? " · SB" : "")
+    if showReason
+        t := t + "\n" + reasonLong
+    label.new(bar_index, na, t, yloc = yloc.belowbar, style = label.style_label_up,
+         color = color.new(COL_BULL, uiTrans), textcolor = color.white, size = sigSize)
+if finalShort
+    string t2 = (aPlusShort ? "A+ " : "") + "SHORT " + str.tostring(scoreShort) + "\n" + tagS +
+         (tierS == 1 ? " · T1" : tierS == 2 ? " · T2" : " · T3") + (dnS.sbWindow ? " · SB" : "")
+    if showReason
+        t2 := t2 + "\n" + reasonShort
+    label.new(bar_index, na, t2, yloc = yloc.abovebar, style = label.style_label_down,
+         color = color.new(COL_BEAR, uiTrans), textcolor = color.white, size = sigSize)
+
+// ---- developing-setup preview (ARCH-9): dim, no state, no alert -------------
+var label devLb = na
+if showDev
+    label.delete(devLb)
+    bool devL = devBar and upS.st == ST_FVG and low  <= upS.fvgTop
+    bool devS = devBar and dnS.st == ST_FVG and high >= dnS.fvgBot
+    if devL or devS
+        devLb := label.new(bar_index, na, "⋯", yloc = devL ? yloc.belowbar : yloc.abovebar,
+             style = devL ? label.style_label_up : label.style_label_down,
+             color = color.new(devL ? COL_BULL : COL_BEAR, 75), textcolor = color.new(color.white, 25),
+             size = size.tiny)
+
+// ---- entry / SL / TP of the last emitted signal ------------------------------
+var line  entryLn = na
+var line  slLn    = na
+var line  tpLn    = na
+var line  tp2Ln   = na
+var line  tp3Ln   = na
+var label entryLb = na
+var label slLb    = na
+var label tpLb    = na
+var label tp2Lb   = na
+var label tp3Lb   = na
+
+if showTrade and sigDir != 0
+    line.delete(entryLn)
+    line.delete(slLn)
+    line.delete(tpLn)
+    line.delete(tp2Ln)
+    line.delete(tp3Ln)
+    label.delete(entryLb)
+    label.delete(slLb)
+    label.delete(tpLb)
+    label.delete(tp2Lb)
+    label.delete(tp3Lb)
+    int x2 = bar_index + TRADE_BARS
+    color tpc = sigDir == 1 ? COL_BULL : COL_BEAR
+    entryLn := line.new(bar_index, sigEntry, x2, sigEntry, color = color.gray, style = line.style_dashed)
+    slLn    := line.new(bar_index, sigSL,    x2, sigSL,    color = COL_BEAR,   style = line.style_dashed)
+    tpLn    := line.new(bar_index, sigTP1,   x2, sigTP1,   color = color.new(tpc, 45), style = line.style_dashed)
+    tp2Ln   := line.new(bar_index, sigTP2,   x2, sigTP2,   color = color.new(tpc, 20), style = line.style_dashed)
+    tp3Ln   := line.new(bar_index, sigTP3,   x2, sigTP3,   color = tpc, style = line.style_dashed)
+    entryLb := label.new(x2, sigEntry, "E " + str.tostring(sigEntry, format.mintick),
+         style = label.style_label_left, color = color.new(color.gray, 20), textcolor = color.white, size = size.tiny)
+    slLb    := label.new(x2, sigSL, "SL " + str.tostring(sigSL, format.mintick) + " · " + f_slTxt(sigSlSrc),
+         style = label.style_label_left, color = color.new(COL_BEAR, 20), textcolor = color.white, size = size.tiny)
+    tpLb    := label.new(x2, sigTP1, "TP1 " + str.tostring(sigTP1, format.mintick),
+         style = label.style_label_left, color = color.new(tpc, 45), textcolor = color.white, size = size.tiny)
+    tp2Lb   := label.new(x2, sigTP2, "TP2 " + str.tostring(sigTP2, format.mintick),
+         style = label.style_label_left, color = color.new(tpc, 30), textcolor = color.white, size = size.tiny)
+    tp3Lb   := label.new(x2, sigTP3, "TP3 " + str.tostring(sigTP3, format.mintick),
+         style = label.style_label_left, color = color.new(tpc, 15), textcolor = color.white, size = size.tiny)
+
+// ---- live HTF FVG POI boxes ---------------------------------------------------
+var box hPoiBuyBx  = na
+var box hPoiSellBx = na
+if barstate.islast
+    box.delete(hPoiBuyBx)
+    box.delete(hPoiSellBx)
+    if showPoi and not na(hPoiBTop)
+        hPoiBuyBx := box.new(bar_index - 10, hPoiBTop, bar_index + TRADE_BARS, hPoiBBot,
+             border_color = color.new(COL_BULL, 50), bgcolor = color.new(COL_BULL, 95),
+             border_style = line.style_dashed,
+             text = "HTF " + htfTf + " FVG · demand POI" + (nz(hPoiBIn) == 0 ? " · fresh" : " · tested ×" + str.tostring(nz(hPoiBIn))),
+             text_size = size.tiny, text_color = color.new(COL_BULL, 30), text_halign = text.align_right)
+    if showPoi and not na(hPoiSTop)
+        hPoiSellBx := box.new(bar_index - 10, hPoiSTop, bar_index + TRADE_BARS, hPoiSBot,
+             border_color = color.new(COL_BEAR, 50), bgcolor = color.new(COL_BEAR, 95),
+             border_style = line.style_dashed,
+             text = "HTF " + htfTf + " FVG · supply POI" + (nz(hPoiSIn) == 0 ? " · fresh" : " · tested ×" + str.tostring(nz(hPoiSIn))),
+             text_size = size.tiny, text_color = color.new(COL_BEAR, 30), text_halign = text.align_right)
+
+// ---- the machine's LOCKED execution FVG (state 7) ----------------------------
+var box machFvgBxL = na
+var box machFvgBxS = na
+if barstate.islast
+    box.delete(machFvgBxL)
+    box.delete(machFvgBxS)
+    if upS.st == ST_FVG and not na(upS.fvgTop)
+        machFvgBxL := box.new(upS.fvgBar, upS.fvgTop, bar_index + TRADE_BARS, upS.fvgBot,
+             border_color = color.new(COL_BULL, 35), bgcolor = color.new(COL_BULL, 92),
+             text = "◎ locked FVG · await retest", text_size = size.tiny,
+             text_color = color.new(COL_BULL, 20), text_halign = text.align_right)
+    if dnS.st == ST_FVG and not na(dnS.fvgTop)
+        machFvgBxS := box.new(dnS.fvgBar, dnS.fvgTop, bar_index + TRADE_BARS, dnS.fvgBot,
+             border_color = color.new(COL_BEAR, 35), bgcolor = color.new(COL_BEAR, 92),
+             text = "◎ locked FVG · await retest", text_size = size.tiny,
+             text_color = color.new(COL_BEAR, 20), text_halign = text.align_right)
+
+// ---- LIQUIDITY INTENT labels: what price is hunting next ---------------------
+var label tgtBuyLb  = na
+var label tgtSellLb = na
+if barstate.islast
+    label.delete(tgtBuyLb)
+    label.delete(tgtSellLb)
+    if showPools and not na(tgtBuy)
+        tgtBuyLb := label.new(bar_index + TRADE_BARS, tgtBuy, "◂ target BSL " + tgtBuyTag,
+             style = label.style_label_left, color = color.new(COL_BEAR, 55),
+             textcolor = color.white, size = size.tiny)
+    if showPools and not na(tgtSell)
+        tgtSellLb := label.new(bar_index + TRADE_BARS, tgtSell, "◂ target SSL " + tgtSellTag,
+             style = label.style_label_left, color = color.new(COL_BULL, 55),
+             textcolor = color.white, size = size.tiny)
+
+// ---- order-flow areas: premium / discount halves of the dealing range --------
+var box flowDisc = na
+var box flowPrem = na
+if barstate.islast
+    box.delete(flowDisc)
+    box.delete(flowPrem)
+    if showFlow and rangeOK
+        int fx1 = math.min(nz(rngLoBar, bar_index - 20), nz(rngHiBar, bar_index - 20))
+        int fx2 = bar_index + TRADE_BARS
+        bool buySide  = structDir == 1
+        bool sellSide = structDir == -1
+        flowDisc := box.new(fx1, eqLvl, fx2, rngLo,
+             border_color = color.new(COL_BULL, buySide ? 65 : 88),
+             bgcolor      = color.new(COL_BULL, buySide ? 94 : 97),
+             border_style = line.style_dotted,
+             text = "DISCOUNT · buy flow", text_size = size.tiny,
+             text_color = color.new(COL_BULL, buySide ? 35 : 65),
+             text_halign = text.align_left, text_valign = text.align_bottom)
+        flowPrem := box.new(fx1, rngHi, fx2, eqLvl,
+             border_color = color.new(COL_BEAR, sellSide ? 65 : 88),
+             bgcolor      = color.new(COL_BEAR, sellSide ? 94 : 97),
+             border_style = line.style_dotted,
+             text = "PREMIUM · sell flow", text_size = size.tiny,
+             text_color = color.new(COL_BEAR, sellSide ? 35 : 65),
+             text_halign = text.align_left, text_valign = text.align_top)
+
+// ---- dealing range EQ + OTE box ----------------------------------------------
+var box   oteBox = na
+var line  eqLine = na
+var label oteLb  = na
+if barstate.islast
+    box.delete(oteBox)
+    line.delete(eqLine)
+    label.delete(oteLb)
+    bool drawBuyOte  = structDir == 1  and bullRange
+    bool drawSellOte = structDir == -1 and bearRange
+    if showRange and (drawBuyOte or drawSellOte)
+        int rx1 = bar_index - 20
+        int rx2 = bar_index + TRADE_BARS
+        eqLine := line.new(rx1, eqLvl, rx2, eqLvl,
+             color = color.new(color.gray, 40), style = line.style_dashed)
+        float oTop = drawBuyOte ? oteBuyTop : oteSellTop
+        float oBot = drawBuyOte ? oteBuyBot : oteSellBot
+        color oc   = drawBuyOte ? COL_BULL : COL_BEAR
+        oteBox := box.new(rx1, oTop, rx2, oBot,
+             border_color = color.new(oc, 45), bgcolor = color.new(oc, 92),
+             border_style = line.style_dotted)
+        oteLb := label.new(rx2, (oTop + oBot) / 2,
+             drawBuyOte ? "OTE 62–79% (buy)" : "OTE 62–79% (sell)",
+             style = label.style_label_left, color = color.new(oc, 60),
+             textcolor = color.white, size = size.tiny)
+
+// ---- extend live zone drawings ONCE, on the last bar -------------------------
+if barstate.islast and array.size(zones) > 0
+    for i = 0 to array.size(zones) - 1
+        Zone z = array.get(zones, i)
+        box.set_right(z.bx, bar_index + 1)
+        line.set_x2(z.mid, bar_index + 1)
+
+// ---- NEXT buy / sell POI labels + highlight ---------------------------------
+var label nextBuyLb  = na
+var label nextSellLb = na
+if barstate.islast
+    label.delete(nextBuyLb)
+    label.delete(nextSellLb)
+    if showNext and array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            Zone z = array.get(zones, i)
+            float t = box.get_top(z.bx)
+            float b = box.get_bottom(z.bx)
+            bool isNext = (not z.isSupply and t == nbTop and b == nbBot) or (z.isSupply and t == nsTop and b == nsBot)
+            box.set_border_width(z.bx, isNext ? 2 : 1)
+    if showNext and not na(nbTop)
+        string nbDist = close <= nbTop ? "inside" : str.tostring((close - nbTop) / close * 100, "#.##") + "% below"
+        nextBuyLb := label.new(bar_index + TRADE_BARS, (nbTop + nbBot) / 2,
+             "NEXT BUY " + f_tierTxt(nbTier) + " ▸ " + str.tostring(nbBot, format.mintick) + "–" + str.tostring(nbTop, format.mintick) + " (" + nbDist + ")",
+             style = label.style_label_left, color = color.new(COL_BULL, 40),
+             textcolor = color.white, size = size.tiny)
+    if showNext and not na(nsBot)
+        string nsDist = close >= nsBot ? "inside" : str.tostring((nsBot - close) / close * 100, "#.##") + "% above"
+        nextSellLb := label.new(bar_index + TRADE_BARS, (nsTop + nsBot) / 2,
+             "NEXT SELL " + f_tierTxt(nsTier) + " ▸ " + str.tostring(nsBot, format.mintick) + "–" + str.tostring(nsTop, format.mintick) + " (" + nsDist + ")",
+             style = label.style_label_left, color = color.new(COL_BEAR, 40),
+             textcolor = color.white, size = size.tiny)
+
+// ══════════════════════════════════════════════ MODULE 18 · DASHBOARD
+// ═════════════════════════════════════════════════════════════════════════════
+f_biasTxt(int b) => b > 0 ? "▲ Bull" : b < 0 ? "▼ Bear" : "—"
+f_biasCol(int b) => b > 0 ? color.new(COL_BULL, 75) : b < 0 ? color.new(COL_BEAR, 75) : color.new(color.gray, 75)
+f_layers(int c, int l, int p, int t, int e) =>
+    "C" + str.tostring(c) + " L" + str.tostring(l) + " P" + str.tostring(p) + " T" + str.tostring(t) + " E" + str.tostring(e)
+f_stTxt(int st) =>
+    st == ST_NONE ? "0 idle" : st == ST_CTX ? "1 HTF ctx" : st == ST_TGT ? "2 target" :
+         st == ST_RAID ? "3 raided" : st == ST_POI ? "4 POI" : st == ST_MSS ? "5 MSS" :
+         st == ST_DISP ? "6 disp" : st == ST_FVG ? "7 FVG" : st == ST_ENTRY ? "8 ENTRY" : "9 spent"
+f_prodTxt(int p) =>
+    p == PR_FEM ? "FEM" : p == PR_MACH ? "Sweep+POI+MSS" : p == PR_SD ? "S/D retest" :
+         p == PR_CRT ? "CRT" : p == PR_TBS ? "Turtle soup" : p == PR_TL ? "TL sweep" :
+         p == PR_PA ? "Price action" : "—"
+
+var table dash = table.new(position.top_right, 2, 21,
+     border_color = color.new(color.gray, 70), border_width = 1)
+hdrBg  = color.new(color.gray, 60)
+rowBg  = color.new(color.gray, 85)
+
+if showDash and barstate.islast
+    int freshD = 0
+    int freshS = 0
+    int t1Cnt  = 0
+    if array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            Zone z = array.get(zones, i)
+            if z.tier == 1
+                t1Cnt += 1
+            if z.state == 0
+                if z.isSupply
+                    freshS += 1
+                else
+                    freshD += 1
+    int livePools = 0
+    if array.size(pools) > 0
+        for i = 0 to array.size(pools) - 1
+            Pool p = array.get(pools, i)
+            if p.state <= PS_VAL
+                livePools += 1
+    table.cell(dash, 0, 0, "TF",   bgcolor = hdrBg, text_color = color.white, text_size = size.small)
+    table.cell(dash, 1, 0, "Bias", bgcolor = hdrBg, text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 1, "5m",  text_size = size.small, bgcolor = rowBg, text_color = color.white)
+    table.cell(dash, 1, 1, f_biasTxt(b5),   bgcolor = f_biasCol(b5),   text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 2, "15m", text_size = size.small, bgcolor = rowBg, text_color = color.white)
+    table.cell(dash, 1, 2, f_biasTxt(b15),  bgcolor = f_biasCol(b15),  text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 3, "1H",  text_size = size.small, bgcolor = rowBg, text_color = color.white)
+    table.cell(dash, 1, 3, f_biasTxt(b60),  bgcolor = f_biasCol(b60),  text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 4, "4H",  text_size = size.small, bgcolor = rowBg, text_color = color.white)
+    table.cell(dash, 1, 4, f_biasTxt(b240), bgcolor = f_biasCol(b240), text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 5, "1D",  text_size = size.small, bgcolor = rowBg, text_color = color.white)
+    table.cell(dash, 1, 5, f_biasTxt(bD),   bgcolor = f_biasCol(bD),   text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 6, "HTF ctx " + htfCtxTf, text_size = size.small, bgcolor = rowBg, text_color = color.white)
+    table.cell(dash, 1, 6, f_biasTxt(htfDir) + (na(htfPd) ? "" : "  " + str.tostring(htfPd * 100, "#") + "%"),
+         bgcolor = f_biasCol(htfDir), text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 7, "Zones", text_size = size.small, bgcolor = rowBg, text_color = color.white)
+    table.cell(dash, 1, 7, "fresh D:" + str.tostring(freshD) + " S:" + str.tostring(freshS) + " · T1:" + str.tostring(t1Cnt),
+         bgcolor = rowBg, text_color = color.white, text_size = size.small)
+    string sweepTxt = (sslInPlay ? "SSL✓" + (sslStrong ? "★ " : " ") : "") + (bslInPlay ? "BSL✓" + (bslStrong ? "★" : "") : "")
+    table.cell(dash, 0, 8, "Raid in play", text_size = size.small, bgcolor = rowBg, text_color = color.white)
+    table.cell(dash, 1, 8, sweepTxt == "" ? "none" : sweepTxt, bgcolor = rowBg, text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 9, "Liq targets", text_size = size.small, bgcolor = rowBg, text_color = color.white,
+         tooltip = "What price is hunting next: nearest un-raided pool on each side, plus the number of live pools tracked.")
+    table.cell(dash, 1, 9, (na(tgtSell) ? "—" : str.tostring(tgtSell, format.mintick) + " " + tgtSellTag) + " / " +
+         (na(tgtBuy) ? "—" : str.tostring(tgtBuy, format.mintick) + " " + tgtBuyTag) + "  (" + str.tostring(livePools) + ")",
+         bgcolor = rowBg, text_color = color.white, text_size = size.tiny)
+    string nbTxt = na(nbTop) ? "none" : str.tostring(nbBot, format.mintick) + "–" + str.tostring(nbTop, format.mintick) + " " + f_tierTxt(nbTier)
+    string nsTxt = na(nsBot) ? "none" : str.tostring(nsBot, format.mintick) + "–" + str.tostring(nsTop, format.mintick) + " " + f_tierTxt(nsTier)
+    table.cell(dash, 0, 10, "Next buy", text_size = size.small, bgcolor = rowBg, text_color = color.white)
+    table.cell(dash, 1, 10, nbTxt, bgcolor = color.new(COL_BULL, 80), text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 11, "Next sell", text_size = size.small, bgcolor = rowBg, text_color = color.white)
+    table.cell(dash, 1, 11, nsTxt, bgcolor = color.new(COL_BEAR, 80), text_color = color.white, text_size = size.small)
+    string structTxt = "int " + (msDir > 0 ? "▲" : msDir < 0 ? "▼" : "—") + " · ext " + (extDir > 0 ? "▲" : extDir < 0 ? "▼" : "—")
+    table.cell(dash, 0, 12, "Structure", text_size = size.small, bgcolor = rowBg, text_color = color.white)
+    table.cell(dash, 1, 12, structTxt, bgcolor = f_biasCol(extDir), text_color = color.white, text_size = size.small)
+    string pdTxt = na(pdPos) ? "—" : (pdPos >= 0.5 ? "Premium " : "Discount ") + str.tostring(pdPos * 100, "#") + "%"
+    table.cell(dash, 0, 13, "Range pos", text_size = size.small, bgcolor = rowBg, text_color = color.white)
+    table.cell(dash, 1, 13, pdTxt, bgcolor = rowBg, text_color = color.white, text_size = size.small)
+    string kzTxt = not timeframe.isintraday ? "—" : inSB ? "Silver Bullet" : inNY ? "NY AM" : inLon ? "London" : inAsia ? "Asia" : "off-hours"
+    table.cell(dash, 0, 14, "Killzone", text_size = size.small, bgcolor = rowBg, text_color = color.white)
+    table.cell(dash, 1, 14, kzTxt, bgcolor = inSB ? color.new(color.teal, 60) : rowBg, text_color = color.white, text_size = size.small)
+    string tlTxt = (not na(tlUpSlope) ? (tlUpReact >= 1 ? "Rising ✓ " : "Rising ◌ ") : "") + (not na(tlDnSlope) ? (tlDnReact >= 1 ? "Falling ✓" : "Falling ◌") : "")
+    table.cell(dash, 0, 15, "Trendline", text_size = size.small, bgcolor = rowBg, text_color = color.white)
+    table.cell(dash, 1, 15, tlTxt == "" ? "none" : tlTxt, bgcolor = rowBg, text_color = color.white, text_size = size.small)
+    string volTxt = not timeframe.isintraday ? "—" : inVol ? "⚠ WINDOW" : "clear"
+    table.cell(dash, 0, 16, "Volatility win", text_size = size.small, bgcolor = rowBg, text_color = color.white,
+         tooltip = "SCHEDULED volatility window (fixed clock slots) — this is not a live economic calendar.")
+    table.cell(dash, 1, 16, volTxt, bgcolor = inVol and timeframe.isintraday ? color.new(color.red, 60) : rowBg,
+         text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 17, "◎ Machine", text_size = size.small, bgcolor = rowBg, text_color = color.white,
+         tooltip = "State machine per direction: 0 idle → 1 HTF context → 2 liquidity target → 3 raided → 4 POI → 5 MSS → 6 displacement → 7 FVG locked → 8 ENTRY.")
+    table.cell(dash, 1, 17, "L " + f_stTxt(upS.st) + " · S " + f_stTxt(dnS.st),
+         bgcolor = upS.st >= ST_MSS ? color.new(COL_BULL, 60) : dnS.st >= ST_MSS ? color.new(COL_BEAR, 60) : rowBg,
+         text_color = color.white, text_size = size.small)
+    string doTxt = not timeframe.isintraday or na(midOpen) ? "—" : close >= midOpen ? "above 00:00 ▲" : "below 00:00 ▼"
+    color  doBg  = not timeframe.isintraday or na(midOpen) ? rowBg : close >= midOpen ? color.new(COL_BULL, 75) : color.new(COL_BEAR, 75)
+    table.cell(dash, 0, 18, "Day open", text_size = size.small, bgcolor = rowBg, text_color = color.white)
+    table.cell(dash, 1, 18, doTxt, bgcolor = doBg, text_color = color.white, text_size = size.small)
+    color scBg = aPlusLong ? color.new(COL_BULL, 45) : aPlusShort ? color.new(COL_BEAR, 45) : rowBg
+    table.cell(dash, 0, 19, "Alignment", text_size = size.small, bgcolor = rowBg, text_color = color.white,
+         tooltip = "Narrative alignment 0–100 — NOT a win probability. Context 25 · Liquidity 25 · POI 20 · Trigger 20 · Execution 10. A+ requires the COMPLETE sequence plus a tier-1 POI; a high score alone never qualifies.")
+    table.cell(dash, 1, 19, "L:" + str.tostring(scoreLong) + "  S:" + str.tostring(scoreShort) +
+         (aPlusLong ? "  A+▲" : aPlusShort ? "  A+▼" : ""), bgcolor = scBg, text_color = color.white, text_size = size.small)
+    table.cell(dash, 0, 20, "Layers", text_size = size.small, bgcolor = rowBg, text_color = color.white)
+    table.cell(dash, 1, 20, "L " + f_layers(ctxL, liqL, poiL, trgL, exeL) + "\nS " + f_layers(ctxS, liqS, poiS, trgS, exeS),
+         bgcolor = rowBg, text_color = color.white, text_size = size.tiny)
+
+// ═══════════════════════════════════════ MODULE 19 · DEBUG PANEL (ARCH-8)
+// Shows the state machine per direction and the exact reason an entry was
+// blocked. This is the fastest way to answer "why did nothing print?".
+// ═════════════════════════════════════════════════════════════════════════════
+dbgPosition = dbgPos == "Bottom right" ? position.bottom_right : dbgPos == "Bottom left" ? position.bottom_left :
+     dbgPos == "Middle right" ? position.middle_right : position.top_left
+var table dbg = table.new(dbgPosition, 3, 11, border_color = color.new(color.gray, 70), border_width = 1)
+
+f_dbgRow(int r, string lbl, bool okL, bool okS) =>
+    table.cell(dbg, 0, r, lbl, text_size = size.tiny, bgcolor = rowBg, text_color = color.white, text_halign = text.align_left)
+    table.cell(dbg, 1, r, f_tick(okL), text_size = size.tiny, text_color = okL ? COL_BULL : color.new(color.white, 40),
+         bgcolor = okL ? color.new(COL_BULL, 82) : rowBg)
+    table.cell(dbg, 2, r, f_tick(okS), text_size = size.tiny, text_color = okS ? COL_BEAR : color.new(color.white, 40),
+         bgcolor = okS ? color.new(COL_BEAR, 82) : rowBg)
+    true
+
+if showDebug and barstate.islast
+    table.cell(dbg, 0, 0, "SETUP STATE", bgcolor = hdrBg, text_color = color.white, text_size = size.tiny)
+    table.cell(dbg, 1, 0, "LONG",  bgcolor = color.new(COL_BULL, 55), text_color = color.white, text_size = size.tiny)
+    table.cell(dbg, 2, 0, "SHORT", bgcolor = color.new(COL_BEAR, 55), text_color = color.white, text_size = size.tiny)
+    f_dbgRow(1, "1 HTF CONTEXT",  upS.st >= ST_CTX,   dnS.st >= ST_CTX)
+    f_dbgRow(2, "2 LIQ TARGET",   upS.st >= ST_TGT,   dnS.st >= ST_TGT)
+    f_dbgRow(3, "3 SWEEP/RAID",   upS.st >= ST_RAID,  dnS.st >= ST_RAID)
+    f_dbgRow(4, "4 POI",          upS.st >= ST_POI,   dnS.st >= ST_POI)
+    f_dbgRow(5, "5 MSS/CHoCH",    upS.st >= ST_MSS,   dnS.st >= ST_MSS)
+    f_dbgRow(6, "6 DISPLACEMENT", upS.st >= ST_DISP,  dnS.st >= ST_DISP)
+    f_dbgRow(7, "7 FVG LOCKED",   upS.st >= ST_FVG,   dnS.st >= ST_FVG)
+    f_dbgRow(8, "8 RETEST/ENTRY", upS.st >= ST_ENTRY, dnS.st >= ST_ENTRY)
+    f_dbgRow(9, "9 EMITTED",      finalLong,          finalShort)
+    table.cell(dbg, 0, 10, "BLOCKED", text_size = size.tiny, bgcolor = hdrBg, text_color = color.white, text_halign = text.align_left)
+    table.cell(dbg, 1, 10, blockLong  == "" ? "—" : blockLong,  text_size = size.tiny, bgcolor = rowBg,
+         text_color = color.new(color.white, 10), text_halign = text.align_left)
+    table.cell(dbg, 2, 10, blockShort == "" ? "—" : blockShort, text_size = size.tiny, bgcolor = rowBg,
+         text_color = color.new(color.white, 10), text_halign = text.align_left)
+
+// ══════════════════════════════════════════════════ MODULE 20 · ALERTS
+// Every v2 alert NAME is preserved so existing alerts keep working, but the
+// [SIGNAL] conditions now come from the TRADE ENGINE, so one bar can no longer
+// fire eleven of them at once (BUG-14). Names carry the decision layer:
+//   [SIGNAL] an entry was emitted · [TRIG] structure / delivery event
+//   [LIQ] liquidity taken · [POI] a POI / machine state changed
+//   [CTX] context window. Use "Once per bar close".
+// ═════════════════════════════════════════════════════════════════════════════
+// machine-state edges need a shadow of last bar's state (a UDT field has no
+// history operator), updated at the very end of the script
+var int upStPrev = 0
+var int dnStPrev = 0
+machPoiNew = (upS.st == ST_POI  and upStPrev != ST_POI)  or (dnS.st == ST_POI  and dnStPrev != ST_POI)
+machMssNew = (upS.st == ST_MSS  and upStPrev != ST_MSS)  or (dnS.st == ST_MSS  and dnStPrev != ST_MSS)
+machFvgNew = (upS.st == ST_FVG  and upStPrev != ST_FVG)  or (dnS.st == ST_FVG  and dnStPrev != ST_FVG)
+
+emitFem  = (finalLong and prodL == PR_FEM)  or (finalShort and prodS == PR_FEM)
+emitMach = (finalLong and prodL == PR_MACH) or (finalShort and prodS == PR_MACH)
+emitSD   = (finalLong and prodL == PR_SD)   or (finalShort and prodS == PR_SD)
+emitCRT  = (finalLong and prodL == PR_CRT)  or (finalShort and prodS == PR_CRT)
+emitTBS  = (finalLong and prodL == PR_TBS)  or (finalShort and prodS == PR_TBS)
+emitTL   = (finalLong and prodL == PR_TL)   or (finalShort and prodS == PR_TL)
+emitHtf  = (finalLong and (hCandCrtLong or hCandTbsLong) and prodL >= PR_CRT and prodL <= PR_TBS) or
+     (finalShort and (hCandCrtShort or hCandTbsShort) and prodS >= PR_CRT and prodS <= PR_TBS)
+emitPA1  = (finalLong and prodL == PR_PA and pa1Long) or (finalShort and prodS == PR_PA and pa1Short)
+emitPA2  = (finalLong and prodL == PR_PA and pa2Long) or (finalShort and prodS == PR_PA and pa2Short)
+emitPA3  = (finalLong and prodL == PR_PA and pa3Long) or (finalShort and prodS == PR_PA and pa3Short)
+emitPA4  = (finalLong and prodL == PR_PA and pa4Long) or (finalShort and prodS == PR_PA and pa4Short)
+
+// -- [SIGNAL] entries (the TRADE ENGINE is the only source)
+alertcondition(finalLong and aPlusLong,        "[SIGNAL] A+ LONG (all 5 layers)",  "A+ LONG — HTF context → liquidity target → raid → POI → MSS → displacement → FVG → retest on {{ticker}} {{interval}}")
+alertcondition(finalShort and aPlusShort,      "[SIGNAL] A+ SHORT (all 5 layers)", "A+ SHORT — HTF context → liquidity target → raid → POI → MSS → displacement → FVG → retest on {{ticker}} {{interval}}")
+alertcondition(finalLong and scoreLong >= 80,  "[SIGNAL] ★ 80+ alignment LONG",    "High-alignment (80+) LONG on {{ticker}} {{interval}} — alignment, NOT win probability")
+alertcondition(finalShort and scoreShort >= 80, "[SIGNAL] ★ 80+ alignment SHORT",  "High-alignment (80+) SHORT on {{ticker}} {{interval}} — alignment, NOT win probability")
+alertcondition(finalLong,                      "[SIGNAL] Any LONG",                "LONG signal on {{ticker}} {{interval}}")
+alertcondition(finalShort,                     "[SIGNAL] Any SHORT",               "SHORT signal on {{ticker}} {{interval}}")
+alertcondition(finalLong,                      "[SIGNAL] Trade Engine LONG",       "TRADE ENGINE LONG on {{ticker}} {{interval}} — entry {{close}}")
+alertcondition(finalShort,                     "[SIGNAL] Trade Engine SHORT",      "TRADE ENGINE SHORT on {{ticker}} {{interval}} — entry {{close}}")
+alertcondition(emitFem,                        "[SIGNAL] ◎ Fractal entry model",   "FEM executed (HTF POI → raid → LTF MSS → displacement → LTF FVG retest) on {{ticker}} {{interval}}")
+alertcondition(emitMach,                       "[SIGNAL] ★ Sweep + Zone entry",    "Sweep + POI + MSS narrative entry on {{ticker}} {{interval}}")
+alertcondition(emitSD,                         "[SIGNAL] S/D zone 50% entry",      "Supply/Demand 50% retest entry on {{ticker}} {{interval}}")
+alertcondition(emitPA1,                        "[SIGNAL] ① Breakout Rejection Trap", "① Breakout Rejection Trap entry on {{ticker}} {{interval}}")
+alertcondition(emitPA2,                        "[SIGNAL] ② Pin Bar Liquidity Trap", "② Pin Bar Liquidity Trap entry on {{ticker}} {{interval}}")
+alertcondition(emitPA3,                        "[SIGNAL] ③ Inside Bar Breakout",   "③ Inside Bar Breakout entry on {{ticker}} {{interval}}")
+alertcondition(emitPA4,                        "[SIGNAL] ④ Doji Reversal",         "④ Doji Reversal entry on {{ticker}} {{interval}}")
+alertcondition(emitTL,                         "[SIGNAL] ⑪ Trendline sweep entry", "Trendline liquidity sweep entry on {{ticker}} {{interval}}")
+alertcondition(emitCRT,                        "[SIGNAL] ⑫ CRT entry",             "CRT 3-candle model entry on {{ticker}} {{interval}}")
+alertcondition(emitTBS,                        "[SIGNAL] ⑬ Turtle soup entry",     "Turtle soup extreme-sweep entry on {{ticker}} {{interval}}")
+alertcondition(emitHtf,                        "[SIGNAL] HTF CRT / Turtle soup",   "HTF CRT / Turtle-soup entry on {{ticker}} {{interval}}")
+// -- [TRIG] structure / delivery events (information, not entries)
+alertcondition(eChochUp or eChochDn,           "[TRIG] External CHoCH",            "EXTERNAL CHoCH — protected swing broken with displacement on {{ticker}} {{interval}}")
+alertcondition(eBosUp or eBosDn,               "[TRIG] External BOS",              "EXTERNAL BOS on {{ticker}} {{interval}}")
+alertcondition(chochUp or chochDn,             "[TRIG] Internal CHoCH",            "Internal CHoCH (MSS grade) on {{ticker}} {{interval}}")
+alertcondition(bosUp or bosDn,                 "[TRIG] Internal BOS",              "Internal BOS on {{ticker}} {{interval}}")
+alertcondition(cisdUp or cisdDn,               "[TRIG] CISD",                      "Change in state of delivery on {{ticker}} {{interval}}")
+alertcondition((ifcBull or ifcBear) and confirmed, "[TRIG] IFC candle",            "IFC candle (pool taken + displacement close) on {{ticker}} {{interval}}")
+// -- [LIQ] liquidity events
+alertcondition(eqhSwept or eqlSwept,           "[LIQ] EQH/EQL pool swept",         "Equal highs/lows pool RAIDED on {{ticker}} {{interval}}")
+alertcondition(sesHiRaid or sesLoRaid,         "[LIQ] Session high/low raided",    "Session level RAIDED (taken, closed back inside) on {{ticker}} {{interval}}")
+alertcondition(sesHiBroke or sesLoBroke,       "[LIQ] Session high/low broken",    "Session level BROKEN (close beyond — expansion) on {{ticker}} {{interval}}")
+alertcondition(tlUpBreak or tlDnBreak,         "[LIQ] Trendline break",            "Dynamic trendline broken on {{ticker}} {{interval}}")
+alertcondition(poolRaids > 0,                  "[LIQ] Liquidity pool raided",      "A tracked liquidity pool was RAIDED on {{ticker}} {{interval}}")
+// -- [POI] POI / machine state
+alertcondition(touchNextBuy,                   "[POI] Price entered next BUY zone",  "Price entered the next BUY (demand) POI on {{ticker}} {{interval}}")
+alertcondition(touchNextSell,                  "[POI] Price entered next SELL zone", "Price entered the next SELL (supply) POI on {{ticker}} {{interval}}")
+alertcondition(machPoiNew,                     "[POI] FEM: HTF POI tapped",        "Setup reached state 4 — POI confirmed at the raid, awaiting the LTF MSS on {{ticker}} {{interval}}")
+alertcondition(machMssNew,                     "[POI] FEM: LTF shift confirmed",   "Setup reached state 5 — LTF MSS / CHoCH confirmed, awaiting displacement on {{ticker}} {{interval}}")
+alertcondition(machFvgNew,                     "[POI] FEM: LTF FVG locked",        "Setup reached state 7 — execution FVG locked, awaiting its retest on {{ticker}} {{interval}}")
+// -- [CTX] context windows
+alertcondition(inVol and not inVol[1],         "[CTX] Volatility window started",  "Scheduled volatility window started on {{ticker}} — entries suppressed")
+alertcondition(not inVol and inVol[1],         "[CTX] Volatility window ended",    "Scheduled volatility window ended on {{ticker}} — entries re-enabled")
+
+// shadow update: LAST statement in the script, after every consumer above
+if confirmed
+    upStPrev := upS.st
+    dnStPrev := dnS.st

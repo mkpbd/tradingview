@@ -1,0 +1,1137 @@
+//@version=6
+// ─────────────────────────────────────────────────────────────────────────────
+// RETAIL PRICE-ACTION FORENSIC LAYER v1 — DETECTION · VALIDATION · MARKING ONLY
+// Companion overlay for "Liquidity + S/D + Price Action Setups [MTF] v5.8 CTT"
+// (11.liquidty+supply-v5.8-ctt.pine). Load BOTH on the same chart.
+//
+// WHY THIS IS A SEPARATE SCRIPT, NOT AN EDIT TO FILE 11
+// File 11 compiles at ≈ 99 550 of TradingView's 100 256 compiled-token cap
+// (measured 2026-09-09: 101 135 with MODULE 16B, MODULE 16B ≈ 1 500 removed)
+// and it already sits at the CE10295 global-scope limit. The five systems asked
+// for here — retail SUPPORT, RESISTANCE, DEMAND, SUPPLY and PRICE PATTERNS —
+// cost far more than the ~700 tokens left, and the brief forbids cutting any
+// other subsystem to make room. Running them as a second indicator gives the
+// layer its own full budget and leaves file 11 byte-for-byte untouched, which
+// is the strictest reading of "do not modify anything else". This is the same
+// decision file 10 (ICT layer) took for the same reason.
+//
+// WHAT FILE 11 ALREADY HAS, AND HOW THIS LAYER RELATES TO IT
+//   · "Support / Resistance" in file 11 = the LAST internal swing high / low
+//     (plot lastRes / lastSup, MODULE 17) — one level per side, no touches, no
+//     strength, no lifecycle. Not retail S/R. Left untouched.
+//   · "Supply / Demand" in file 11 = MODULE 9 displacement + FVG zones (plus
+//     rejection blocks) with T1/T2/T3 tiers feeding the TRADE ENGINE. That is
+//     an ICT imbalance POI, not a retail rally-base-rally zone. Left untouched.
+//   · "Patterns" in file 11 = MODULE 11 producers (trap engine, CRT, TBS, TWS)
+//     plus pin / engulfing as CONFIRMATION candles. No classical chart patterns.
+//     Left untouched.
+// This layer adds the RETAIL reading of the same chart: multi-touch S/R zones,
+// RBR / DBR / DBD / RBD supply-demand bases, classical reversal + continuation
+// patterns, and zone-located candle patterns. It reads nothing from file 11
+// and writes nothing file 11 can read. It emits NO buy / sell, no entry, no
+// stop, no target.
+//
+// NON-REPAINTING
+//   · Every state change is inside barstate.isconfirmed.
+//   · Swings are ta.pivothigh / ta.pivotlow(pivLen, pivLen): a swing is read
+//     only pivLen bars after it printed. Box LEFT edges are back-dated to the
+//     swing (geometry); the level / zone / pattern is REGISTERED on the bar
+//     that confirmed it, and its label sits on that bar — the chart never
+//     implies the mark was known earlier.
+//   · A pattern is marked only on the CONFIRMED close through its neckline /
+//     boundary, never on the pivot geometry alone.
+//   · No request.security. No lookahead. No HTF.
+//
+// OBJECTS
+//   S/R: one box per level, ≤ 2 × maxLevels. S/D: one box per zone, ≤ 2 ×
+//   maxZones. Patterns: bounded sets (lines + label), oldest set deleted.
+//   Candle chips: bounded ring. Last-bar summary: one label, rebuilt in place.
+//   Nothing is created per bar without lifecycle control.
+//
+// COMPILE: cannot be compiled locally — verify by pasting into the Pine Editor.
+// Educational tool. Not financial advice. No claim of accuracy or profitability.
+// ─────────────────────────────────────────────────────────────────────────────
+indicator("Retail Price-Action Forensic Layer v1", "RET-PA v1", overlay = true,
+     max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500, max_bars_back = 200)
+
+// ═════════════════════════════════════════════════════════ MODULE 1 · INPUTS
+grpRC = "① Core"
+ret_atrLen = input.int(14, "ATR length", minval = 1, group = grpRC)
+ret_pivLen = input.int(5, "Swing pivot length (S/R touches · pattern swings)", minval = 2, maxval = 30, group = grpRC,
+     tooltip = "A swing is confirmed this many bars after it prints. Larger = fewer, bigger swings.")
+ret_sens   = input.string("Normal", "Sensitivity", options = ["Strict", "Normal", "Loose"], group = grpRC,
+     tooltip = "Strict: thresholds x1.3, tolerances x0.75 (fewer marks). Loose: thresholds x0.75, tolerances x1.3 (more marks).")
+ret_minCls = input.string("NORMAL", "Minimum strength to draw", options = ["WEAK", "NORMAL", "STRONG", "MAJOR"], group = grpRC,
+     tooltip = "Applies to support / resistance levels and to demand / supply zones at creation.")
+
+grpSR = "② Support / Resistance"
+ret_srOn   = input.bool(true, "Detect support / resistance", group = grpSR)
+ret_srMinT = input.int(2, "Minimum touches to draw a level", minval = 1, maxval = 6, group = grpSR,
+     tooltip = "Touches = confirmed swing legs merged into the level + edge-triggered tests (wick into the zone, close held). A flipped level (S>R / R>S) is drawn at once.")
+ret_srTol  = input.float(0.5, "Merge distance (ATR x)", step = 0.05, minval = 0.1, group = grpSR,
+     tooltip = "A new swing this close to an existing level of the same side is a TOUCH of that level, not a new level. The level re-centres on the mean of its legs.")
+ret_srHalf = input.float(0.20, "Zone half-height (ATR x)", step = 0.05, minval = 0.05, group = grpSR)
+ret_srMax  = input.int(6, "Max levels per side", minval = 2, maxval = 12, group = grpSR,
+     tooltip = "Over the cap the WEAKEST, then the OLDEST level is dropped.")
+ret_srBrk  = input.float(0.25, "Break = close beyond the zone by (ATR x)", step = 0.05, minval = 0.0, group = grpSR)
+ret_srRecl = input.int(3, "Failed break: reclaim within (bars)", minval = 1, maxval = 10, group = grpSR,
+     tooltip = "A close beyond the zone opens a PENDING break. A close back inside within this many bars = FAILED BREAK (the level gets stronger). Otherwise the break is confirmed.")
+ret_srWeak = input.int(4, "Tests before a level is WEAKENING", minval = 2, maxval = 10, group = grpSR)
+ret_srLife = input.int(400, "Level expires after (bars since last touch)", minval = 50, group = grpSR)
+ret_srFlip = input.bool(true, "Flip a broken level (support > resistance, resistance > support)", group = grpSR)
+ret_srKeep = input.int(30, "Keep a broken level dimmed for (bars)", minval = 0, maxval = 300, group = grpSR)
+
+grpSD = "③ Demand / Supply (rally-base-rally · drop-base-rally · ...)"
+ret_sdOn      = input.bool(true, "Detect demand / supply zones", group = grpSD)
+ret_sdBaseMax = input.int(4, "Max base candles", minval = 1, maxval = 10, group = grpSD)
+ret_sdBaseRng = input.float(0.8, "Base candle range <= ATR x", step = 0.1, minval = 0.2, group = grpSD)
+ret_sdDep     = input.float(1.2, "Departure body >= ATR x", step = 0.1, minval = 0.5, group = grpSD,
+     tooltip = "The candle that LEAVES the base: body at least this many ATR, closing in the outer 30 % of its own range.")
+ret_sdLeave   = input.float(0.5, "Departure must close beyond the base by (ATR x)", step = 0.1, minval = 0.0, group = grpSD)
+ret_sdMaxH    = input.float(1.5, "Max zone height (ATR x)", step = 0.25, minval = 0.5, group = grpSD)
+ret_sdMax     = input.int(5, "Max zones per side", minval = 1, maxval = 12, group = grpSD)
+ret_sdFt      = input.int(5, "Follow-through checked after (bars)", minval = 2, maxval = 30, group = grpSD)
+ret_sdFtAtr   = input.float(1.5, "Follow-through distance from the zone (ATR x)", step = 0.25, minval = 0.5, group = grpSD,
+     tooltip = "Checked ONCE, this many bars after creation: did price travel at least this far away? Upgrades the zone's strength (forward-only state change).")
+ret_sdWeak    = input.int(3, "Tests before a zone is WEAKENING", minval = 1, maxval = 10, group = grpSD)
+ret_sdBrk     = input.float(0.10, "Break = close beyond the distal edge by (ATR x)", step = 0.05, minval = 0.0, group = grpSD)
+ret_sdLife    = input.int(300, "Zone expires after (bars)", minval = 50, group = grpSD)
+ret_sdKeep    = input.int(20, "Keep a broken zone dimmed for (bars)", minval = 0, maxval = 300, group = grpSD)
+ret_sdHideSR  = input.bool(true, "Hide a support / resistance level covered by a live demand / supply zone", group = grpSD,
+     tooltip = "The same price area is never labelled Support + Demand or Resistance + Supply at once. The zone wins; the level stays in the registry and re-appears when the zone dies.")
+
+grpPT = "④ Retail price patterns"
+ret_ptRev   = input.bool(true, "Reversal: double / triple top-bottom, head & shoulders", group = grpPT)
+ret_ptCont  = input.bool(true, "Continuation: flags, pennants, triangles, rectangles", group = grpPT)
+ret_ptCdl   = input.bool(true, "Candle patterns (engulfing · hammer · shooting star · inside · outside · breakout · failed break)", group = grpPT)
+ret_cdlAtZ  = input.bool(true, "Candle patterns only at a live zone / level", group = grpPT)
+ret_ptTol   = input.float(0.35, "Similar-price tolerance (ATR x)", step = 0.05, minval = 0.1, group = grpPT)
+ret_ptSep   = input.int(5, "Minimum bars between pattern swings", minval = 2, group = grpPT)
+ret_ptDepth = input.float(1.0, "Reversal: minimum depth to the neckline (ATR x)", step = 0.25, minval = 0.25, group = grpPT)
+ret_ptHead  = input.float(0.5, "Head & shoulders: head beyond shoulders by >= (ATR x)", step = 0.1, minval = 0.1, group = grpPT)
+ret_ptWin   = input.int(60, "Pattern swings must all sit inside (bars)", minval = 15, group = grpPT)
+ret_ptPole  = input.float(2.5, "Flag / pennant: pole >= (ATR x)", step = 0.25, minval = 1.0, group = grpPT)
+ret_ptPoleB = input.int(10, "Pole measured over (bars before the first swing)", minval = 3, maxval = 40, group = grpPT)
+ret_ptMax   = input.int(10, "Max pattern drawings kept", minval = 2, maxval = 30, group = grpPT)
+ret_cdlCd   = input.int(3, "Candle chip cooldown per side (bars)", minval = 0, maxval = 20, group = grpPT)
+
+grpUI = "⑤ Display"
+ret_uiSz    = input.string("Tiny", "Text size", options = ["Tiny", "Small", "Normal"], group = grpUI)
+ret_showTxt = input.bool(true, "Zone text (kind · strength · tests · state)", group = grpUI)
+ret_summary = input.bool(true, "Last-bar summary label", group = grpUI)
+
+// ═══════════════════════════════════════ MODULE 2 · CONSTANTS + HELPERS
+var float RET_STRONG_CLOSE = 0.30   // close in the outer 30 % of the candle
+var float RET_BRK_BODY     = 0.5    // min body (ATR x) for a breakout / neckline close
+var float RET_WICK_ATR     = 0.3    // a rejection wick worth counting
+var float RET_PIN_OPP      = 0.35   // pin bar: opposite wick <= 35 % of range
+var float RET_NEAR_ATR     = 0.15   // "price is at the zone" tolerance
+var float RET_MIN_H_ATR    = 0.15   // minimum zone height
+var float RET_FLAG_RETR    = 0.62   // a flag may retrace at most this much of its pole
+var int   RET_RING         = 8      // swing memory per side
+var int   RET_CDL_MAX      = 80     // candle chips kept
+var color RCOL_SUP  = #089981
+var color RCOL_RES  = #f23645
+var color RCOL_DEM  = #00bcd4
+var color RCOL_SUPP = #ff9800
+var color RCOL_PAT  = #ab47bc
+var color RCOL_NEU  = #787b86
+
+// strength classes — a classification, never a probability
+var int RC_WEAK   = 1
+var int RC_NORMAL = 2
+var int RC_STRONG = 3
+var int RC_MAJOR  = 4
+
+// pattern key slots (one confirmed mark per swing set per type)
+var int PT_DB   = 0
+var int PT_DT   = 1
+var int PT_TB   = 2
+var int PT_TT   = 3
+var int PT_HS   = 4
+var int PT_IHS  = 5
+var int PT_CONT = 6
+
+ret_sz   = ret_uiSz == "Normal" ? size.normal : ret_uiSz == "Small" ? size.small : size.tiny
+ret_kT   = ret_sens == "Strict" ? 1.3 : ret_sens == "Loose" ? 0.75 : 1.0   // thresholds
+ret_kTol = ret_sens == "Strict" ? 0.75 : ret_sens == "Loose" ? 1.3 : 1.0   // tolerances
+
+f_ret_clsTxt(int c) => c == RC_MAJOR ? "MAJOR" : c == RC_STRONG ? "STRONG" : c == RC_NORMAL ? "NORMAL" : "WEAK"
+f_ret_clsMin() => ret_minCls == "MAJOR" ? RC_MAJOR : ret_minCls == "STRONG" ? RC_STRONG : ret_minCls == "NORMAL" ? RC_NORMAL : RC_WEAK
+
+// ═══════════════════════════════ MODULE 3 · CORE SERIES + CANDLE ANATOMY
+ret_atr   = ta.atr(ret_atrLen)
+ret_body  = math.abs(close - open)
+ret_rng   = high - low
+ret_upW   = high - math.max(open, close)
+ret_dnW   = math.min(open, close) - low
+ret_bull  = close > open
+ret_bear  = close < open
+ret_conf  = barstate.isconfirmed
+ret_strongUp = ret_rng > 0 and close >= high - RET_STRONG_CLOSE * ret_rng
+ret_strongDn = ret_rng > 0 and close <= low + RET_STRONG_CLOSE * ret_rng
+ret_bodyOk   = ret_body >= RET_BRK_BODY * ret_atr
+
+ret_bullPin = ret_rng > 0 and ret_dnW >= 2 * ret_body and ret_dnW >= 0.45 * ret_rng and ret_upW <= RET_PIN_OPP * ret_rng and ret_dnW >= RET_WICK_ATR * ret_atr
+ret_bearPin = ret_rng > 0 and ret_upW >= 2 * ret_body and ret_upW >= 0.45 * ret_rng and ret_dnW <= RET_PIN_OPP * ret_rng and ret_upW >= RET_WICK_ATR * ret_atr
+ret_bullEng = ret_bull and close[1] < open[1] and close >= open[1] and open <= close[1] and ret_body > math.abs(close[1] - open[1])
+ret_bearEng = ret_bear and close[1] > open[1] and close <= open[1] and open >= close[1] and ret_body > math.abs(close[1] - open[1])
+ret_inside  = high <= high[1] and low >= low[1]
+ret_outside = high > high[1] and low < low[1]
+
+// confirmed swings — the only structural input of this layer
+ret_ph = ta.pivothigh(high, ret_pivLen, ret_pivLen)
+ret_pl = ta.pivotlow(low, ret_pivLen, ret_pivLen)
+// reaction AFTER the swing (the pivLen bars that confirmed it) — known now, not earlier
+ret_reactHi = ta.highest(high, ret_pivLen)
+ret_reactLo = ta.lowest(low, ret_pivLen)
+// the swing candle's own rejection wick
+ret_pivWickL = math.min(open[ret_pivLen], close[ret_pivLen]) - low[ret_pivLen]
+ret_pivWickH = high[ret_pivLen] - math.max(open[ret_pivLen], close[ret_pivLen])
+// pole memory for flags / pennants: the extreme BEFORE the swing
+ret_preLo = ta.lowest(low, ret_ptPoleB)[ret_pivLen + 1]
+ret_preHi = ta.highest(high, ret_ptPoleB)[ret_pivLen + 1]
+// follow-through window for demand / supply
+ret_ftHi = ta.highest(high, ret_sdFt)
+ret_ftLo = ta.lowest(low, ret_sdFt)
+
+// ═══════════════════════════════════ MODULE 4 · REGISTRIES (UDTs + ARRAYS)
+// A Pine function may mutate a UDT field or an array, never assign a global
+// scalar — so every piece of mutable state lives in one of these.
+type RetLvl
+    box    bx       = na
+    bool   isSup    = true
+    float  px       = na
+    float  top      = na
+    float  bot      = na
+    float  half     = na     // frozen half-height (ATR at creation)
+    int    touches  = 1      // confirmed swing legs merged into the level
+    int    tests    = 0      // edge-triggered wick tests
+    int    firstBar = na
+    int    lastBar  = na
+    float  react    = 0.0    // best post-swing reaction, ATR multiples
+    bool   wick     = false  // a rejection wick at one of its legs
+    int    flips    = 0      // role flips (S>R / R>S)
+    int    failBrk  = 0      // failed breaks (reclaimed)
+    int    state    = 0      // 0 candidate · 1 fresh · 2 tested · 3 weakening · 4 pending break · 5 broken
+    int    brkBar   = na
+    int    cls      = 1
+    string txt      = ""
+    bool   inside   = false  // edge trigger for tests
+
+type RetZone
+    box    bx       = na
+    bool   isDem    = true
+    float  top      = na
+    float  bot      = na
+    int    bornBar  = na
+    int    lastBar  = na
+    int    base     = 1      // base candles
+    float  dep      = 0.0    // departure body, ATR multiples
+    bool   rev      = false  // DBR / RBD (reversal) vs RBR / DBD (continuation)
+    string kind     = ""
+    bool   ft       = false  // follow-through confirmed
+    bool   ftDone   = false
+    int    tests    = 0
+    int    state    = 0      // 0 fresh · 1 tested · 2 weakening · 3 broken
+    int    brkBar   = na
+    int    cls      = 1
+    string txt      = ""
+    bool   inside   = false
+
+type RetMem
+    // this-bar flags (reset at the top of every confirmed bar)
+    bool   atSup   = false
+    bool   atRes   = false
+    bool   atDem   = false
+    bool   atSupp  = false
+    bool   brkUp   = false   // a resistance / supply zone was closed through upward with a real body
+    bool   brkDn   = false
+    bool   failUp  = false   // a support break FAILED (reclaimed) — bullish
+    bool   failDn  = false
+    bool   evLvlNew = false
+    bool   evLvlBrk = false
+    bool   evLvlFail = false
+    bool   evZNew  = false
+    bool   evZTest = false
+    bool   evZBrk  = false
+    bool   evRev   = false
+    bool   evCont  = false
+    bool   evCdl   = false
+    string patName = ""
+    int    ptTmp   = 0       // lines pushed for the pattern set being built
+    int    cdlUpBar = na
+    int    cdlDnBar = na
+    label  sumLb   = na
+
+var ret_lvls = array.new<RetLvl>()
+var ret_zs   = array.new<RetZone>()
+var RetMem ret_m = RetMem.new()
+// swing rings (price · bar · pre-swing extreme for the pole test)
+var ret_phP   = array.new<float>()
+var ret_phB   = array.new<int>()
+var ret_phPre = array.new<float>()
+var ret_plP   = array.new<float>()
+var ret_plB   = array.new<int>()
+var ret_plPre = array.new<float>()
+// pattern drawings: sets of N lines + 1 label, oldest set deleted first
+var ret_ptLn  = array.new<line>()
+var ret_ptLb  = array.new<label>()
+var ret_ptCnt = array.new<int>()
+var ret_ptKey = array.new<int>(7, -1)
+// candle chips
+var ret_cdl   = array.new<label>()
+
+// ═══════════════════════════════ MODULE 5 · SUPPORT / RESISTANCE ENGINE
+// A level is born from a CONFIRMED swing. A later swing of the same side inside
+// the merge distance is a TOUCH (the level re-centres on the mean of its legs);
+// a wick into the zone that closes held is a TEST. A close beyond the zone is a
+// PENDING break; a close back inside within ret_srRecl bars is a FAILED break
+// (the level strengthens); otherwise the break is CONFIRMED and the level
+// either flips role (S>R / R>S) or is retired. A swing of the OPPOSITE kind at a
+// broken / pending level is the classic role flip and re-uses the same object.
+// A swing of the opposite kind at an ACTIVE level is noise inside the zone and
+// creates nothing.
+f_ret_lvlCls(RetLvl l) =>
+    int sc = math.min(l.touches, 5) * 2 + math.min(l.tests, 3)
+    sc += l.react >= 2.0 ? 2 : l.react >= 1.0 ? 1 : 0
+    sc += l.wick ? 1 : 0
+    sc += math.min(l.flips, 1) + math.min(l.failBrk, 2)
+    if l.tests >= ret_srWeak
+        sc -= 2
+    if bar_index - nz(l.lastBar, bar_index) > ret_srLife / 2
+        sc -= 1
+    sc >= 10 ? RC_MAJOR : sc >= 7 ? RC_STRONG : sc >= 4 ? RC_NORMAL : RC_WEAK
+
+f_ret_lvlTxt(RetLvl l) =>
+    string s = (l.isSup ? "SUPPORT" : "RESISTANCE") + " · " + f_ret_clsTxt(l.cls) + " · x" + str.tostring(l.touches + l.tests)
+    if l.flips > 0
+        s += l.isSup ? " · R>S" : " · S>R"
+    if l.failBrk > 0
+        s += " · failed brk x" + str.tostring(l.failBrk)
+    s += l.state == 3 ? " · WEAKENING" : l.state == 4 ? " · BREAK?" : l.state == 5 ? " · BROKEN" : l.state == 2 ? " · tested" : " · fresh"
+    s
+
+f_ret_lvlDraw(RetLvl l) =>
+    color  c   = l.isSup ? RCOL_SUP : RCOL_RES
+    string tx  = ret_showTxt ? f_ret_lvlTxt(l) : ""
+    int    tr  = l.state == 5 ? 96 : l.cls == RC_MAJOR ? 84 : l.cls == RC_STRONG ? 88 : l.cls == RC_NORMAL ? 91 : 94
+    int    btr = l.state >= 4 ? 70 : l.cls >= RC_STRONG ? 30 : 55
+    string st  = l.state >= 4 ? line.style_dashed : line.style_solid
+    if na(l.bx)
+        l.bx := box.new(l.firstBar, l.top, bar_index + 1, l.bot,
+             border_color = color.new(c, btr), bgcolor = color.new(c, tr), border_style = st,
+             border_width = l.cls == RC_MAJOR ? 2 : 1,
+             text = tx, text_size = ret_sz, text_color = color.new(c, 15),
+             text_halign = text.align_right, text_valign = l.isSup ? text.align_bottom : text.align_top)
+        l.txt := tx
+        ret_m.evLvlNew := true
+    else if tx != l.txt
+        box.set_text(l.bx, tx)
+        box.set_bgcolor(l.bx, color.new(c, tr))
+        box.set_border_color(l.bx, color.new(c, btr))
+        box.set_border_style(l.bx, st)
+        box.set_border_width(l.bx, l.cls == RC_MAJOR ? 2 : 1)
+        l.txt := tx
+    true
+
+f_ret_lvlKill(int i) =>
+    RetLvl l = array.get(ret_lvls, i)
+    if not na(l.bx)
+        box.delete(l.bx)
+    array.remove(ret_lvls, i)
+    true
+
+// register a confirmed swing: merge · flip · or create
+f_ret_lvlPush(float px, int pb, float react, bool wick, bool isSup) =>
+    float tol  = ret_srTol * ret_kTol * ret_atr
+    int   hit  = -1
+    int   opp  = -1
+    bool  blk  = false
+    float best = na
+    if array.size(ret_lvls) > 0
+        for i = 0 to array.size(ret_lvls) - 1
+            RetLvl l = array.get(ret_lvls, i)
+            float d = math.abs(px - l.px)
+            if d <= tol
+                if l.isSup == isSup and l.state < 5
+                    if na(best) or d < best
+                        best := d
+                        hit  := i
+                else if l.isSup != isSup
+                    bool qual = l.touches + l.tests >= ret_srMinT or l.flips > 0
+                    if l.state >= 4
+                        if qual
+                            opp := i
+                    else
+                        blk := true
+    if hit >= 0
+        RetLvl l = array.get(ret_lvls, hit)
+        l.px      := (l.px * l.touches + px) / (l.touches + 1)
+        l.touches += 1
+        l.lastBar := bar_index
+        l.react   := math.max(l.react, react)
+        l.wick    := l.wick or wick
+        l.top     := l.px + l.half
+        l.bot     := l.px - l.half
+        if l.state <= 1
+            l.state := 2
+        if not na(l.bx)
+            box.set_top(l.bx, l.top)
+            box.set_bottom(l.bx, l.bot)
+    else if opp >= 0
+        RetLvl l = array.get(ret_lvls, opp)
+        l.isSup   := isSup
+        l.flips   += 1
+        l.touches := 1
+        l.tests   := 0
+        l.state   := 1
+        l.brkBar  := na
+        l.px      := px
+        l.top     := px + l.half
+        l.bot     := px - l.half
+        l.react   := react
+        l.wick    := wick
+        l.lastBar := bar_index
+        l.inside  := false
+        if not na(l.bx)
+            box.delete(l.bx)
+            l.bx := na
+    else if not blk
+        float half = ret_srHalf * ret_atr
+        array.push(ret_lvls, RetLvl.new(isSup = isSup, px = px, top = px + half, bot = px - half, half = half,
+             touches = 1, firstBar = pb, lastBar = bar_index, react = react, wick = wick, state = 0))
+    true
+
+// drop the weakest, then the oldest, above the per-side cap
+f_ret_lvlCap(bool sup) =>
+    int cnt = 0
+    if array.size(ret_lvls) > 0
+        for i = 0 to array.size(ret_lvls) - 1
+            RetLvl l = array.get(ret_lvls, i)
+            if l.isSup == sup and l.state < 5
+                cnt += 1
+    while cnt > ret_srMax
+        int   ix = -1
+        float wr = na
+        for i = 0 to array.size(ret_lvls) - 1
+            RetLvl l = array.get(ret_lvls, i)
+            if l.isSup == sup and l.state < 5
+                float r = l.cls * 1000000.0 + nz(l.lastBar, 0)
+                if na(wr) or r < wr
+                    wr := r
+                    ix := i
+        if ix < 0
+            break
+        f_ret_lvlKill(ix)
+        cnt -= 1
+    cnt
+
+// the per-bar lifecycle of every level (confirmed bars only)
+f_ret_srBar() =>
+    float brk  = ret_srBrk * ret_atr
+    float near = RET_NEAR_ATR * ret_atr
+    int   cmin = f_ret_clsMin()
+    if array.size(ret_lvls) > 0
+        for i = array.size(ret_lvls) - 1 to 0
+            RetLvl l = array.get(ret_lvls, i)
+            bool gone = bar_index - nz(l.lastBar, bar_index) > ret_srLife or (l.state == 5 and bar_index - nz(l.brkBar, bar_index) > ret_srKeep)
+            if gone
+                f_ret_lvlKill(i)
+                continue
+            if l.state < 5
+                bool broke = l.isSup ? close < l.bot - brk : close > l.top + brk
+                bool back  = l.isSup ? close >= l.bot : close <= l.top
+                bool inZ   = l.isSup ? (low <= l.top and close >= l.bot - brk) : (high >= l.bot and close <= l.top + brk)
+                bool away  = l.isSup ? low > l.top : high < l.bot
+                if l.state == 4
+                    if back
+                        l.failBrk += 1
+                        l.state   := 2
+                        l.brkBar  := na
+                        l.lastBar := bar_index
+                        ret_m.evLvlFail := true
+                        if l.isSup
+                            ret_m.failUp := true
+                        else
+                            ret_m.failDn := true
+                    else if bar_index - l.brkBar >= ret_srRecl
+                        bool qual = l.touches + l.tests >= ret_srMinT or l.flips > 0
+                        if not qual
+                            // an undrawn candidate that broke is noise — drop it
+                            f_ret_lvlKill(i)
+                            continue
+                        ret_m.evLvlBrk := true
+                        if ret_srFlip
+                            l.isSup   := not l.isSup
+                            l.flips   += 1
+                            l.touches := 1
+                            l.tests   := 0
+                            l.state   := 1
+                            l.brkBar  := na
+                            l.lastBar := bar_index
+                            l.inside  := false
+                            if not na(l.bx)
+                                box.delete(l.bx)
+                                l.bx := na
+                        else
+                            l.state := 5
+                            if not na(l.bx)
+                                box.set_right(l.bx, bar_index)
+                else
+                    if broke
+                        l.state  := 4
+                        l.brkBar := bar_index
+                        if ret_bodyOk
+                            if l.isSup and ret_strongDn
+                                ret_m.brkDn := true
+                            if not l.isSup and ret_strongUp
+                                ret_m.brkUp := true
+                    else
+                        if inZ and not l.inside
+                            l.inside := true
+                            // a level registered / merged THIS bar does not also get a test for it
+                            if l.lastBar != bar_index
+                                l.tests   += 1
+                                l.lastBar := bar_index
+                                if l.state < 2 and l.touches + l.tests >= 2
+                                    l.state := 2
+                                if l.tests >= ret_srWeak
+                                    l.state := 3
+                        if away
+                            l.inside := false
+            // classification · eligibility · S/D shadow · drawing
+            l.cls := f_ret_lvlCls(l)
+            bool elig = (l.touches + l.tests >= ret_srMinT or l.flips > 0) and l.cls >= cmin
+            bool hid  = false
+            if elig and ret_sdHideSR and array.size(ret_zs) > 0
+                for j = 0 to array.size(ret_zs) - 1
+                    RetZone z = array.get(ret_zs, j)
+                    if z.state < 3 and z.isDem == l.isSup and not (l.bot > z.top or l.top < z.bot)
+                        hid := true
+                        break
+            if elig and not hid
+                f_ret_lvlDraw(l)
+                if l.state < 4
+                    bool atNow = l.isSup ? (low <= l.top + near and low >= l.bot - brk) : (high >= l.bot - near and high <= l.top + brk)
+                    if atNow
+                        if l.isSup
+                            ret_m.atSup := true
+                        else
+                            ret_m.atRes := true
+            else if not na(l.bx)
+                box.delete(l.bx)
+                l.bx := na
+    f_ret_lvlCap(true)
+    f_ret_lvlCap(false)
+    true
+
+// ═══════════════════════════════ MODULE 6 · DEMAND / SUPPLY ENGINE
+// Retail base zones. On a confirmed DEPARTURE candle (body >= ret_sdDep ATR,
+// closing in its outer third, closing beyond the base by ret_sdLeave ATR) the
+// consecutive small-range candles immediately before it are the BASE. Zone =
+// proximal edge at the base bodies, distal edge at the base wicks, clamped to
+// ret_sdMaxH ATR. The candle before the base names the structure:
+//   drop  > base > rally = DBR (reversal demand)   rally > base > rally = RBR
+//   rally > base > drop  = RBD (reversal supply)   drop  > base > drop  = DBD
+// Follow-through is checked ONCE, ret_sdFt bars later, and can only upgrade.
+f_ret_zCls(RetZone z) =>
+    int sc = z.dep >= 2.0 ? 2 : z.dep >= 1.5 ? 1 : 0
+    sc += z.base <= 2 ? 1 : 0
+    sc += z.rev ? 1 : 0
+    sc += z.ft ? 2 : 0
+    sc += z.tests == 0 ? 1 : z.tests >= ret_sdWeak ? -1 : 0
+    sc -= (z.top - z.bot) > ret_atr ? 1 : 0
+    sc >= 6 ? RC_MAJOR : sc >= 4 ? RC_STRONG : sc >= 2 ? RC_NORMAL : RC_WEAK
+
+f_ret_zTxt(RetZone z) =>
+    string s = (z.isDem ? "DEMAND" : "SUPPLY") + " · " + z.kind + " · " + f_ret_clsTxt(z.cls)
+    s += z.state == 0 ? " · fresh" : z.state == 1 ? " · tested x" + str.tostring(z.tests) : z.state == 2 ? " · WEAKENING x" + str.tostring(z.tests) : " · BROKEN"
+    s += z.ft ? " · FT" : ""
+    s
+
+f_ret_zDraw(RetZone z) =>
+    color  c  = z.isDem ? RCOL_DEM : RCOL_SUPP
+    string tx = ret_showTxt ? f_ret_zTxt(z) : ""
+    int    tr = z.state == 3 ? 96 : z.cls == RC_MAJOR ? 82 : z.cls == RC_STRONG ? 86 : z.cls == RC_NORMAL ? 90 : 93
+    if na(z.bx)
+        z.bx := box.new(bar_index - z.base, z.top, bar_index + 1, z.bot,
+             border_color = color.new(c, z.cls >= RC_STRONG ? 25 : 50), bgcolor = color.new(c, tr),
+             border_width = z.cls == RC_MAJOR ? 2 : 1,
+             text = tx, text_size = ret_sz, text_color = color.new(c, 10),
+             text_halign = text.align_left, text_valign = z.isDem ? text.align_top : text.align_bottom)
+        z.txt := tx
+    else if tx != z.txt
+        box.set_text(z.bx, tx)
+        box.set_bgcolor(z.bx, color.new(c, tr))
+        box.set_border_color(z.bx, color.new(c, z.state == 3 ? 75 : z.cls >= RC_STRONG ? 25 : 50))
+        box.set_border_style(z.bx, z.state == 3 ? line.style_dashed : line.style_solid)
+        box.set_border_width(z.bx, z.cls == RC_MAJOR ? 2 : 1)
+        z.txt := tx
+    true
+
+f_ret_zKill(int i) =>
+    RetZone z = array.get(ret_zs, i)
+    if not na(z.bx)
+        box.delete(z.bx)
+    array.remove(ret_zs, i)
+    true
+
+f_ret_zCap(bool dem) =>
+    int cnt = 0
+    if array.size(ret_zs) > 0
+        for i = 0 to array.size(ret_zs) - 1
+            RetZone z = array.get(ret_zs, i)
+            if z.isDem == dem and z.state < 3
+                cnt += 1
+    while cnt > ret_sdMax
+        int   ix = -1
+        float wr = na
+        for i = 0 to array.size(ret_zs) - 1
+            RetZone z = array.get(ret_zs, i)
+            if z.isDem == dem and z.state < 3
+                float r = z.cls * 1000000.0 + nz(z.bornBar, 0)
+                if na(wr) or r < wr
+                    wr := r
+                    ix := i
+        if ix < 0
+            break
+        f_ret_zKill(ix)
+        cnt -= 1
+    cnt
+
+// detection, on the departure candle's confirmed close
+f_ret_zScan(bool dem) =>
+    bool made = false
+    bool depart = dem ? (ret_bull and ret_body >= ret_sdDep * ret_kT * ret_atr and ret_strongUp) :
+         (ret_bear and ret_body >= ret_sdDep * ret_kT * ret_atr and ret_strongDn)
+    if depart
+        float bMax = ret_sdBaseRng * ret_atr
+        int   k    = 0
+        float bTop = na
+        float bBot = na
+        for j = 1 to ret_sdBaseMax
+            if ret_rng[j] <= bMax and ret_rng[j] > 0
+                k := j
+                float bh = math.max(open[j], close[j])
+                float bl = math.min(open[j], close[j])
+                if dem
+                    bTop := na(bTop) ? bh : math.max(bTop, bh)
+                    bBot := na(bBot) ? low[j] : math.min(bBot, low[j])
+                else
+                    bBot := na(bBot) ? bl : math.min(bBot, bl)
+                    bTop := na(bTop) ? high[j] : math.max(bTop, high[j])
+            else
+                break
+        if k > 0
+            float leave = ret_sdLeave * ret_atr
+            bool  left  = dem ? close >= bTop + leave : close <= bBot - leave
+            if left
+                float maxH = ret_sdMaxH * ret_atr
+                float minH = RET_MIN_H_ATR * ret_atr
+                if bTop - bBot > maxH
+                    if dem
+                        bBot := bTop - maxH
+                    else
+                        bTop := bBot + maxH
+                if bTop - bBot < minH
+                    if dem
+                        bBot := bTop - minH
+                    else
+                        bTop := bBot + minH
+                int  li    = k + 1
+                bool legOk = math.abs(close[li] - open[li]) >= RET_BRK_BODY * ret_atr
+                bool legDn = close[li] < open[li] and legOk
+                bool legUp = close[li] > open[li] and legOk
+                bool rev   = dem ? legDn : legUp
+                string kind = dem ? (rev ? "DBR" : "RBR") : (rev ? "RBD" : "DBD")
+                bool dup = false
+                if array.size(ret_zs) > 0
+                    for i = 0 to array.size(ret_zs) - 1
+                        RetZone z = array.get(ret_zs, i)
+                        if z.isDem == dem and z.state < 3 and not (bBot > z.top or bTop < z.bot)
+                            dup := true
+                            break
+                if not dup
+                    RetZone nz_ = RetZone.new(isDem = dem, top = bTop, bot = bBot, bornBar = bar_index, lastBar = bar_index,
+                         base = k, dep = ret_body / ret_atr, rev = rev, kind = kind, state = 0)
+                    nz_.cls := f_ret_zCls(nz_)
+                    if nz_.cls >= f_ret_clsMin()
+                        array.push(ret_zs, nz_)
+                        f_ret_zDraw(nz_)
+                        ret_m.evZNew := true
+                        made := true
+    made
+
+f_ret_sdBar() =>
+    float brk  = ret_sdBrk * ret_atr
+    float near = RET_NEAR_ATR * ret_atr
+    if array.size(ret_zs) > 0
+        for i = array.size(ret_zs) - 1 to 0
+            RetZone z = array.get(ret_zs, i)
+            bool gone = bar_index - nz(z.bornBar, bar_index) > ret_sdLife or (z.state == 3 and bar_index - nz(z.brkBar, bar_index) > ret_sdKeep)
+            if gone
+                f_ret_zKill(i)
+                continue
+            if z.bornBar == bar_index
+                // born this bar: the departure candle is not a test of its own base
+                continue
+            if z.state < 3
+                if not z.ftDone and bar_index - z.bornBar >= ret_sdFt
+                    z.ftDone := true
+                    z.ft     := z.isDem ? ret_ftHi >= z.top + ret_sdFtAtr * ret_atr : ret_ftLo <= z.bot - ret_sdFtAtr * ret_atr
+                bool broke = z.isDem ? close < z.bot - brk : close > z.top + brk
+                bool inZ   = z.isDem ? low <= z.top : high >= z.bot
+                if broke
+                    z.state  := 3
+                    z.brkBar := bar_index
+                    ret_m.evZBrk := true
+                    if not na(z.bx)
+                        box.set_right(z.bx, bar_index)
+                    if ret_bodyOk
+                        if z.isDem and ret_strongDn
+                            ret_m.brkDn := true
+                        if not z.isDem and ret_strongUp
+                            ret_m.brkUp := true
+                else
+                    if inZ
+                        if not z.inside
+                            z.tests  += 1
+                            z.inside := true
+                            z.lastBar := bar_index
+                            z.state  := z.tests >= ret_sdWeak ? 2 : 1
+                            ret_m.evZTest := true
+                    else
+                        z.inside := false
+                    bool atNow = z.isDem ? low <= z.top + near : high >= z.bot - near
+                    if atNow
+                        if z.isDem
+                            ret_m.atDem := true
+                        else
+                            ret_m.atSupp := true
+                z.cls := f_ret_zCls(z)
+            f_ret_zDraw(z)
+    f_ret_zCap(true)
+    f_ret_zCap(false)
+    true
+
+// ═══════════════════════════════ MODULE 7 · RETAIL PATTERN ENGINE
+// Geometry comes from the confirmed swing rings; the MARK is placed only on the
+// confirmed close that completes the pattern (neckline / boundary break with a
+// real body). One mark per swing set per pattern type (ret_ptKey).
+f_ret_ringPush(array<float> p, array<int> b, array<float> pre, float v, int bar, float prev) =>
+    array.push(p, v)
+    array.push(b, bar)
+    array.push(pre, prev)
+    while array.size(p) > RET_RING
+        array.shift(p)
+        array.shift(b)
+        array.shift(pre)
+    array.size(p)
+
+// index of the highest swing high strictly between two bars (-1 = none)
+f_ret_maxPhIn(int b1, int b2) =>
+    int   ix   = -1
+    float best = na
+    if array.size(ret_phP) > 0
+        for i = 0 to array.size(ret_phP) - 1
+            int b = array.get(ret_phB, i)
+            if b > b1 and b < b2
+                float v = array.get(ret_phP, i)
+                if na(best) or v > best
+                    best := v
+                    ix   := i
+    ix
+
+f_ret_minPlIn(int b1, int b2) =>
+    int   ix   = -1
+    float best = na
+    if array.size(ret_plP) > 0
+        for i = 0 to array.size(ret_plP) - 1
+            int b = array.get(ret_plB, i)
+            if b > b1 and b < b2
+                float v = array.get(ret_plP, i)
+                if na(best) or v < best
+                    best := v
+                    ix   := i
+    ix
+
+f_ret_ptLine(int x1, float y1, int x2, float y2, string st) =>
+    array.push(ret_ptLn, line.new(x1, y1, x2, y2, color = color.new(RCOL_PAT, 20), style = st, width = 1))
+    ret_m.ptTmp += 1
+    ret_m.ptTmp
+
+// closes a pattern set: label on the CONFIRMING bar, then prune to ret_ptMax sets
+f_ret_ptEnd(string name, bool bullish, string tip) =>
+    array.push(ret_ptLb, label.new(bar_index, na, name,
+         yloc = bullish ? yloc.belowbar : yloc.abovebar,
+         style = bullish ? label.style_label_up : label.style_label_down,
+         color = color.new(RCOL_PAT, 15), textcolor = color.white, size = ret_sz, tooltip = tip))
+    array.push(ret_ptCnt, ret_m.ptTmp)
+    ret_m.ptTmp   := 0
+    ret_m.patName := name
+    while array.size(ret_ptCnt) > ret_ptMax
+        int n = array.shift(ret_ptCnt)
+        label.delete(array.shift(ret_ptLb))
+        if n > 0
+            for _i = 1 to n
+                line.delete(array.shift(ret_ptLn))
+    array.size(ret_ptCnt)
+
+f_ret_patBar() =>
+    // 1 · swing rings
+    if not na(ret_ph)
+        f_ret_ringPush(ret_phP, ret_phB, ret_phPre, ret_ph, bar_index - ret_pivLen, ret_preLo)
+    if not na(ret_pl)
+        f_ret_ringPush(ret_plP, ret_plB, ret_plPre, ret_pl, bar_index - ret_pivLen, ret_preHi)
+    float tol   = ret_ptTol * ret_kTol * ret_atr
+    float depth = ret_ptDepth * ret_kT * ret_atr
+    float headA = ret_ptHead * ret_kT * ret_atr
+    int   nH    = array.size(ret_phP)
+    int   nL    = array.size(ret_plP)
+    // 2 · REVERSAL — bottoms
+    if ret_ptRev and nL >= 2
+        float l2 = array.get(ret_plP, nL - 1)
+        int   b2 = array.get(ret_plB, nL - 1)
+        float l1 = array.get(ret_plP, nL - 2)
+        int   b1 = array.get(ret_plB, nL - 2)
+        bool  recent = bar_index - b2 <= ret_ptWin
+        bool  doneTB = false
+        if nL >= 3 and recent and array.get(ret_ptKey, PT_TB) != b2
+            float l0 = array.get(ret_plP, nL - 3)
+            int   b0 = array.get(ret_plB, nL - 3)
+            float hiL = math.max(l0, math.max(l1, l2))
+            float loL = math.min(l0, math.min(l1, l2))
+            if hiL - loL <= tol and b2 - b0 >= 2 * ret_ptSep
+                int ni = f_ret_maxPhIn(b0, b2)
+                if ni >= 0
+                    float nk = array.get(ret_phP, ni)
+                    if nk - hiL >= depth and close > nk and ret_bull and ret_bodyOk
+                        f_ret_ptLine(b0, l0, b2, l2, line.style_dotted)
+                        f_ret_ptLine(array.get(ret_phB, ni), nk, bar_index, nk, line.style_dashed)
+                        f_ret_ptEnd("TRIPLE BOTTOM", true, "Three lows within " + str.tostring(ret_ptTol) + " ATR, neckline " + str.tostring(nk, format.mintick) + " closed above with a real body.")
+                        array.set(ret_ptKey, PT_TB, b2)
+                        array.set(ret_ptKey, PT_DB, b2)
+                        ret_m.evRev := true
+                        doneTB := true
+        if not doneTB and recent and array.get(ret_ptKey, PT_DB) != b2
+            if math.abs(l2 - l1) <= tol and b2 - b1 >= ret_ptSep
+                int ni2 = f_ret_maxPhIn(b1, b2)
+                if ni2 >= 0
+                    float nk2 = array.get(ret_phP, ni2)
+                    if nk2 - math.max(l1, l2) >= depth and close > nk2 and ret_bull and ret_bodyOk
+                        f_ret_ptLine(b1, l1, b2, l2, line.style_dotted)
+                        f_ret_ptLine(array.get(ret_phB, ni2), nk2, bar_index, nk2, line.style_dashed)
+                        f_ret_ptEnd("DOUBLE BOTTOM", true, "Two lows within " + str.tostring(ret_ptTol) + " ATR, " + str.tostring(b2 - b1) + " bars apart, neckline " + str.tostring(nk2, format.mintick) + " closed above with a real body.")
+                        array.set(ret_ptKey, PT_DB, b2)
+                        ret_m.evRev := true
+    // 3 · REVERSAL — tops
+    if ret_ptRev and nH >= 2
+        float h2 = array.get(ret_phP, nH - 1)
+        int   c2 = array.get(ret_phB, nH - 1)
+        float h1 = array.get(ret_phP, nH - 2)
+        int   c1 = array.get(ret_phB, nH - 2)
+        bool  recentH = bar_index - c2 <= ret_ptWin
+        bool  doneTT  = false
+        if nH >= 3 and recentH and array.get(ret_ptKey, PT_TT) != c2
+            float h0 = array.get(ret_phP, nH - 3)
+            int   c0 = array.get(ret_phB, nH - 3)
+            float hiH = math.max(h0, math.max(h1, h2))
+            float loH = math.min(h0, math.min(h1, h2))
+            if hiH - loH <= tol and c2 - c0 >= 2 * ret_ptSep
+                int mi = f_ret_minPlIn(c0, c2)
+                if mi >= 0
+                    float nkT = array.get(ret_plP, mi)
+                    if loH - nkT >= depth and close < nkT and ret_bear and ret_bodyOk
+                        f_ret_ptLine(c0, h0, c2, h2, line.style_dotted)
+                        f_ret_ptLine(array.get(ret_plB, mi), nkT, bar_index, nkT, line.style_dashed)
+                        f_ret_ptEnd("TRIPLE TOP", false, "Three highs within " + str.tostring(ret_ptTol) + " ATR, neckline " + str.tostring(nkT, format.mintick) + " closed below with a real body.")
+                        array.set(ret_ptKey, PT_TT, c2)
+                        array.set(ret_ptKey, PT_DT, c2)
+                        ret_m.evRev := true
+                        doneTT := true
+        if not doneTT and recentH and array.get(ret_ptKey, PT_DT) != c2
+            if math.abs(h2 - h1) <= tol and c2 - c1 >= ret_ptSep
+                int mi2 = f_ret_minPlIn(c1, c2)
+                if mi2 >= 0
+                    float nkT2 = array.get(ret_plP, mi2)
+                    if math.min(h1, h2) - nkT2 >= depth and close < nkT2 and ret_bear and ret_bodyOk
+                        f_ret_ptLine(c1, h1, c2, h2, line.style_dotted)
+                        f_ret_ptLine(array.get(ret_plB, mi2), nkT2, bar_index, nkT2, line.style_dashed)
+                        f_ret_ptEnd("DOUBLE TOP", false, "Two highs within " + str.tostring(ret_ptTol) + " ATR, " + str.tostring(c2 - c1) + " bars apart, neckline " + str.tostring(nkT2, format.mintick) + " closed below with a real body.")
+                        array.set(ret_ptKey, PT_DT, c2)
+                        ret_m.evRev := true
+    // 4 · HEAD & SHOULDERS (three highs: L · HEAD · R, neckline through the two lows between them)
+    if ret_ptRev and nH >= 3
+        float sL = array.get(ret_phP, nH - 3)
+        int   bL = array.get(ret_phB, nH - 3)
+        float sH = array.get(ret_phP, nH - 2)
+        int   bH = array.get(ret_phB, nH - 2)
+        float sR = array.get(ret_phP, nH - 1)
+        int   bR = array.get(ret_phB, nH - 1)
+        if bar_index - bR <= ret_ptWin and array.get(ret_ptKey, PT_HS) != bR
+            bool headOk = sH - math.max(sL, sR) >= headA and math.abs(sL - sR) <= 2 * tol
+            if headOk
+                int n1 = f_ret_minPlIn(bL, bH)
+                int n2 = f_ret_minPlIn(bH, bR)
+                if n1 >= 0 and n2 >= 0
+                    float y1 = array.get(ret_plP, n1)
+                    int   x1 = array.get(ret_plB, n1)
+                    float y2 = array.get(ret_plP, n2)
+                    int   x2 = array.get(ret_plB, n2)
+                    if math.abs(y2 - y1) <= 1.5 * ret_atr and x2 > x1
+                        float slope   = (y2 - y1) / (x2 - x1)
+                        float neckNow = y2 + slope * (bar_index - x2)
+                        if close < neckNow and ret_bear and ret_bodyOk and sH - neckNow >= depth
+                            f_ret_ptLine(x1, y1, bar_index, neckNow, line.style_dashed)
+                            f_ret_ptLine(bL, sL, bH, sH, line.style_dotted)
+                            f_ret_ptLine(bH, sH, bR, sR, line.style_dotted)
+                            f_ret_ptEnd("HEAD & SHOULDERS", false, "Head " + str.tostring(sH, format.mintick) + " above both shoulders by >= " + str.tostring(ret_ptHead) + " ATR; neckline closed below with a real body.")
+                            array.set(ret_ptKey, PT_HS, bR)
+                            ret_m.evRev := true
+    // 5 · INVERSE HEAD & SHOULDERS
+    if ret_ptRev and nL >= 3
+        float iL = array.get(ret_plP, nL - 3)
+        int   jL = array.get(ret_plB, nL - 3)
+        float iH = array.get(ret_plP, nL - 2)
+        int   jH = array.get(ret_plB, nL - 2)
+        float iR = array.get(ret_plP, nL - 1)
+        int   jR = array.get(ret_plB, nL - 1)
+        if bar_index - jR <= ret_ptWin and array.get(ret_ptKey, PT_IHS) != jR
+            bool headOkI = math.min(iL, iR) - iH >= headA and math.abs(iL - iR) <= 2 * tol
+            if headOkI
+                int m1 = f_ret_maxPhIn(jL, jH)
+                int m2 = f_ret_maxPhIn(jH, jR)
+                if m1 >= 0 and m2 >= 0
+                    float v1 = array.get(ret_phP, m1)
+                    int   u1 = array.get(ret_phB, m1)
+                    float v2 = array.get(ret_phP, m2)
+                    int   u2 = array.get(ret_phB, m2)
+                    if math.abs(v2 - v1) <= 1.5 * ret_atr and u2 > u1
+                        float slopeI = (v2 - v1) / (u2 - u1)
+                        float neckI  = v2 + slopeI * (bar_index - u2)
+                        if close > neckI and ret_bull and ret_bodyOk and neckI - iH >= depth
+                            f_ret_ptLine(u1, v1, bar_index, neckI, line.style_dashed)
+                            f_ret_ptLine(jL, iL, jH, iH, line.style_dotted)
+                            f_ret_ptLine(jH, iH, jR, iR, line.style_dotted)
+                            f_ret_ptEnd("INVERSE H&S", true, "Head " + str.tostring(iH, format.mintick) + " below both shoulders by >= " + str.tostring(ret_ptHead) + " ATR; neckline closed above with a real body.")
+                            array.set(ret_ptKey, PT_IHS, jR)
+                            ret_m.evRev := true
+    // 6 · CONTINUATION — flags · pennants · triangles · rectangles (3 highs + 3 lows)
+    if ret_ptCont and nH >= 3 and nL >= 3
+        float h0 = array.get(ret_phP, nH - 3)
+        float h1 = array.get(ret_phP, nH - 2)
+        float h2 = array.get(ret_phP, nH - 1)
+        int   hb0 = array.get(ret_phB, nH - 3)
+        int   hb2 = array.get(ret_phB, nH - 1)
+        float l0 = array.get(ret_plP, nL - 3)
+        float l1 = array.get(ret_plP, nL - 2)
+        float l2 = array.get(ret_plP, nL - 1)
+        int   lb0 = array.get(ret_plB, nL - 3)
+        int   lb2 = array.get(ret_plB, nL - 1)
+        int   kc  = math.max(hb2, lb2)
+        bool  inWin = math.min(hb0, lb0) >= bar_index - ret_ptWin
+        if inWin and array.get(ret_ptKey, PT_CONT) != kc
+            bool flatH = math.abs(h0 - h1) <= tol and math.abs(h1 - h2) <= tol
+            bool flatL = math.abs(l0 - l1) <= tol and math.abs(l1 - l2) <= tol
+            bool fallH = h1 <= h0 - tol and h2 <= h1 - tol
+            bool fallL = l1 <= l0 - tol and l2 <= l1 - tol
+            bool riseH = h1 >= h0 + tol and h2 >= h1 + tol
+            bool riseL = l1 >= l0 + tol and l2 >= l1 + tol
+            float hiMax = math.max(h0, math.max(h1, h2))
+            float loMin = math.min(l0, math.min(l1, l2))
+            float poleU = h0 - array.get(ret_phPre, nH - 3)   // rise into the first high
+            float poleD = array.get(ret_plPre, nL - 3) - l0   // drop into the first low
+            bool  poleUp = poleU >= ret_ptPole * ret_kT * ret_atr
+            bool  poleDn = poleD >= ret_ptPole * ret_kT * ret_atr
+            bool  bigEnough = hiMax - loMin >= ret_atr
+            string nm = ""
+            bool   bl = false
+            if poleUp and fallH and fallL and (h0 - l2) <= RET_FLAG_RETR * poleU and close > h2 and ret_bull and ret_bodyOk
+                nm := "BULL FLAG"
+                bl := true
+            else if poleUp and fallH and riseL and close > h2 and ret_bull and ret_bodyOk
+                nm := "BULL PENNANT"
+                bl := true
+            else if poleDn and riseH and riseL and (h2 - l0) <= RET_FLAG_RETR * poleD and close < l2 and ret_bear and ret_bodyOk
+                nm := "BEAR FLAG"
+            else if poleDn and fallH and riseL and close < l2 and ret_bear and ret_bodyOk
+                nm := "BEAR PENNANT"
+            else if flatH and riseL and close > hiMax and ret_bull and ret_bodyOk
+                nm := "ASCENDING TRIANGLE"
+                bl := true
+            else if flatL and fallH and close < loMin and ret_bear and ret_bodyOk
+                nm := "DESCENDING TRIANGLE"
+            else if fallH and riseL and bigEnough and close > h2 and ret_bull and ret_bodyOk
+                nm := "SYM TRIANGLE (up)"
+                bl := true
+            else if fallH and riseL and bigEnough and close < l2 and ret_bear and ret_bodyOk
+                nm := "SYM TRIANGLE (down)"
+            else if flatH and flatL and bigEnough and close > hiMax and ret_bull and ret_bodyOk
+                nm := "RECTANGLE (up)"
+                bl := true
+            else if flatH and flatL and bigEnough and close < loMin and ret_bear and ret_bodyOk
+                nm := "RECTANGLE (down)"
+            if nm != ""
+                f_ret_ptLine(hb0, h0, hb2, h2, line.style_solid)
+                f_ret_ptLine(lb0, l0, lb2, l2, line.style_solid)
+                f_ret_ptEnd(nm, bl, nm + " — three highs + three lows inside " + str.tostring(ret_ptWin) + " bars, boundary closed through with a real body." + (poleUp or poleDn ? " Pole " + str.tostring(math.max(poleU, poleD) / ret_atr, "#.#") + " ATR." : ""))
+                array.set(ret_ptKey, PT_CONT, kc)
+                ret_m.evCont := true
+    true
+
+// ═══════════════════════════════ MODULE 8 · CANDLE PATTERNS (ZONE-LOCATED)
+// A candle pattern is only information WHERE it happens. By default a chip
+// prints only when the candle sits at a live level / zone drawn by this layer.
+// One chip per side per ret_cdlCd bars. Breakout / failed-break chips come from
+// the S/R and S/D lifecycles above, so they always refer to a tracked zone.
+f_ret_chip(bool below, string txt, color bg) =>
+    array.push(ret_cdl, label.new(bar_index, na, txt,
+         yloc = below ? yloc.belowbar : yloc.abovebar,
+         style = below ? label.style_label_up : label.style_label_down,
+         color = bg, textcolor = color.white, size = size.tiny))
+    while array.size(ret_cdl) > RET_CDL_MAX
+        label.delete(array.shift(ret_cdl))
+    ret_m.evCdl := true
+    array.size(ret_cdl)
+
+f_ret_cdlBar() =>
+    if ret_ptCdl
+        bool zUp = not ret_cdlAtZ or ret_m.atSup or ret_m.atDem
+        bool zDn = not ret_cdlAtZ or ret_m.atRes or ret_m.atSupp
+        string tU = ret_m.failUp ? "FAILED BREAK ▲" : ret_m.brkUp ? "BREAKOUT ▲" :
+             zUp and ret_bullEng ? "ENGULF ▲" : zUp and ret_bullPin ? "HAMMER" :
+             zUp and ret_outside and ret_bull and ret_bodyOk ? "OUTSIDE ▲" : zUp and ret_inside ? "INSIDE" : ""
+        string tD = ret_m.failDn ? "FAILED BREAK ▼" : ret_m.brkDn ? "BREAKOUT ▼" :
+             zDn and ret_bearEng ? "ENGULF ▼" : zDn and ret_bearPin ? "SHOOTING STAR" :
+             zDn and ret_outside and ret_bear and ret_bodyOk ? "OUTSIDE ▼" : zDn and ret_inside ? "INSIDE" : ""
+        bool cdU = na(ret_m.cdlUpBar) or bar_index - ret_m.cdlUpBar > ret_cdlCd
+        bool cdD = na(ret_m.cdlDnBar) or bar_index - ret_m.cdlDnBar > ret_cdlCd
+        if tU != "" and cdU
+            f_ret_chip(true, tU, color.new(RCOL_SUP, 40))
+            ret_m.cdlUpBar := bar_index
+        if tD != "" and cdD and not (tD == "INSIDE" and tU == "INSIDE")
+            f_ret_chip(false, tD, color.new(RCOL_RES, 40))
+            ret_m.cdlDnBar := bar_index
+    true
+
+// ═══════════════════════════════ MODULE 9 · THE PER-BAR PASS
+// One call at global scope. Order matters: swing registration (levels), level
+// lifecycle, zone detection, zone lifecycle, patterns, then chips — so a chip
+// on this bar sees this bar's zone state.
+f_ret_bar() =>
+    ret_m.atSup  := false
+    ret_m.atRes  := false
+    ret_m.atDem  := false
+    ret_m.atSupp := false
+    ret_m.brkUp  := false
+    ret_m.brkDn  := false
+    ret_m.failUp := false
+    ret_m.failDn := false
+    ret_m.evLvlNew  := false
+    ret_m.evLvlBrk  := false
+    ret_m.evLvlFail := false
+    ret_m.evZNew  := false
+    ret_m.evZTest := false
+    ret_m.evZBrk  := false
+    ret_m.evRev   := false
+    ret_m.evCont  := false
+    ret_m.evCdl   := false
+    ret_m.patName := ""
+    if ret_conf and ret_atr > 0
+        if ret_srOn
+            if not na(ret_pl)
+                f_ret_lvlPush(ret_pl, bar_index - ret_pivLen, (ret_reactHi - ret_pl) / ret_atr, ret_pivWickL >= RET_WICK_ATR * ret_atr, true)
+            if not na(ret_ph)
+                f_ret_lvlPush(ret_ph, bar_index - ret_pivLen, (ret_ph - ret_reactLo) / ret_atr, ret_pivWickH >= RET_WICK_ATR * ret_atr, false)
+        if ret_sdOn
+            f_ret_zScan(true)
+            f_ret_zScan(false)
+            f_ret_sdBar()
+        if ret_srOn
+            f_ret_srBar()
+        if ret_ptRev or ret_ptCont
+            f_ret_patBar()
+        else
+            // keep the rings warm so enabling patterns later has history
+            if not na(ret_ph)
+                f_ret_ringPush(ret_phP, ret_phB, ret_phPre, ret_ph, bar_index - ret_pivLen, ret_preLo)
+            if not na(ret_pl)
+                f_ret_ringPush(ret_plP, ret_plB, ret_plPre, ret_pl, bar_index - ret_pivLen, ret_preHi)
+        f_ret_cdlBar()
+    true
+
+f_ret_bar()
+
+// ═══════════════════════════════ MODULE 10 · LAST-BAR RENDER
+// Live boxes are extended to the right ONCE, on the last bar. The summary label
+// is deleted and rebuilt in place — one object, never accumulated.
+f_ret_render() =>
+    if barstate.islast
+        float nSup = na
+        float nRes = na
+        float nDem = na
+        float nSupp = na
+        int   cSup = 0
+        int   cRes = 0
+        int   cDem = 0
+        int   cSupp = 0
+        if array.size(ret_lvls) > 0
+            for i = 0 to array.size(ret_lvls) - 1
+                RetLvl l = array.get(ret_lvls, i)
+                if not na(l.bx) and l.state < 5
+                    box.set_right(l.bx, bar_index + 1)
+                    if l.isSup
+                        cSup += 1
+                        if l.top <= close and (na(nSup) or l.px > nSup)
+                            nSup := l.px
+                    else
+                        cRes += 1
+                        if l.bot >= close and (na(nRes) or l.px < nRes)
+                            nRes := l.px
+        if array.size(ret_zs) > 0
+            for i = 0 to array.size(ret_zs) - 1
+                RetZone z = array.get(ret_zs, i)
+                if not na(z.bx) and z.state < 3
+                    box.set_right(z.bx, bar_index + 1)
+                    if z.isDem
+                        cDem += 1
+                        if z.top <= close and (na(nDem) or z.top > nDem)
+                            nDem := z.top
+                    else
+                        cSupp += 1
+                        if z.bot >= close and (na(nSupp) or z.bot < nSupp)
+                            nSupp := z.bot
+        label.delete(ret_m.sumLb)
+        if ret_summary
+            string s = "RETAIL PA · S " + str.tostring(cSup) + " · R " + str.tostring(cRes) + " · D " + str.tostring(cDem) + " · SUP " + str.tostring(cSupp)
+            s += "\nnext support    " + (na(nSup) ? "—" : str.tostring(nSup, format.mintick))
+            s += "\nnext resistance " + (na(nRes) ? "—" : str.tostring(nRes, format.mintick))
+            s += "\nnext demand     " + (na(nDem) ? "—" : str.tostring(nDem, format.mintick))
+            s += "\nnext supply     " + (na(nSupp) ? "—" : str.tostring(nSupp, format.mintick))
+            ret_m.sumLb := label.new(bar_index + 2, close, s, style = label.style_label_left,
+                 color = color.new(RCOL_NEU, 55), textcolor = color.white, size = size.tiny,
+                 tooltip = "Counts of DRAWN levels / zones and the nearest one on each side of price. Detection and marking only — this layer emits no trade signal.")
+    true
+
+f_ret_render()
+
+// ═══════════════════════════════ MODULE 11 · ALERTS (OBSERVATIONS ONLY)
+// None of these is an entry, an exit, or a direction to trade. Use "Once per
+// bar close".
+ret_aLvlNew  = ret_m.evLvlNew
+ret_aLvlBrk  = ret_m.evLvlBrk
+ret_aLvlFail = ret_m.evLvlFail
+ret_aZNew    = ret_m.evZNew
+ret_aZTest   = ret_m.evZTest
+ret_aZBrk    = ret_m.evZBrk
+ret_aRev     = ret_m.evRev
+ret_aCont    = ret_m.evCont
+alertcondition(ret_aLvlNew,  "[S/R] Level drawn",              "A support / resistance level reached the drawing threshold on {{ticker}} {{interval}}")
+alertcondition(ret_aLvlBrk,  "[S/R] Level broken (confirmed)", "A support / resistance level break was CONFIRMED (not reclaimed) on {{ticker}} {{interval}}")
+alertcondition(ret_aLvlFail, "[S/R] Failed break",             "A support / resistance break FAILED — price closed back inside on {{ticker}} {{interval}}")
+alertcondition(ret_aZNew,    "[S/D] Zone created",             "A retail demand / supply base zone was created on {{ticker}} {{interval}}")
+alertcondition(ret_aZTest,   "[S/D] Zone tested",              "Price entered a live demand / supply zone on {{ticker}} {{interval}}")
+alertcondition(ret_aZBrk,    "[S/D] Zone broken",              "A demand / supply zone was closed through on {{ticker}} {{interval}}")
+alertcondition(ret_aRev,     "[PATTERN] Reversal confirmed",   "A reversal pattern (double / triple top-bottom, head & shoulders) confirmed on {{ticker}} {{interval}}")
+alertcondition(ret_aCont,    "[PATTERN] Continuation confirmed", "A continuation pattern (flag / pennant / triangle / rectangle) confirmed on {{ticker}} {{interval}}")

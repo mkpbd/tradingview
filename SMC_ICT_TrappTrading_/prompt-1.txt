@@ -1,0 +1,659 @@
+
+# Professional Prompt – TradingView Pine Script v6 (ICT + SMC Institutional Trading Toolkit)
+
+## ROLE
+
+You are a **Senior Quant Developer, Professional Pine Script v6 Expert, ICT Mentor, Smart Money Concepts (SMC) Specialist, Institutional Order Flow Analyst, and Professional TradingView UI/UX Designer** with more than **20 years of experience** building high-performance TradingView indicators.
+
+Your task is **NOT** to create another beginner SMC indicator.
+
+Your task is to design an **Institutional Grade ICT + SMC Trading Toolkit** that is clean, optimized, modular, and highly configurable.
+
+The code must be written in **Pine Script Version 6** using professional coding standards.
+
+---
+
+# PRIMARY GOALS
+
+Build a single indicator that combines all major ICT and SMC concepts including:
+
+* Market Structure
+* Liquidity
+* Order Blocks
+* Fair Value Gaps
+* Premium Discount
+* Sessions
+* Time Models
+* Higher Timeframe Levels
+* Entry Models
+* Confirmation Models
+
+Everything should be toggleable.
+
+The chart should remain clean.
+
+No unnecessary drawings.
+
+No repainting.
+
+No duplicate objects.
+
+---
+
+# 1. Market Structure
+
+Implement:
+
+## BOS
+
+* Bullish BOS
+* Bearish BOS
+
+## CHoCH
+
+* Bullish CHoCH
+* Bearish CHoCH
+
+## MSS
+
+* Market Structure Shift
+
+## CISD
+
+* Change In State of Delivery
+
+Display:
+
+* Small labels
+* Optional arrows
+* Trend coloring
+
+---
+
+# 2. Liquidity
+
+Detect:
+
+Equal Highs
+
+Equal Lows
+
+Buy Side Liquidity
+
+Sell Side Liquidity
+
+Internal Liquidity
+
+External Liquidity
+
+Liquidity Sweep
+
+Liquidity Grab
+
+Raid Detection
+
+Display:
+
+Horizontal lines
+
+Optional labels
+
+Auto remove after mitigation
+
+---
+
+# 3. Order Blocks
+
+Institutional Order Blocks only.
+
+Include:
+
+Bullish OB
+
+Bearish OB
+
+Breaker Block
+
+Mitigation Block
+
+Reclaimed Order Block
+
+Invalidated Order Block
+
+Nested Order Blocks
+
+HTF Order Blocks
+
+LTF Order Blocks
+
+Options:
+
+Show Last X
+
+Extend Right
+
+Transparency
+
+Mitigated Color
+
+Invalid Color
+
+Fresh Color
+
+---
+
+# 4. Fair Value Gap
+
+Detect:
+
+Bullish FVG
+
+Bearish FVG
+
+Inverse FVG (IFVG)
+
+Balanced Price Range
+
+Triple FVG
+
+Stacked FVG
+
+Volume FVG (optional)
+
+Auto merge overlapping gaps
+
+Mitigation detection
+
+Fill percentage
+
+Auto remove after fill
+
+---
+
+# 5. Premium Discount
+
+Draw:
+
+Equilibrium
+
+Premium Zone
+
+Discount Zone
+
+Using:
+
+Swing High
+
+Swing Low
+
+Auto Fibonacci
+
+50%
+
+62%
+
+70.5%
+
+79%
+
+OTE Zone
+
+---
+
+# 6. PD Arrays
+
+Support:
+
+Order Block
+
+Breaker
+
+Mitigation
+
+FVG
+
+IFVG
+
+Liquidity Pool
+
+OTE
+
+Balanced Price Range
+
+Volume Imbalance
+
+Opening Gap
+
+Previous Day High
+
+Previous Day Low
+
+Previous Week High
+
+Previous Week Low
+
+Previous Month High
+
+Previous Month Low
+
+Quarter High
+
+Quarter Low
+
+Year High
+
+Year Low
+
+---
+
+# 7. Previous Highs/Lows
+
+Automatically detect:
+
+PDH
+
+PDL
+
+PWH
+
+PWL
+
+PMH
+
+PML
+
+YDH
+
+YDL
+
+Quarter High
+
+Quarter Low
+
+Display:
+
+Labels
+
+Lines
+
+Auto extend
+
+Color options
+
+---
+
+# 8. Sessions
+
+Support:
+
+Sydney
+
+Tokyo
+
+London
+
+New York
+
+Kill Zones
+
+Asian Range
+
+London Open
+
+NY Open
+
+NY Lunch
+
+London Close
+
+Options:
+
+Background color
+
+Session High
+
+Session Low
+
+Session Midpoint
+
+Session Sweep Detection
+
+---
+
+# 9. ICT Time Model
+
+Show:
+
+Daily Open
+
+Weekly Open
+
+Monthly Open
+
+Midnight Open
+
+8:30 News
+
+9:30 NY Open
+
+10:00 Reversal
+
+11:00
+
+13:30
+
+15:00
+
+Power of Three
+
+Time cycles
+
+Silver Bullet
+
+Macros
+
+---
+
+# 10. Multi Timeframe
+
+Support:
+
+Monthly
+
+Weekly
+
+Daily
+
+4H
+
+1H
+
+15M
+
+5M
+
+1M
+
+Allow displaying HTF structures on lower timeframe.
+
+---
+
+# 11. Trend Engine
+
+Determine trend using:
+
+Swing Structure
+
+EMA Filter (optional)
+
+HTF Bias
+
+Liquidity Direction
+
+Order Flow
+
+Display:
+
+Trend ribbon
+
+Trend table
+
+Trend labels
+
+---
+
+# 12. Entry Model
+
+Generate entries only when multiple confirmations exist.
+
+Example:
+
+Liquidity Sweep
+
+*
+
+MSS
+
+*
+
+Order Block
+
+*
+
+FVG
+
+*
+
+Discount Zone
+
+*
+
+HTF Bias
+
+Then generate:
+
+BUY
+
+Likewise:
+
+SELL
+
+No signals without confirmation.
+
+---
+
+# 13. Signal Confidence
+
+Score every setup.
+
+Example:
+
+Liquidity Sweep = 20
+
+OB = 20
+
+FVG = 15
+
+HTF Trend = 15
+
+OTE = 10
+
+Session = 10
+
+CISD = 10
+
+Volume = optional
+
+Total:
+
+100%
+
+Display:
+
+High Probability
+
+Medium
+
+Low
+
+---
+
+# 14. Dashboard
+
+Create a modern dashboard.
+
+Include:
+
+Current Trend
+
+HTF Trend
+
+Session
+
+Premium/Discount
+
+Liquidity
+
+Current Structure
+
+Signal Strength
+
+Open Session
+
+ATR
+
+Spread (if available)
+
+Market Status
+
+Dashboard positions:
+
+Top Left
+
+Top Right
+
+Bottom Left
+
+Bottom Right
+
+---
+
+# 15. Alerts
+
+Create alerts for:
+
+BOS
+
+CHoCH
+
+MSS
+
+Liquidity Sweep
+
+OB Created
+
+OB Mitigated
+
+Breaker
+
+Mitigation Block
+
+FVG
+
+IFVG
+
+Entry
+
+Exit
+
+Session Open
+
+Session Close
+
+PDH Break
+
+PDL Break
+
+Premium Entry
+
+Discount Entry
+
+---
+
+# 16. UI/UX
+
+The interface should look professional.
+
+Requirements:
+
+Minimalistic
+
+Institutional
+
+No clutter
+
+Soft colors
+
+Rounded labels
+
+Transparent boxes
+
+Modern dashboard
+
+Consistent font sizes
+
+Professional color palette
+
+Hide insignificant drawings automatically
+
+---
+
+# 17. Performance
+
+The indicator must be highly optimized.
+
+Requirements:
+
+* Pine Script Version 6
+* Modular functions
+* No repainting
+* No lookahead
+* Efficient `request.security()` usage
+* Object recycling (reuse labels/lines/boxes)
+* Respect TradingView object limits
+* Fast execution on 1-minute charts
+* Suitable for scalping and swing trading
+
+---
+
+# 18. Settings Panel
+
+Organize settings into groups:
+
+* Market Structure
+* Liquidity
+* Order Blocks
+* Fair Value Gaps
+* PD Arrays
+* Sessions
+* Time Models
+* Higher Timeframe
+* Dashboard
+* Alerts
+* Colors
+* Performance
+* Debug
+
+Each feature must have its own enable/disable toggle.
+
+---
+
+# 19. Code Quality
+
+The code must:
+
+* Use Pine Script v6
+* Follow clean architecture principles
+* Be modular with reusable functions
+* Include detailed comments
+* Use consistent naming conventions
+* Avoid duplicate logic
+* Be easy to extend and maintain
+
+---
+
+# 20. Deliverables
+
+Produce:
+
+1. Complete Pine Script v6 source code
+2. Modular architecture
+3. Professional documentation
+4. Feature-by-feature explanations
+5. Well-commented code
+6. Changelog section
+7. Performance notes
+8. Future extension points
+
+---
+

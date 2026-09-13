@@ -1,0 +1,1483 @@
+//@version=6
+// ─────────────────────────────────────────────────────────────────────────────
+// ICT FORENSIC LAYER v1 — DETECTION & MARKING ONLY
+// Companion overlay for "Liquidity + S/D + Price Action Setups [MTF] v5.6 CTE".
+//
+// WHY THIS IS A SEPARATE SCRIPT, NOT AN EDIT TO v5.6
+// v5.6 compiles at ~98 500 of TradingView's 100 256 compiled-token limit, so it
+// has roughly 1 750 tokens of headroom. The ICT layer measured here costs about
+// 16 200 — nine times that, and its type / constant / helper declarations alone
+// cost 4 500. Adding it inline produces CE10117 ("too many tokens"), which is
+// exactly what happened. Trimming cannot close a 9× gap, and cutting non-ICT
+// features to make room is forbidden by the brief. Running it as a SECOND
+// indicator on the same chart gives the ICT layer its own full token budget and
+// leaves v5.6 byte-for-byte untouched — the strictest possible reading of
+// "do not modify anything else".
+//
+// WHAT IT DOES
+// It FINDS, VALIDATES, CLASSIFIES and MARKS ICT concepts. It produces NO buy or
+// sell signal, no entry, no stop, no target, and nothing here is read by v5.6.
+//
+//   LIQUIDITY   BSL / SSL pools: swing · equal highs/lows · external swing ·
+//               session H/L · PDH/PDL · PWH/PWL, each with a lifecycle
+//               (DETECTED → RESTING → APPROACHED → SWEPT / RAIDED → REVERSED /
+//               BROKEN → ARCHIVED) and an A/B/C raid grade.
+//   STRUCTURE   BOS / CHoCH on two independent scales, and MSS — which here
+//               means what ICT means: a displaced structure break that happened
+//               AFTER a qualified liquidity raid, not merely any break.
+//   PD ARRAYS   FVG · IFVG · Order Block · Breaker · BPR · OTE, one object type,
+//               one lifecycle: FRESH → PARTIAL → FILLED → INV → (inversion) →
+//               ARCHIVED.
+//   NARRATIVE   RAID → MSS → DISPLACEMENT → FVG → retrace into a PD array / OTE,
+//               tracked per side and graded LOW / MEDIUM / HIGH / VERY HIGH.
+//   SESSIONS    Judas swing (London / NY open) and Power of Three · AMD off the
+//               Asia range.
+//   CONTEXT     dealing range, premium / discount / equilibrium, structural OTE,
+//               HTF bias and the HTF FVG POI.
+//
+// NON-REPAINTING
+// Every state change is gated on barstate.isconfirmed. Pivots are confirmed
+// pivots (a leg is only read pivLen / extPiv bars after it printed). The three
+// request.security calls all index the expression [1] INSIDE the request and use
+// lookahead_on, which is the only combination that is both leak-free and stable
+// in realtime: it serves the LAST CLOSED higher-timeframe bar. An order block is
+// drawn back at its origin candle but is CREATED on the displacement close; an
+// FVG is created on its third candle's close; an MSS on the break candle.
+// Nothing is ever back-dated after creation — objects only change state forward.
+//
+// ANTI-CLUTTER (the brief's §25, made structural)
+// A raid only counts when the registry graded it and the pool is not a lone
+// untested minor pivot. An MSS only prints inside a live raid narrative and only
+// at or above the configured confluence. An FVG needs displacement, a minimum
+// height and — by default — a reason to exist. A displacement mark needs more
+// than a big candle. Every object type deduplicates against overlapping live
+// objects of the same kind and side.
+//
+// Educational tool. Not financial advice. This marks structure; it does not
+// predict it, and no claim of accuracy or profitability is made.
+// ─────────────────────────────────────────────────────────────────────────────
+indicator("ICT Forensic Layer v1", "ICT-FL", overlay = true,
+     max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// ═════════════════════════════════════════════════════════ MODULE 1 · INPUTS
+grpC = "① Core"
+atrLen     = input.int(14, "ATR length", minval = 1, group = grpC)
+pivLen     = input.int(5,  "Internal pivot length (MSS scale)", minval = 2, group = grpC,
+     tooltip = "The execution scale. Internal BOS / CHoCH on this scale is what an ICT market-structure SHIFT is measured on.")
+extPiv     = input.int(12, "External pivot length (context + dealing range)", minval = 5, group = grpC,
+     tooltip = "The context scale: major swings, the dealing range, premium / discount and external liquidity.")
+dispFac    = input.float(1.2, "Displacement body ≥ ATR ×", step = 0.1, minval = 0.3, group = grpC,
+     tooltip = "One definition of displacement for the whole script: a candle whose BODY is at least this many ATR and which closes in the outer third of its own range.")
+structDisp = input.float(0.5, "Structural break body ≥ ATR × (0 = any close)", step = 0.1, minval = 0, group = grpC,
+     tooltip = "A close through a swing without this much body is a liquidity RUN, not a break: it is not latched and the level stays available for a real break later.")
+ictSens    = input.string("Normal", "ICT sensitivity", options = ["Strict", "Normal", "Loose"], group = grpC,
+     tooltip = "Strict: only engineered / external / session / previous-day / previous-week pools qualify as raided liquidity, and thresholds are ×1.3.\nNormal: also swing pools price has already respected.\nLoose: any pool, grade C accepted, thresholds ×0.75.")
+ictSeqWin  = input.int(20, "Narrative window (bars): raid → MSS → displacement", minval = 3, group = grpC,
+     tooltip = "A shift arriving later than this after the raid is not a reaction to that raid. After displacement the story stays live for 3× this window.")
+minConf    = input.string("MEDIUM", "Minimum confluence to label MSS / PD-array retrace",
+     options = ["LOW", "MEDIUM", "HIGH", "VERY HIGH"], group = grpC,
+     tooltip = "LOW = one ICT item · MEDIUM = two · HIGH = raid + MSS + displacement + (FVG or a PD-array retrace) · VERY HIGH = all five. A classification of the MARK, never a probability.")
+
+grpL = "② Liquidity registry"
+eqTol       = input.float(0.15, "Equal-level tolerance (ATR ×)", step = 0.05, minval = 0.02, group = grpL)
+eqTickMin   = input.int(0, "Equal tolerance floor (ticks)", minval = 0, maxval = 500, group = grpL,
+     tooltip = "The tolerance is max(ATR × tolerance, this × mintick). Raise it on tick-quantised instruments where a dead-flat session collapses ATR. Suggested: 0 forex · 10-20 XAUUSD · 20-50 indices · 0 crypto.")
+eqMinSep    = input.int(5, "Equal highs / lows minimum bar separation", minval = 2, group = grpL,
+     tooltip = "Two pivots closer together than this are one double top, not an engineered pool.")
+eqNeedReact = input.bool(true, "Equal highs / lows need a real reaction between the legs", group = grpL)
+eqScanN     = input.int(3, "Equal-level pivot memory (pivots compared)", minval = 1, maxval = 6, group = grpL,
+     tooltip = "1 compares only the pivot immediately before, so a triple top with an offset middle leg registers nothing. 2-6 compares that many stored pivots and fuses every matching leg into ONE pool at their mean, tagged EQH×3 / EQL×4.")
+raidMinAtr  = input.float(0.10, "Minimum raid penetration (ATR ×)", step = 0.05, minval = 0.0, group = grpL,
+     tooltip = "A wick has to actually take the level. Below this the bar is recorded as a TEST of the pool — which raises its quality — and not as a raid.")
+raidDeepAtr = input.float(0.35, "Grade-A raid penetration (ATR ×)", step = 0.05, minval = 0.05, group = grpL,
+     tooltip = "A = this depth or more AND a rejection close · B = one of the two · C = shallow and weak.")
+raidRejFrac = input.float(0.5, "Rejection: close back inside by ≥ this × the raid bar's range", step = 0.05, minval = 0.0, maxval = 1.0, group = grpL)
+raidBackAtr = input.float(0.0, "Rejection also needs this much absolute close-back (ATR ×)", step = 0.05, minval = 0.0, group = grpL,
+     tooltip = "Second, ABSOLUTE leg of the same test. 0 = relative test only. Use it to kill one-tick pokes on instruments whose bar ranges are erratic.")
+reactWin    = input.int(6,  "Bars allowed for a reaction after a raid", minval = 1, group = grpL)
+sweepLook   = input.int(15, "A raid stays 'in play' for (bars)", minval = 1, group = grpL)
+poolLife    = input.int(300, "Pool max age (bars, 0 = never expire)", minval = 0, group = grpL)
+poolMaxN    = input.int(30, "Max pools tracked", minval = 6, maxval = 60, group = grpL)
+showPD      = input.bool(true, "Previous day high / low (PDH / PDL)", group = grpL)
+showPW      = input.bool(true, "Previous week high / low (PWH / PWL)", group = grpL)
+showSes     = input.bool(true, "Draw the session high / low lines (Asia / London / NY)", group = grpL,
+     tooltip = "Session extremes are always TRACKED as pools — Power of Three identifies its accumulation range from them. This controls only whether their lines are drawn.")
+showPools   = input.bool(true, "Draw the pool lines", group = grpL)
+lqLabel     = input.bool(true, "Label BSL / SSL levels on the last bar", group = grpL)
+lqMaxLbl    = input.int(10, "Max liquidity labels", minval = 2, maxval = 30, group = grpL,
+     tooltip = "When more levels qualify than this the strongest win: previous week > previous day > equal > external swing > session > minor swing, then resting before swept, then proximity to price.")
+
+grpI = "③ ICT marks"
+showLiq     = input.bool(true, "BSL / SSL RAID · SWEEP labels", group = grpI)
+showMss     = input.bool(true, "MSS ↑ / ↓ (a shift AFTER a raid)", group = grpI)
+showBos     = input.bool(true, "BOS / CHoCH structure chips", group = grpI)
+showDisp    = input.bool(true, "DISPLACEMENT marks", group = grpI)
+showFvg     = input.bool(true, "FVG (FRESH → PARTIAL → FILLED → INV)", group = grpI)
+showIfvg    = input.bool(true, "IFVG — an inverted FVG, confirmed on its retest", group = grpI)
+showBpr     = input.bool(true, "BPR — balanced price range", group = grpI)
+showOb      = input.bool(true, "Order block → breaker", group = grpI)
+showOte     = input.bool(true, "OTE 62-79 % of the raid → displacement leg", group = grpI)
+showPda     = input.bool(true, "PD arrays at price + the live narrative (last bar)", group = grpI)
+showJudas   = input.bool(true, "Judas swing (London / NY open)", group = grpI)
+showAmd     = input.bool(true, "Power of Three · AMD (Asia range)", group = grpI)
+fvgMin      = input.float(0.15, "FVG minimum height (ATR ×)", step = 0.05, minval = 0.0, group = grpI)
+fvgNeedCtx  = input.bool(true, "An FVG needs context (a raid, a recent MSS, or a structure break)", group = grpI,
+     tooltip = "OFF marks every displacement gap. ON is the ICT reading: an imbalance matters where price delivery was doing something.")
+dispMarkAtr = input.float(1.5, "DISPLACEMENT mark: body ≥ ATR ×", step = 0.1, minval = 0.5, group = grpI,
+     tooltip = "Stricter than the working displacement definition, because a stand-alone mark should be rare. The candle must ALSO break structure, follow a raid inside the window, or extend a previous expansion candle.")
+judasWin    = input.int(12, "Judas: manipulation within N bars of the session open", minval = 2, group = grpI,
+     tooltip = "In BARS, so it scales with the chart timeframe (12 bars = 60 minutes on M5). The reversal must arrive within 3× this.")
+objLife     = input.int(250, "PD array max age (bars)", minval = 20, group = grpI)
+objMax      = input.int(26, "Max PD arrays kept", minval = 6, maxval = 60, group = grpI)
+
+grpR = "④ Range / HTF context"
+showRange  = input.bool(true, "Dealing range: equilibrium + premium / discount", group = grpR)
+showRngOte = input.bool(true, "Structural OTE box (the range's own 62-79 %)", group = grpR)
+rangeSrc   = input.string("External", "Dealing range swings", options = ["External", "Internal"], group = grpR)
+htfSel     = input.string("Auto", "HTF for bias + the HTF FVG POI", options = ["Auto", "15", "30", "60", "240", "D"], group = grpR)
+biasLen    = input.int(50, "HTF bias EMA length", minval = 5, group = grpR)
+showHtfPoi = input.bool(true, "Draw the live HTF FVG POI", group = grpR)
+hPoiDisp   = input.float(0.8, "HTF FVG minimum displacement body (ATR ×)", step = 0.1, minval = 0, group = grpR)
+hPoiAge    = input.int(40, "HTF POI max age (HTF candles)", minval = 5, group = grpR)
+
+grpS = "⑤ Sessions (New York time)"
+asiaSes = input.session("2000-0000", "Asia",        group = grpS)
+lonSes  = input.session("0200-0500", "London",      group = grpS)
+nySes   = input.session("0700-1000", "New York AM", group = grpS)
+paintKZ = input.bool(false, "Shade the sessions", group = grpS)
+
+grpU = "⑥ UI"
+uiBig    = input.bool(true, "Readable marks", group = grpU)
+uiInfoSz = input.string("Small", "Info label size", options = ["Tiny", "Small", "Normal"], group = grpU)
+
+// ═══════════════════════════════════════ MODULE 2 · CONSTANTS + HELPERS
+var float NEAR_LVL_ATR     = 0.25   // "price is at the level"
+var float STRONG_CLOSE_PCT = 0.30   // a displacement-grade close sits in the outer third
+var float MSS_MIN_SEP_ATR  = 0.10   // an MSS level this close to the raid extreme IS the raid
+var float OTE_1            = 0.62
+var float OTE_2            = 0.79
+var float PD_EXTREME       = 0.25
+var float POOL_CONSUME_ATR = 4.0
+var int   LBL_X            = 15     // how far right the last-bar labels sit
+var color COL_BULL         = #089981
+var color COL_BEAR         = #f23645
+var color COL_NEU          = #787b86
+
+// pool kinds
+var int PK_SWING = 0
+var int PK_EXT   = 1
+var int PK_EQ    = 2
+var int PK_SES   = 3
+var int PK_PD    = 4
+var int PK_PW    = 5
+
+// pool lifecycle
+var int PS_NEW   = 0
+var int PS_VAL   = 1
+var int PS_RAID  = 2
+var int PS_REACT = 3
+var int PS_DONE  = 4
+
+// raid grades
+var int RQ_NONE = 0
+var int RQ_C    = 1
+var int RQ_B    = 2
+var int RQ_A    = 3
+
+// PD-array kinds
+var int IK_FVG  = 1
+var int IK_IFVG = 2
+var int IK_OB   = 3
+var int IK_BRK  = 4
+var int IK_BPR  = 5
+var int IK_OTE  = 6
+
+// PD-array lifecycle
+var int IS_CONF = 1    // fresh · projected · (inverted:) confirmed
+var int IS_PART = 2    // partially mitigated · tapped
+var int IS_FULL = 3    // filled / mitigated · (OTE:) the leg extreme was retaken
+var int IS_INV  = 4    // closed through — an inversion candidate, or dying
+var int IS_ARCH = 5    // scheduled for removal
+
+// confluence classes
+var int IC_LOW  = 1
+var int IC_MED  = 2
+var int IC_HIGH = 3
+var int IC_VH   = 4
+
+mkSize  = uiBig ? size.small : size.tiny
+infoSz  = uiInfoSz == "Tiny" ? size.tiny : uiInfoSz == "Small" ? size.small : size.normal
+
+f_chip(bool below, string txt, color bg, string sz) =>
+    label.new(bar_index, na, txt, yloc = below ? yloc.belowbar : yloc.abovebar,
+         style = below ? label.style_label_up : label.style_label_down,
+         color = bg, textcolor = color.white, size = sz)
+
+f_recent(int b, int look) => not na(b) and bar_index - b <= look
+f_rqTxt(int q)  => q == RQ_A ? "A" : q == RQ_B ? "B" : q == RQ_C ? "C" : "—"
+f_confTxt(int c) => c == IC_VH ? "VERY HIGH" : c == IC_HIGH ? "HIGH" : c == IC_MED ? "MEDIUM" : "LOW"
+f_confMin() => minConf == "VERY HIGH" ? IC_VH : minConf == "HIGH" ? IC_HIGH : minConf == "MEDIUM" ? IC_MED : IC_LOW
+f_kindTxt(int k) =>
+    k == PK_PW ? "PWH/PWL" : k == PK_PD ? "PDH/PDL" : k == PK_EQ ? "EQUAL" :
+         k == PK_EXT ? "EXT SWING" : k == PK_SES ? "SESSION" : "SWING"
+// §17 priority of a level TYPE — how likely it is to hold real resting stops
+f_kindPri(int k) =>
+    k == PK_PW ? 6 : k == PK_PD ? 5 : k == PK_EQ ? 5 : k == PK_EXT ? 4 : k == PK_SES ? 3 : 1
+
+// ═══════════════════════════ MODULE 3 · CORE SERIES + CANDLE ANATOMY
+atr     = ta.atr(atrLen)
+body    = math.abs(close - open)
+rng     = high - low
+bullBar = close > open
+bearBar = close < open
+confirmed = barstate.isconfirmed
+
+strongUp  = rng > 0 and close >= high - STRONG_CLOSE_PCT * rng
+strongDn  = rng > 0 and close <= low + STRONG_CLOSE_PCT * rng
+dispUpBar = bullBar and body >= dispFac * atr and strongUp
+dispDnBar = bearBar and body >= dispFac * atr and strongDn
+
+// ONE tolerance for equality, dedupe and clustering, evaluated once per bar
+lqTol   = math.max(eqTol * atr, eqTickMin * syminfo.mintick)
+lqReact = math.max(lqTol * 2, 0.5 * atr)
+
+// ═════════════════════════ MODULE 4 · STRUCTURE (INTERNAL + EXTERNAL)
+// One engine, two independent instances. The protected swing is the ACTUAL
+// ORIGINATING PIVOT of the leg that made the last break, not a running min/max,
+// which is what makes a CHoCH mean "the leg that produced the trend failed".
+// A weak close through a level is a liquidity RUN: reported, not latched, so the
+// level stays available for a real structural break later.
+type Struct
+    int   dir       = 0
+    float swHi      = na
+    int   swHiBar   = na
+    float swLo      = na
+    int   swLoBar   = na
+    bool  hiBroken  = false
+    bool  loBroken  = false
+    float protLo    = na
+    int   protLoBar = na
+    float protHi    = na
+    int   protHiBar = na
+    float evLvlUp   = na    // the level the last bullish event actually broke
+    float evLvlDn   = na
+    int   evBarUp   = na    // the bar that level's pivot formed on
+    int   evBarDn   = na
+
+f_structUpdate(Struct s, float pvH, float pvL, simple int pvLen) =>
+    bool bosU = false
+    bool bosD = false
+    bool chU  = false
+    bool chD  = false
+    if confirmed
+        if not na(pvH)
+            s.swHi     := pvH
+            s.swHiBar  := bar_index - pvLen
+            s.hiBroken := false
+        if not na(pvL)
+            s.swLo     := pvL
+            s.swLoBar  := bar_index - pvLen
+            s.loBroken := false
+        bool disp = body >= structDisp * atr
+        // CHoCH first — a displaced close through the PROTECTED swing
+        if s.dir == 1 and not na(s.protLo) and close < s.protLo and disp
+            chD         := true
+            s.dir       := -1
+            s.evLvlDn   := s.protLo
+            s.evBarDn   := s.protLoBar
+            s.protHi    := s.swHi
+            s.protHiBar := s.swHiBar
+            s.protLo    := na
+            s.protLoBar := na
+            s.loBroken  := false
+        else if s.dir == -1 and not na(s.protHi) and close > s.protHi and disp
+            chU         := true
+            s.dir       := 1
+            s.evLvlUp   := s.protHi
+            s.evBarUp   := s.protHiBar
+            s.protLo    := s.swLo
+            s.protLoBar := s.swLoBar
+            s.protHi    := na
+            s.protHiBar := na
+            s.hiBroken  := false
+        // BOS — a displaced close through the latest pivot, with the trend
+        else if not na(s.swHi) and not s.hiBroken and close > s.swHi and s.dir >= 0 and disp
+            bosU        := true
+            s.hiBroken  := true
+            s.dir       := 1
+            s.evLvlUp   := s.swHi
+            s.evBarUp   := s.swHiBar
+            s.protLo    := s.swLo
+            s.protLoBar := s.swLoBar
+        else if not na(s.swLo) and not s.loBroken and close < s.swLo and s.dir <= 0 and disp
+            bosD        := true
+            s.loBroken  := true
+            s.dir       := -1
+            s.evLvlDn   := s.swLo
+            s.evBarDn   := s.swLoBar
+            s.protHi    := s.swHi
+            s.protHiBar := s.swHiBar
+        // the first leg: a counter-trend pivot break with no protected level yet
+        else if s.dir == 1 and na(s.protLo) and not na(s.swLo) and not s.loBroken and close < s.swLo and disp
+            chD         := true
+            s.dir       := -1
+            s.evLvlDn   := s.swLo
+            s.evBarDn   := s.swLoBar
+            s.loBroken  := true
+            s.protHi    := s.swHi
+            s.protHiBar := s.swHiBar
+        else if s.dir == -1 and na(s.protHi) and not na(s.swHi) and not s.hiBroken and close > s.swHi and disp
+            chU         := true
+            s.dir       := 1
+            s.evLvlUp   := s.swHi
+            s.evBarUp   := s.swHiBar
+            s.hiBroken  := true
+            s.protLo    := s.swLo
+            s.protLoBar := s.swLoBar
+    [bosU, bosD, chU, chD]
+
+ph  = ta.pivothigh(high, pivLen, pivLen)
+pl  = ta.pivotlow(low,  pivLen, pivLen)
+eph = ta.pivothigh(high, extPiv, extPiv)
+epl = ta.pivotlow(low,  extPiv, extPiv)
+var Struct sInt = Struct.new()
+var Struct sExt = Struct.new()
+[bosUp,  bosDn,  chUp,  chDn]  = f_structUpdate(sInt, ph,  pl,  pivLen)
+[eBosUp, eBosDn, eChUp, eChDn] = f_structUpdate(sExt, eph, epl, extPiv)
+
+brokeUp = bosUp or eBosUp or chUp or eChUp
+brokeDn = bosDn or eBosDn or chDn or eChDn
+extDir  = sExt.dir
+
+// a recent internal shift, used as FVG context
+var int iChUpBar = na
+var int iChDnBar = na
+if confirmed and chUp
+    iChUpBar := bar_index
+if confirmed and chDn
+    iChDnBar := bar_index
+recentMssUp = f_recent(iChUpBar, 10)
+recentMssDn = f_recent(iChDnBar, 10)
+
+if showBos and (eBosUp or eChUp)
+    f_chip(true,  eChUp ? "CHoCH ↑" : "BOS ↑", color.new(COL_BULL, 20), mkSize)
+if showBos and (eBosDn or eChDn)
+    f_chip(false, eChDn ? "CHoCH ↓" : "BOS ↓", color.new(COL_BEAR, 20), mkSize)
+if showBos and (bosUp or chUp)
+    f_chip(true,  chUp ? "iCHoCH" : "ibos", color.new(color.gray, 60), size.tiny)
+if showBos and (bosDn or chDn)
+    f_chip(false, chDn ? "iCHoCH" : "ibos", color.new(color.gray, 60), size.tiny)
+
+// ═══════════════════════════════════ MODULE 5 · SESSIONS
+f_inSes(simple string s) => not na(time(timeframe.period, s, "America/New_York"))
+inAsia = f_inSes(asiaSes)
+inLon  = f_inSes(lonSes)
+inNY   = f_inSes(nySes)
+intra  = timeframe.isintraday
+
+type Ses
+    float hi  = na
+    float lo  = na
+    float fhi = na
+    float flo = na
+
+// tracks the running extreme and FREEZES it at the session close. The frozen
+// level is resting liquidity and is handed to the registry, so session levels
+// inherit the same raid grading and lifecycle as every other pool.
+f_sesTrack(Ses s, bool active) =>
+    bool fresh = false
+    if active
+        if not active[1]
+            s.hi := high
+            s.lo := low
+        else
+            s.hi := math.max(nz(s.hi, high), high)
+            s.lo := math.min(nz(s.lo, low), low)
+    if not active and active[1] and confirmed and not na(s.hi)
+        s.fhi := s.hi
+        s.flo := s.lo
+        fresh := true
+    fresh
+
+var Ses sAsia = Ses.new()
+var Ses sLon  = Ses.new()
+var Ses sNY   = Ses.new()
+asiaFresh = f_sesTrack(sAsia, inAsia and intra)
+lonFresh  = f_sesTrack(sLon,  inLon  and intra)
+nyFresh   = f_sesTrack(sNY,   inNY   and intra)
+
+bgcolor(paintKZ and intra and inAsia ? color.new(color.purple, 95) : na, title = "Asia")
+bgcolor(paintKZ and intra and inLon  ? color.new(color.blue,   94) : na, title = "London")
+bgcolor(paintKZ and intra and inNY   ? color.new(color.orange, 94) : na, title = "New York")
+
+// ═══════════════════════════════════ MODULE 6 · HTF CONTEXT
+// Every read is the LAST CLOSED HTF bar: the expression inside the request is
+// indexed [1] and the call uses lookahead_on. lookahead_off does NOT mean "the
+// last closed bar" — it means "no future data", and the HTF bar that is still
+// forming is not future data, so it would change under the script as it builds.
+// [1] + lookahead_on is leak-free AND stable, at the cost of one honest bar of
+// delay: an HTF event is usable once its candle has closed.
+f_autoHtf() =>
+    switch timeframe.period
+        "1"   => "15"
+        "2"   => "30"
+        "3"   => "30"
+        "5"   => "60"
+        "10"  => "120"
+        "15"  => "240"
+        "30"  => "240"
+        "60"  => "D"
+        "120" => "D"
+        "240" => "D"
+        => "D"
+
+htfTf = htfSel == "Auto" ? f_autoHtf() : htfSel
+
+f_htfPack() =>
+    _atr = ta.atr(atrLen)
+    _dir = close > ta.ema(close, biasLen) ? 1 : -1
+    _dU  = close[1] > open[1] and math.abs(close[1] - open[1]) >= hPoiDisp * _atr
+    _dD  = close[1] < open[1] and math.abs(close[1] - open[1]) >= hPoiDisp * _atr
+    var float bTop = na
+    var float bBot = na
+    var int   bBar = na
+    var float sTop = na
+    var float sBot = na
+    var int   sBar = na
+    if low > high[2] and _dU
+        bTop := low
+        bBot := high[2]
+        bBar := bar_index
+    if high < low[2] and _dD
+        sTop := low[2]
+        sBot := high
+        sBar := bar_index
+    if not na(bBot) and (close < bBot or bar_index - bBar > hPoiAge)
+        bTop := na
+        bBot := na
+    if not na(sTop) and (close > sTop or bar_index - sBar > hPoiAge)
+        sTop := na
+        sBot := na
+    [_dir[1], bTop[1], bBot[1], sTop[1], sBot[1]]
+
+[htfDirRaw, hPoiBTop, hPoiBBot, hPoiSTop, hPoiSBot] = request.security(syminfo.tickerid, htfTf, f_htfPack(),
+     lookahead = barmerge.lookahead_on)
+htfDir = nz(htfDirRaw, 0)
+
+// The [1] INSIDE the request is what makes lookahead_on safe: only a COMPLETED
+// previous day / week is ever visible, on history and in realtime alike.
+[pdhRaw, pdlRaw] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[pwhRaw, pwlRaw] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_on)
+newDay  = ta.change(time("D")) != 0
+newWeek = ta.change(time("W")) != 0
+// weekly levels carry information intraday and on the daily; on weekly and above
+// they are simply the chart's own previous bar
+pwUse = showPW and (intra or timeframe.isdaily)
+
+// ═════════════════════════════ MODULE 7 · LIQUIDITY POOL REGISTRY
+// Every meaningful level becomes a POOL with a real lifecycle:
+//   CREATED → VALIDATED (respected at least once) → RAIDED (wick through, close
+//   back inside, graded A/B/C) → REACTION CONFIRMED → CONSUMED.
+// A close BEYOND the level is a BREAK, not a raid: that is expansion, and the
+// two are never conflated.
+type Pool
+    float  px        = na
+    int    kind      = 0
+    bool   buySide   = true
+    int    bornBar   = na
+    int    state     = 0
+    int    raidBar   = na
+    float  raidExt   = na
+    int    brkBar    = na
+    int    id        = 0
+    int    touches   = 0
+    int    lastTouch = na
+    int    rq        = 0
+    int    legs      = 1
+    string tag       = ""
+    line   ln        = na
+
+var pools   = array.new<Pool>()
+var poolSeq = array.new<int>(1, 0)
+
+f_poolTouch(Pool p) =>
+    int t = 0
+    if not na(p)
+        t := p.touches
+    t
+
+f_poolVis(int kind) =>
+    kind == PK_PW ? (showPools and showPW) : kind == PK_PD ? (showPools and showPD) :
+         kind == PK_SES ? (showPools and showSes) : showPools
+
+f_poolCol(int kind, bool bs) =>
+    kind == PK_EQ ? (bs ? color.new(COL_BEAR, 25) : color.new(COL_BULL, 25)) :
+         kind == PK_PD ? color.new(color.yellow, 35) :
+         kind == PK_PW ? color.new(color.orange, 25) :
+         kind == PK_EXT ? (bs ? color.new(COL_BEAR, 40) : color.new(COL_BULL, 40)) :
+         color.new(COL_NEU, 62)
+
+f_poolStyle(int kind) =>
+    kind == PK_EQ ? line.style_dotted : kind == PK_SWING ? line.style_dashed : line.style_solid
+
+f_touchInc(Pool p) =>
+    if na(p.lastTouch) or bar_index - p.lastTouch >= eqMinSep
+        p.touches   += 1
+        p.lastTouch := bar_index
+    true
+
+f_lnEnd(line ln, string sty) =>
+    line.set_extend(ln, extend.none)
+    line.set_x2(ln, bar_index)
+    line.set_style(ln, sty)
+    true
+
+// Registers a pool unless a live pool of the same side already sits there.
+// A duplicate that OUTRANKS a live un-raided SWING pool UPGRADES it in place
+// rather than being refused — equal highs and external swings sit by
+// construction at prices where a swing pool already lives, so a plain refusal
+// would mean the registry almost never held engineered or external liquidity at
+// all. Identity, birth bar and touch history survive the upgrade, and a pool
+// that has already been raided is never re-classified.
+f_poolPush(float px, int kind, bool bs, string tag, int startBar, bool validated, int legs) =>
+    bool ok = not na(px)
+    if ok and array.size(pools) > 0
+        for i = 0 to array.size(pools) - 1
+            Pool q = array.get(pools, i)
+            if q.state < PS_DONE and q.buySide == bs and math.abs(q.px - px) <= lqTol
+                ok := false
+                q.legs := math.max(q.legs, legs)
+                if kind != PK_SWING and q.kind == PK_SWING and q.state <= PS_VAL
+                    q.kind  := kind
+                    q.tag   := tag
+                    q.px    := px
+                    q.state := PS_VAL
+                    f_touchInc(q)
+                    line.set_y1(q.ln, px)
+                    line.set_y2(q.ln, px)
+                    line.set_color(q.ln, f_poolVis(kind) ? f_poolCol(kind, bs) : color.new(color.gray, 100))
+                    line.set_style(q.ln, f_poolStyle(kind))
+                break
+    if ok
+        array.set(poolSeq, 0, array.get(poolSeq, 0) + 1)
+        Pool p = Pool.new(px = px, kind = kind, buySide = bs, bornBar = startBar,
+             state = validated ? PS_VAL : PS_NEW, tag = tag, id = array.get(poolSeq, 0),
+             touches = validated ? 1 : 0, legs = legs)
+        p.ln := line.new(startBar, px, bar_index + 1, px,
+             color = f_poolVis(kind) ? f_poolCol(kind, bs) : color.new(color.gray, 100),
+             style = f_poolStyle(kind),
+             width = kind == PK_EQ or kind == PK_PD or kind == PK_PW ? 2 : 1,
+             extend = extend.right)
+        array.push(pools, p)
+        // At the cap, evict the WEAKEST un-raided pool rather than the oldest: a
+        // previous-day high that has stood untouched all session is the most
+        // crowded level on the chart and must not die before a 3-bar-old pivot.
+        while array.size(pools) > poolMaxN
+            int   victim = 0
+            float worst  = 1e18
+            for i = 0 to array.size(pools) - 1
+                Pool o = array.get(pools, i)
+                float w = f_kindPri(o.kind) * 10 + math.min(o.touches, 4) * 4 +
+                     (o.state == PS_RAID or o.state == PS_REACT ? 100 : 0) + i * 0.001
+                if w < worst
+                    worst  := w
+                    victim := i
+            Pool v = array.get(pools, victim)
+            line.delete(v.ln)
+            array.remove(pools, victim)
+    ok
+
+// One lifecycle pass per confirmed bar. The `confirmed` guard lives INSIDE the
+// function on purpose: Pine evaluates both branches of a ternary, so gating the
+// CALL would still mutate pool state on every intrabar tick.
+f_poolScan() =>
+    int raided = 0
+    if confirmed and array.size(pools) > 0
+        for i = array.size(pools) - 1 to 0
+            Pool p = array.get(pools, i)
+            if p.state == PS_DONE
+                if poolLife > 0 and bar_index - p.bornBar > poolLife + 50
+                    line.delete(p.ln)
+                    array.remove(pools, i)
+                continue
+            if poolLife > 0 and bar_index - p.bornBar > poolLife
+                p.state := PS_DONE
+                f_lnEnd(p.ln, line.style_dotted)
+                continue
+            float sg  = p.buySide ? 1.0 : -1.0
+            float pex = p.buySide ? high : low
+            if sg * (pex - p.px) > 0
+                if sg * (close - p.px) < 0
+                    // took the level and closed back inside → RAID, graded
+                    float pen = sg * (pex - p.px) / atr
+                    bool  rej = (p.buySide ? close <= high - raidRejFrac * rng : close >= low + raidRejFrac * rng) and
+                         (raidBackAtr <= 0 or sg * (p.px - close) >= raidBackAtr * atr)
+                    if p.state <= PS_VAL and pen >= raidMinAtr
+                        p.state   := PS_RAID
+                        p.raidBar := bar_index
+                        p.raidExt := pex
+                        p.rq      := pen >= raidDeepAtr and rej ? RQ_A : pen >= raidDeepAtr or rej ? RQ_B : RQ_C
+                        raided    += 1
+                        f_lnEnd(p.ln, line.style_dashed)
+                    else if p.state <= PS_VAL
+                        // below the depth threshold this is a TEST, not a raid:
+                        // price respected the level, so the pool gets stronger
+                        p.state := PS_VAL
+                        f_touchInc(p)
+                    else
+                        p.raidExt := p.buySide ? math.max(nz(p.raidExt, high), high) : math.min(nz(p.raidExt, low), low)
+                else
+                    p.state  := PS_DONE          // closed beyond → BROKEN, expansion
+                    p.brkBar := bar_index
+                    f_lnEnd(p.ln, line.style_dotted)
+                    continue
+            else if p.state <= PS_VAL and (p.buySide ? high >= p.px - NEAR_LVL_ATR * atr : low <= p.px + NEAR_LVL_ATR * atr)
+                p.state := PS_VAL                // approached and respected
+                f_touchInc(p)
+            if p.state == PS_RAID or p.state == PS_REACT
+                if sg * (close - p.px) > 0
+                    p.state  := PS_DONE          // the raid failed and became a break
+                    p.brkBar := bar_index
+                else if p.state == PS_RAID
+                    if bar_index - p.raidBar > reactWin
+                        p.state := PS_DONE       // no reaction in time → stale
+                    else if bar_index > p.raidBar and (p.buySide ? (dispDnBar or chDn) : (dispUpBar or chUp))
+                        // THE RAID CANDLE CANNOT BE ITS OWN REACTION. The
+                        // reaction must be a LATER bar, or a shallow poke whose
+                        // own candle happened to carry an unrelated shift would
+                        // promote and re-grade itself on the spot.
+                        p.state := PS_REACT
+                        p.rq    := p.rq == RQ_C ? RQ_B : p.rq
+                else if bar_index - p.raidBar > sweepLook or math.abs(close - p.px) > POOL_CONSUME_ATR * atr
+                    p.state := PS_DONE
+    raided
+
+// ---- pivot memory: equal highs / lows, each leg with its own reaction depth --
+// A ring of eqScanN pivots per side. Comparing only against the pivot
+// immediately before misses a triple top whose middle leg overshoots, and a
+// level re-tested two pivots later. Every stored leg that satisfies tolerance,
+// separation and reaction is fused into ONE pool at their MEAN — never at the
+// highest of them, because the mean is where the stops actually sit.
+// Non-repainting by construction: ph / pl are confirmed pivots, so a leg is only
+// read pivLen bars after it printed, and the pool is registered on that
+// confirming bar with its birth bar back-dated to the pivot.
+var phVal = array.new<float>()
+var phBar = array.new<int>()
+var phMin = array.new<float>()
+var plVal = array.new<float>()
+var plBar = array.new<int>()
+var plMax = array.new<float>()
+
+if confirmed
+    if array.size(phMin) > 0
+        for i = 0 to array.size(phMin) - 1
+            array.set(phMin, i, math.min(array.get(phMin, i), low))
+    if array.size(plMax) > 0
+        for i = 0 to array.size(plMax) - 1
+            array.set(plMax, i, math.max(array.get(plMax, i), high))
+
+if confirmed and not na(ph)
+    int   pb    = bar_index - pivLen
+    float sum   = ph
+    int   n     = 1
+    int   first = pb
+    if array.size(phVal) > 0
+        for i = 0 to array.size(phVal) - 1
+            float v = array.get(phVal, i)
+            int   b = array.get(phBar, i)
+            if math.abs(ph - v) <= lqTol and pb - b >= eqMinSep
+                bool react = not eqNeedReact or (not na(array.get(phMin, i)) and math.min(ph, v) - array.get(phMin, i) >= lqReact)
+                if react
+                    sum   += v
+                    n     += 1
+                    first := math.min(first, b)
+    if n >= 2
+        f_poolPush(sum / n, PK_EQ, true, n > 2 ? "EQH×" + str.tostring(n) : "EQH", first, true, n)
+    array.push(phVal, ph)
+    array.push(phBar, pb)
+    array.push(phMin, ta.lowest(low, pivLen))
+    while array.size(phVal) > eqScanN
+        array.shift(phVal)
+        array.shift(phBar)
+        array.shift(phMin)
+    f_poolPush(ph, PK_SWING, true, "SH", pb, false, 1)
+
+if confirmed and not na(pl)
+    int   pb2    = bar_index - pivLen
+    float sum2   = pl
+    int   n2     = 1
+    int   first2 = pb2
+    if array.size(plVal) > 0
+        for i = 0 to array.size(plVal) - 1
+            float v = array.get(plVal, i)
+            int   b = array.get(plBar, i)
+            if math.abs(pl - v) <= lqTol and pb2 - b >= eqMinSep
+                bool react2 = not eqNeedReact or (not na(array.get(plMax, i)) and array.get(plMax, i) - math.max(pl, v) >= lqReact)
+                if react2
+                    sum2   += v
+                    n2     += 1
+                    first2 := math.min(first2, b)
+    if n2 >= 2
+        f_poolPush(sum2 / n2, PK_EQ, false, n2 > 2 ? "EQL×" + str.tostring(n2) : "EQL", first2, true, n2)
+    array.push(plVal, pl)
+    array.push(plBar, pb2)
+    array.push(plMax, ta.highest(high, pivLen))
+    while array.size(plVal) > eqScanN
+        array.shift(plVal)
+        array.shift(plBar)
+        array.shift(plMax)
+    f_poolPush(pl, PK_SWING, false, "SL", pb2, false, 1)
+
+// external swings, session extremes, PDH/PDL and PWH/PWL are PRE-VALIDATED:
+// they are known resting liquidity, not candidates
+if confirmed and not na(eph)
+    f_poolPush(eph, PK_EXT, true,  "EXT-H", bar_index - extPiv, true, 1)
+if confirmed and not na(epl)
+    f_poolPush(epl, PK_EXT, false, "EXT-L", bar_index - extPiv, true, 1)
+// Session extremes ALWAYS register, whatever `showSes` says: Power of Three
+// identifies its accumulation range from the Asia pool's tag, and the narrative
+// counts session raids. `showSes` controls the LINE only (see f_poolVis), so
+// hiding the drawing can never silently disable the AMD engine.
+if asiaFresh
+    f_poolPush(sAsia.fhi, PK_SES, true,  "Asia H", bar_index, true, 1)
+    f_poolPush(sAsia.flo, PK_SES, false, "Asia L", bar_index, true, 1)
+if lonFresh
+    f_poolPush(sLon.fhi, PK_SES, true,  "Lon H", bar_index, true, 1)
+    f_poolPush(sLon.flo, PK_SES, false, "Lon L", bar_index, true, 1)
+if nyFresh
+    f_poolPush(sNY.fhi, PK_SES, true,  "NY H", bar_index, true, 1)
+    f_poolPush(sNY.flo, PK_SES, false, "NY L", bar_index, true, 1)
+if confirmed and newDay and intra and showPD
+    f_poolPush(pdhRaw, PK_PD, true,  "PDH", bar_index, true, 1)
+    f_poolPush(pdlRaw, PK_PD, false, "PDL", bar_index, true, 1)
+if confirmed and newWeek and pwUse and not na(pwhRaw) and not na(pwlRaw)
+    f_poolPush(pwhRaw, PK_PW, true,  "PWH", bar_index, true, 1)
+    f_poolPush(pwlRaw, PK_PW, false, "PWL", bar_index, true, 1)
+
+// Registration runs first so the scan sees this bar's new levels. That ordering
+// does not by itself allow a same-bar raid of a pivot pool — pivot construction
+// prevents it, because a swing pool only confirms after pivLen lower / higher
+// bars, so the confirming bar cannot be beyond it. A same-bar raid of a freshly
+// frozen session or previous-day level IS a real event and is allowed.
+poolRaids = f_poolScan()
+
+// ---- the freshest live raid on each side ------------------------------------
+f_findRaid(int dir) =>
+    Pool   bp   = na
+    int    bbar = na
+    float  bext = na
+    int    bknd = 0
+    string btag = ""
+    int    bid  = 0
+    int    brq  = 0
+    if array.size(pools) > 0
+        for i = 0 to array.size(pools) - 1
+            Pool p = array.get(pools, i)
+            bool sideOk = dir == 1 ? not p.buySide : p.buySide
+            if sideOk and (p.state == PS_RAID or p.state == PS_REACT) and f_recent(p.raidBar, sweepLook)
+                if na(bp) or p.raidBar > bbar
+                    bp   := p
+                    bbar := p.raidBar
+                    bext := p.raidExt
+                    bknd := p.kind
+                    btag := p.tag
+                    bid  := p.id
+                    brq  := p.rq
+    [bp, bbar, bext, bknd, btag, bid, brq]
+
+[loPool, loBar, loExt, loKind, loTag, loId, loRq] = f_findRaid(1)
+[hiPool, hiBar, hiExt, hiKind, hiTag, hiId, hiRq] = f_findRaid(-1)
+sslLive = not na(loPool)
+bslLive = not na(hiPool)
+
+// ═══════════════ MODULE 8 · DEALING RANGE · PREMIUM / DISCOUNT · OTE
+useExtRng = rangeSrc == "External" and not na(sExt.swHi) and not na(sExt.swLo)
+rngHi     = useExtRng ? sExt.swHi    : sInt.swHi
+rngLo     = useExtRng ? sExt.swLo    : sInt.swLo
+rngHiBar  = useExtRng ? sExt.swHiBar : sInt.swHiBar
+rngLoBar  = useExtRng ? sExt.swLoBar : sInt.swLoBar
+rangeOK   = not na(rngHi) and not na(rngLo) and rngHi > rngLo
+bullRange = rangeOK and not na(rngHiBar) and not na(rngLoBar) and rngHiBar > rngLoBar
+bearRange = rangeOK and not na(rngHiBar) and not na(rngLoBar) and rngLoBar > rngHiBar
+rngW      = rangeOK ? rngHi - rngLo : na
+eqLvl     = rangeOK ? rngLo + rngW / 2 : na
+pdPos     = rangeOK ? (close - rngLo) / rngW : na
+oteBuyTop  = rangeOK ? rngHi - OTE_1 * rngW : na
+oteBuyBot  = rangeOK ? rngHi - OTE_2 * rngW : na
+oteSellBot = rangeOK ? rngLo + OTE_1 * rngW : na
+oteSellTop = rangeOK ? rngLo + OTE_2 * rngW : na
+inOTEbuy   = bullRange and close <= oteBuyTop  and close >= oteBuyBot
+inOTEsell  = bearRange and close >= oteSellBot and close <= oteSellTop
+atHtfPoiL  = not na(hPoiBTop) and low  <= hPoiBTop and high >= hPoiBBot
+atHtfPoiS  = not na(hPoiSTop) and high >= hPoiSBot and low  <= hPoiSTop
+
+// ═════════════════════════════ MODULE 9 · ICT OBJECTS + NARRATIVE
+type Ict
+    int    kind    = 0
+    int    dir     = 0
+    float  top     = na
+    float  bot     = na
+    int    bornBar = na
+    int    state   = 1
+    float  deep    = na
+    int    conf    = 1
+    bool   ctxRaid = false
+    int    endBar  = na
+    bool   accept  = false   // the failure was meaningful (displacement, or accepted)
+    bool   used    = false   // consumed into a BPR
+    float  anchor  = na      // OTE: the raid extreme, which invalidates it
+    float  legExt  = na      // OTE: the leg extreme, expanding until the first tap
+    box    bx      = na
+    label  lb      = na
+
+type Narr
+    int    st      = 0       // 0 idle · 1 raid · 2 MSS · 3 displacement · 4 FVG
+    string tag     = ""
+    float  raidExt = na
+    int    raidBar = na
+    int    rq      = 0
+    int    mssBar  = na
+    bool   mssCh   = false
+    float  mssLvl  = na
+    int    dispBar = na
+    bool   pda     = false   // price retraced into a same-side PD array or OTE
+    bool   ote     = false
+
+// Every mutable ICT scalar lives in one object: the per-bar pass runs inside a
+// function, and a Pine function may mutate a UDT field but never assign a global.
+type Mem
+    int    dispL  = na
+    int    dispS  = na
+    int    jSt    = 0        // Judas: 0 watching · ±1 manipulated · 2 confirmed · 3 failed
+    float  jOpen  = na
+    int    jBar   = na
+    float  jExt   = na
+    string jTag   = ""
+    int    amdSt  = 0        // AMD: 0 accumulation · ±1 manipulated · 2 distributed · 3 failed
+    float  amdExt = na
+    label  pdaLb  = na
+
+var objs   = array.new<Ict>()
+var mssLns = array.new<line>()
+var lqLbs  = array.new<label>()
+var Narr nL = Narr.new()
+var Narr nS = Narr.new()
+var Mem  m  = Mem.new()
+
+// §19 · confluence, taken from the narrative's OWN stages. It never reads a
+// global "did this happen recently" flag, which is what stops an unrelated
+// event on the other side of the chart from paying for this one.
+f_conf(Narr n) =>
+    bool liq  = n.st >= 1
+    bool mss  = n.st >= 2
+    bool disp = n.st >= 3
+    bool fvg  = n.st >= 4
+    int  core = (liq ? 1 : 0) + (mss ? 1 : 0) + (disp ? 1 : 0) + (fvg ? 1 : 0)
+    liq and mss and disp and fvg and n.pda ? IC_VH :
+         liq and mss and disp and (fvg or n.pda) ? IC_HIGH :
+         core >= 2 ? IC_MED : IC_LOW
+
+f_narrTxt(Narr n) =>
+    n.st == 0 ? "—" : "raid(" + n.tag + " " + f_rqTxt(n.rq) + ")" + (n.st >= 2 ? " → MSS" : "") +
+         (n.st >= 3 ? " → disp" : "") + (n.st >= 4 ? " → FVG" : "") + (n.pda ? " → PDA" : "") +
+         " · " + f_confTxt(f_conf(n))
+
+f_narrKill(Narr n) =>
+    n.st  := 0
+    n.pda := false
+    n.ote := false
+    true
+
+f_narrRaid(Narr n, string tag, float ext, int rq) =>
+    n.st      := 1
+    n.tag     := tag
+    n.raidExt := ext
+    n.raidBar := bar_index
+    n.rq      := rq
+    n.mssBar  := na
+    n.mssCh   := false
+    n.mssLvl  := na
+    n.dispBar := na
+    n.pda     := false
+    n.ote     := false
+    true
+
+// §3 / §4 · a raid that MATTERS. The registry has to have graded it, and the
+// level has to be one that holds real stops. A lone, never-tested minor pivot is
+// not liquidity in the ICT sense however cleanly price wicked through it.
+f_liqOk(int kind, int rq, int tch) =>
+    bool kindOk = kind != PK_SWING or (ictSens == "Loose" ? true : ictSens == "Normal" ? tch >= 1 : false)
+    kindOk and rq >= (ictSens == "Loose" ? RQ_C : RQ_B)
+
+f_ikTxt(int k, int d) =>
+    (k == IK_FVG ? "FVG" : k == IK_IFVG ? "IFVG" : k == IK_OB ? "OB" : k == IK_BRK ? "BREAKER" :
+         k == IK_BPR ? "BPR" : "OTE") + (d == 1 ? " ↑" : " ↓")
+
+f_isTxt(int k, int s) =>
+    bool blk = k == IK_OB or k == IK_BRK
+    bool inv = k == IK_IFVG or k == IK_BRK
+    k == IK_OTE ? (s == IS_CONF ? "PROJECTED" : s == IS_PART ? "TAPPED" : s == IS_FULL ? "DONE" : "INV") :
+         s == IS_CONF ? (inv ? "CONFIRMED" : "FRESH") :
+         s == IS_PART ? (blk ? "MITIGATED" : "PARTIAL") :
+         s == IS_FULL ? (blk ? "MITIGATED" : "FILLED") : "INV"
+
+f_style(Ict o) =>
+    color c    = o.dir == 1 ? COL_BULL : COL_BEAR
+    bool  live = o.state <= IS_FULL
+    bool  gap  = o.kind == IK_FVG
+    int   bt   = o.kind == IK_OB or o.kind == IK_BRK ? 30 : o.kind == IK_OTE ? 50 : 40
+    box.set_border_color(o.bx, color.new(c, live ? bt : 78))
+    box.set_bgcolor(o.bx, color.new(c, live ? (gap ? 100 : o.kind == IK_OTE ? 94 : 90) : 98))
+    box.set_border_style(o.bx, gap or o.kind == IK_IFVG ? line.style_dashed :
+         o.kind == IK_OB or o.kind == IK_BRK ? line.style_solid : line.style_dotted)
+    label.set_text(o.lb, f_ikTxt(o.kind, o.dir) + " · " + f_isTxt(o.kind, o.state) + (o.ctxRaid ? " ★" : ""))
+    label.set_color(o.lb, color.new(c, live ? 55 : 85))
+    label.set_textcolor(o.lb, color.new(color.white, live ? 0 : 45))
+    true
+
+f_new(int kind, int dir, float top, float bot, int x1, int conf, bool cr) =>
+    color c = dir == 1 ? COL_BULL : COL_BEAR
+    Ict o = Ict.new(kind = kind, dir = dir, top = top, bot = bot, bornBar = bar_index, conf = conf, ctxRaid = cr)
+    o.bx := box.new(x1, top, bar_index + 1, bot, border_color = c, bgcolor = color.new(c, 100), border_width = 1)
+    o.lb := label.new(x1, (top + bot) / 2, "", style = label.style_label_left, color = c,
+         textcolor = color.white, size = size.tiny,
+         tooltip = "ICT " + f_ikTxt(kind, dir) + "\nConfluence at birth: " + f_confTxt(conf) +
+              (cr ? "\nBorn out of a liquidity raid" : ""))
+    f_style(o)
+    array.push(objs, o)
+    while array.size(objs) > objMax
+        Ict v = array.get(objs, 0)
+        box.delete(v.bx)
+        label.delete(v.lb)
+        array.remove(objs, 0)
+    o
+
+// §26 · one live object per price area, per kind, per side
+f_dup(int kind, int dir, float top, float bot) =>
+    bool d = false
+    if array.size(objs) > 0
+        for i = 0 to array.size(objs) - 1
+            Ict o = array.get(objs, i)
+            if o.kind == kind and o.dir == dir and o.state <= IS_FULL and not (bot > o.top or top < o.bot)
+                d := true
+                break
+    d
+
+f_arch(int i) =>
+    Ict o = array.get(objs, i)
+    box.delete(o.bx)
+    label.delete(o.lb)
+    array.remove(objs, i)
+    true
+
+// §9 · the institutional origin: step back from the displacement candle and
+// return the LAST candle that closed AGAINST the move
+f_obScan(int dir, int start) =>
+    float t  = na
+    float b  = na
+    int   x  = na
+    for k = 0 to 5
+        int j = start + k
+        if (dir == 1 ? close[j] < open[j] : close[j] > open[j])
+            t := high[j]
+            b := low[j]
+            x := bar_index - j
+            break
+    [t, b, x]
+
+// Both scans are resolved HERE, at global scope, rather than at the two places
+// that consume them. Pine only allows a tuple declaration in global scope or in
+// a function's own local scope — never inside an `if` — and this keeps the rule
+// obvious instead of relying on how deep the consuming block happens to sit.
+// The cost is two six-iteration loops per bar over the last candles.
+[obTU, obBU, obXU] = f_obScan(1,  dispUpBar ? 0 : 1)
+[obTD, obBD, obXD] = f_obScan(-1, dispDnBar ? 0 : 1)
+
+f_lvlState(Pool p) =>
+    p.state == PS_REACT ? "RAIDED ✓ REVERSED" :
+         p.state == PS_RAID ? (p.rq == RQ_A ? "RAIDED" : "SWEPT") :
+         p.state == PS_DONE ? (na(p.brkBar) ? "EXPIRED" : "BROKEN") :
+         p.state == PS_NEW ? "DETECTED" :
+         (p.buySide ? high >= p.px - NEAR_LVL_ATR * atr : low <= p.px + NEAR_LVL_ATR * atr) ? "APPROACHED" :
+         "UNTOUCHED"
+
+// ═══════════════════ MODULE 10 · THE PER-BAR ICT PASS
+// Everything below runs inside one function so the script's global scope stays
+// small. Behaviour is identical to the same code at global scope: every write
+// goes to an array, a UDT field, or a drawing.
+f_ictBar() =>
+    float k        = ictSens == "Strict" ? 1.3 : ictSens == "Loose" ? 0.75 : 1.0
+    float fvgMinA  = fvgMin * k * atr
+    float dispMinA = dispMarkAtr * k * atr
+    bool  go       = confirmed
+
+    // ---- 0 · narrative expiry, before anything may advance ------------------
+    // a close beyond the raid extreme means the raid failed; the shift must
+    // arrive inside the window; after displacement the story lives 3× longer.
+    if go and nL.st > 0
+        if close < nL.raidExt or (nL.st <= 2 and bar_index - nL.raidBar > ictSeqWin) or bar_index - nL.raidBar > 3 * ictSeqWin
+            f_narrKill(nL)
+    if go and nS.st > 0
+        if close > nS.raidExt or (nS.st <= 2 and bar_index - nS.raidBar > ictSeqWin) or bar_index - nS.raidBar > 3 * ictSeqWin
+            f_narrKill(nS)
+
+    // ---- 1 · the lifecycle of every PD array --------------------------------
+    if go and array.size(objs) > 0
+        for i = array.size(objs) - 1 to 0
+            Ict   o  = array.get(objs, i)
+            int   s0 = o.state
+            bool  up = o.dir == 1
+            float h  = math.max(o.top - o.bot, syminfo.mintick)
+            if o.state == IS_ARCH or bar_index - o.bornBar > objLife or (o.kind == IK_OTE and o.state == IS_FULL and bar_index - nz(o.endBar, bar_index) > 20)
+                f_arch(i)
+                continue
+            if o.state <= IS_FULL
+                if o.kind == IK_OTE
+                    // the leg keeps expanding until price first taps the zone
+                    if o.state == IS_CONF and (up ? high > o.legExt : low < o.legExt)
+                        o.legExt := up ? high : low
+                        float wOte = math.abs(o.legExt - o.anchor)
+                        o.top := up ? o.legExt - OTE_1 * wOte : o.legExt + OTE_2 * wOte
+                        o.bot := up ? o.legExt - OTE_2 * wOte : o.legExt + OTE_1 * wOte
+                        box.set_top(o.bx, o.top)
+                        box.set_bottom(o.bx, o.bot)
+                        label.set_y(o.lb, (o.top + o.bot) / 2)
+                    if (up ? close < o.anchor : close > o.anchor)
+                        o.state  := IS_INV               // the raid extreme gave way
+                        o.endBar := bar_index
+                    else if o.state == IS_CONF and (up ? low <= o.top : high >= o.bot)
+                        o.state := IS_PART
+                    else if o.state == IS_PART and (up ? close > o.legExt : close < o.legExt)
+                        o.state  := IS_FULL              // the leg extreme was retaken
+                        o.endBar := bar_index
+                else
+                    if (up ? close < o.bot : close > o.top)
+                        o.state  := IS_INV
+                        o.endBar := bar_index
+                        o.accept := body >= dispFac * atr and (up ? bearBar : bullBar)
+                        box.set_right(o.bx, bar_index)
+                    else if (up ? low <= o.top : high >= o.bot)
+                        o.deep := up ? math.min(nz(o.deep, o.top), low) : math.max(nz(o.deep, o.bot), high)
+                        float fill = (up ? o.top - o.deep : o.deep - o.bot) / h
+                        int   ns   = fill >= 1 ? IS_FULL : IS_PART
+                        if ns > o.state
+                            o.state := ns
+            else if o.state == IS_INV
+                bool flip = (o.kind == IK_FVG and showIfvg) or (o.kind == IK_OB and showOb)
+                if not flip
+                    if bar_index - o.endBar >= 3
+                        f_arch(i)
+                        continue
+                else
+                    // §7 / §9 · INVERSION. A broken array is only an IFVG or a
+                    // breaker once the failure was MEANINGFUL — a displacement
+                    // close, or a second close beyond it, which is acceptance —
+                    // and price then comes back from the other side and holds
+                    // the 50 %. A reclaim back through it, or no retest inside
+                    // 2× the window, archives it instead.
+                    if not o.accept and (up ? close < o.bot : close > o.top)
+                        o.accept := true
+                    if (up ? close > o.top : close < o.bot) or bar_index - o.endBar > 2 * ictSeqWin
+                        f_arch(i)
+                        continue
+                    else if o.accept and bar_index > o.endBar and (up ? high >= o.bot and close < o.bot + 0.5 * h : low <= o.top and close > o.top - 0.5 * h)
+                        o.kind   := o.kind == IK_FVG ? IK_IFVG : IK_BRK
+                        o.dir    := up ? -1 : 1
+                        o.state  := IS_CONF
+                        o.deep   := na
+                        o.endBar := na
+                        box.set_right(o.bx, bar_index + 1)
+            if o.state != s0
+                f_style(o)
+
+    // ---- 2 · liquidity raids that matter ------------------------------------
+    raidL = go and sslLive and loBar == bar_index and f_liqOk(loKind, loRq, f_poolTouch(loPool))
+    raidS = go and bslLive and hiBar == bar_index and f_liqOk(hiKind, hiRq, f_poolTouch(hiPool))
+    // a fresh raid restarts the story, unless the story is already past its
+    // shift — then only a DEEPER sweep replaces it, because the earlier low was
+    // evidently not the low
+    if raidL and (nL.st < 2 or loExt < nL.raidExt)
+        f_narrRaid(nL, loTag, loExt, loRq)
+    if raidS and (nS.st < 2 or hiExt > nS.raidExt)
+        f_narrRaid(nS, hiTag, hiExt, hiRq)
+    if showLiq and raidL
+        f_chip(true,  (loRq == RQ_A ? "SSL RAID" : "SSL SWEEP") + " · " + loTag, color.new(COL_BULL, 35), mkSize)
+    if showLiq and raidS
+        f_chip(false, (hiRq == RQ_A ? "BSL RAID" : "BSL SWEEP") + " · " + hiTag, color.new(COL_BEAR, 35), mkSize)
+
+    // ---- 3 · MSS — a shift AFTER the raid ------------------------------------
+    // The structure engine already demanded a displacement body for the break.
+    // Two more things make it an ICT MSS rather than just a break: the level
+    // taken must sit clear of the raid extreme (otherwise the "shift" is the
+    // sweep candle again), and it must have formed inside the raid's window.
+    mssLvlU = eChUp or eBosUp ? sExt.evLvlUp : sInt.evLvlUp
+    mssBarU = eChUp or eBosUp ? sExt.evBarUp : sInt.evBarUp
+    mssLvlD = eChDn or eBosDn ? sExt.evLvlDn : sInt.evLvlDn
+    mssBarD = eChDn or eBosDn ? sExt.evBarDn : sInt.evBarDn
+    mssU = go and nL.st == 1 and bar_index > nL.raidBar and (chUp or eChUp or bosUp or eBosUp) and
+         not na(mssLvlU) and not na(mssBarU) and mssLvlU - nL.raidExt >= MSS_MIN_SEP_ATR * atr and mssBarU >= nL.raidBar - ictSeqWin
+    mssD = go and nS.st == 1 and bar_index > nS.raidBar and (chDn or eChDn or bosDn or eBosDn) and
+         not na(mssLvlD) and not na(mssBarD) and nS.raidExt - mssLvlD >= MSS_MIN_SEP_ATR * atr and mssBarD >= nS.raidBar - ictSeqWin
+    if mssU
+        nL.st     := 2
+        nL.mssBar := bar_index
+        nL.mssCh  := chUp or eChUp
+        nL.mssLvl := mssLvlU
+        if dispUpBar                                    // the break candle IS the expansion
+            nL.st      := 3
+            nL.dispBar := bar_index
+        int cu = f_conf(nL)
+        if showMss and cu >= f_confMin()
+            array.push(mssLns, line.new(mssBarU, mssLvlU, bar_index, mssLvlU, color = color.new(COL_BULL, 30), style = line.style_dashed))
+            if array.size(mssLns) > 30
+                line.delete(array.shift(mssLns))
+            label.new(bar_index, mssLvlU, "MSS ↑ · " + f_confTxt(cu), style = label.style_label_left,
+                 color = color.new(COL_BULL, 25), textcolor = color.white, size = size.tiny,
+                 tooltip = "Market-structure shift UP, after a " + nL.tag + " raid graded " + f_rqTxt(nL.rq) +
+                      "\n" + (nL.mssCh ? "CHoCH-type shift" : "BOS-type shift") + (dispUpBar ? " · with displacement" : ""))
+    if mssD
+        nS.st     := 2
+        nS.mssBar := bar_index
+        nS.mssCh  := chDn or eChDn
+        nS.mssLvl := mssLvlD
+        if dispDnBar
+            nS.st      := 3
+            nS.dispBar := bar_index
+        int cd = f_conf(nS)
+        if showMss and cd >= f_confMin()
+            array.push(mssLns, line.new(mssBarD, mssLvlD, bar_index, mssLvlD, color = color.new(COL_BEAR, 30), style = line.style_dashed))
+            if array.size(mssLns) > 30
+                line.delete(array.shift(mssLns))
+            label.new(bar_index, mssLvlD, "MSS ↓ · " + f_confTxt(cd), style = label.style_label_left,
+                 color = color.new(COL_BEAR, 25), textcolor = color.white, size = size.tiny,
+                 tooltip = "Market-structure shift DOWN, after a " + nS.tag + " raid graded " + f_rqTxt(nS.rq) +
+                      "\n" + (nS.mssCh ? "CHoCH-type shift" : "BOS-type shift") + (dispDnBar ? " · with displacement" : ""))
+
+    // ---- 4 · displacement, the OTE it projects, and the stand-alone mark -----
+    if go and nL.st == 2 and dispUpBar and bar_index > nL.mssBar and close > nL.mssLvl
+        nL.st      := 3
+        nL.dispBar := bar_index
+    if go and nS.st == 2 and dispDnBar and bar_index > nS.mssBar and close < nS.mssLvl
+        nS.st      := 3
+        nS.dispBar := bar_index
+    // §10 · the OTE is projected from the RAID EXTREME to the displacement leg,
+    // which is what ties it to a liquidity event instead of to an arbitrary
+    // swing. One per story, and only once the leg is worth measuring.
+    if go and showOte and nL.st >= 3 and not nL.ote and high - nL.raidExt >= atr
+        float w = high - nL.raidExt
+        Ict oL = f_new(IK_OTE, 1, high - OTE_1 * w, high - OTE_2 * w, bar_index, f_conf(nL), true)
+        oL.anchor := nL.raidExt
+        oL.legExt := high
+        nL.ote    := true
+    if go and showOte and nS.st >= 3 and not nS.ote and nS.raidExt - low >= atr
+        float w2 = nS.raidExt - low
+        Ict oS = f_new(IK_OTE, -1, low + OTE_2 * w2, low + OTE_1 * w2, bar_index, f_conf(nS), true)
+        oS.anchor := nS.raidExt
+        oS.legExt := low
+        nS.ote    := true
+    // §8 · a DISPLACEMENT mark needs more than a big candle: it must also break
+    // structure, follow a raid inside the window, or extend a previous expansion
+    // candle. Ordinary volatility prints nothing. One mark per three bars.
+    dU = go and showDisp and dispUpBar and body >= dispMinA and (brokeUp or dispUpBar[1] or (nL.st >= 1 and bar_index - nL.raidBar <= ictSeqWin)) and bar_index - nz(m.dispL, -99) > 2
+    dD = go and showDisp and dispDnBar and body >= dispMinA and (brokeDn or dispDnBar[1] or (nS.st >= 1 and bar_index - nS.raidBar <= ictSeqWin)) and bar_index - nz(m.dispS, -99) > 2
+    if dU
+        m.dispL := bar_index
+        f_chip(true, "DISPLACEMENT ↑", color.new(COL_BULL, 60), size.tiny)
+    if dD
+        m.dispS := bar_index
+        f_chip(false, "DISPLACEMENT ↓", color.new(COL_BEAR, 60), size.tiny)
+
+    // ---- 5 · the ICT fair value gap, and the BPR it can form -----------------
+    // The TRUE gap geometry (candle 1's extreme to candle 3's extreme), the
+    // displacement candle in the middle, a minimum height, and by default a
+    // reason to exist.
+    fU = go and showFvg and low > high[2] and dispUpBar[1] and low - high[2] >= fvgMinA
+    fD = go and showFvg and high < low[2] and dispDnBar[1] and low[2] - high >= fvgMinA
+    strU = brokeUp or brokeUp[1] or brokeUp[2] or recentMssUp
+    strD = brokeDn or brokeDn[1] or brokeDn[2] or recentMssDn
+    rdU  = nL.st >= 1 and bar_index - nL.raidBar <= 2 * ictSeqWin
+    rdD  = nS.st >= 1 and bar_index - nS.raidBar <= 2 * ictSeqWin
+    if fU and (not fvgNeedCtx or strU or rdU) and not f_dup(IK_FVG, 1, low, high[2])
+        if nL.st >= 2 and nL.st < 4                     // the gap the shift's own expansion left
+            nL.st      := 4
+            nL.dispBar := nz(nL.dispBar, bar_index - 1)
+        f_new(IK_FVG, 1, low, high[2], bar_index - 2, f_conf(nL), rdU)
+        // §13 · a BPR is the OVERLAP of this bullish gap with the bearish gap it
+        // has just traded through — not merely two gaps that happen to be near
+        // each other. The consumed gap is retired into the BPR.
+        if showBpr and array.size(objs) > 1
+            for i = array.size(objs) - 2 to 0
+                Ict o = array.get(objs, i)
+                if o.kind == IK_FVG and o.dir == -1 and o.state >= IS_FULL and not o.used and bar_index - o.bornBar <= 2 * ictSeqWin
+                    float ot = math.min(low, o.top)
+                    float ob = math.max(high[2], o.bot)
+                    if ot - ob >= fvgMinA
+                        o.used  := true
+                        o.state := IS_ARCH
+                        f_new(IK_BPR, 1, ot, ob, bar_index - 2, f_conf(nL), rdU)
+                        break
+    if fD and (not fvgNeedCtx or strD or rdD) and not f_dup(IK_FVG, -1, low[2], high)
+        if nS.st >= 2 and nS.st < 4
+            nS.st      := 4
+            nS.dispBar := nz(nS.dispBar, bar_index - 1)
+        f_new(IK_FVG, -1, low[2], high, bar_index - 2, f_conf(nS), rdD)
+        if showBpr and array.size(objs) > 1
+            for i = array.size(objs) - 2 to 0
+                Ict o = array.get(objs, i)
+                if o.kind == IK_FVG and o.dir == 1 and o.state >= IS_FULL and not o.used and bar_index - o.bornBar <= 2 * ictSeqWin
+                    float ot2 = math.min(low[2], o.top)
+                    float ob2 = math.max(high, o.bot)
+                    if ot2 - ob2 >= fvgMinA
+                        o.used  := true
+                        o.state := IS_ARCH
+                        f_new(IK_BPR, -1, ot2, ob2, bar_index - 2, f_conf(nS), rdD)
+                        break
+
+    // ---- 6 · the order block ------------------------------------------------
+    // The last opposing candle before a displacement that broke structure, came
+    // off a raid, or left a gap. A real block is not taller than 2 ATR, price
+    // has actually LEFT it, and the impulse away from it is worth an ATR.
+    obCtxL = nL.st >= 1 and bar_index - nL.raidBar <= ictSeqWin
+    obCtxS = nS.st >= 1 and bar_index - nS.raidBar <= ictSeqWin
+    if go and showOb and ((dispUpBar and (brokeUp or obCtxL)) or fU)
+        if not na(obTU) and obTU - obBU <= 2 * atr and obTU < close and close - obBU >= atr and not f_dup(IK_OB, 1, obTU, obBU)
+            f_new(IK_OB, 1, obTU, obBU, obXU, f_conf(nL), obCtxL)
+    if go and showOb and ((dispDnBar and (brokeDn or obCtxS)) or fD)
+        if not na(obTD) and obTD - obBD <= 2 * atr and obBD > close and obTD - close >= atr and not f_dup(IK_OB, -1, obTD, obBD)
+            f_new(IK_OB, -1, obTD, obBD, obXD, f_conf(nS), obCtxS)
+
+    // ---- 7 · the retracement into a PD array — the story's last stage --------
+    if go and nL.st >= 3 and not nL.pda
+        bool hit = inOTEbuy
+        if array.size(objs) > 0
+            for i = 0 to array.size(objs) - 1
+                Ict o = array.get(objs, i)
+                if o.dir == 1 and o.state <= IS_FULL and o.bornBar < bar_index and low <= o.top and high >= o.bot
+                    hit := true
+                    break
+        if hit
+            nL.pda := true
+            if showPda and f_conf(nL) >= f_confMin()
+                f_chip(true, "PD ARRAY ↑ · " + f_confTxt(f_conf(nL)), color.new(COL_BULL, 45), size.tiny)
+    if go and nS.st >= 3 and not nS.pda
+        bool hit2 = inOTEsell
+        if array.size(objs) > 0
+            for i = 0 to array.size(objs) - 1
+                Ict o = array.get(objs, i)
+                if o.dir == -1 and o.state <= IS_FULL and o.bornBar < bar_index and low <= o.top and high >= o.bot
+                    hit2 := true
+                    break
+        if hit2
+            nS.pda := true
+            if showPda and f_conf(nS) >= f_confMin()
+                f_chip(false, "PD ARRAY ↓ · " + f_confTxt(f_conf(nS)), color.new(COL_BEAR, 45), size.tiny)
+
+    // ---- 8 · the Judas swing -------------------------------------------------
+    // The session opens, price takes liquidity on one side early, then reverses
+    // with displacement and a shift, closing back through the opening price.
+    // Acceptance beyond the manipulation extreme means it was expansion, not a
+    // Judas, and the watch is abandoned.
+    jL = inLon and not inLon[1]
+    jN = inNY and not inNY[1]
+    if go and showJudas and intra
+        if jL or jN
+            m.jSt   := 0
+            m.jOpen := open
+            m.jBar  := bar_index
+            m.jTag  := jL ? "LONDON" : "NY"
+        if (inLon or inNY) and not na(m.jOpen)
+            int jIn = bar_index - m.jBar
+            if m.jSt == 0 and jIn <= judasWin
+                if raidS and high > m.jOpen
+                    m.jSt  := 1
+                    m.jExt := hiExt
+                else if raidL and low < m.jOpen
+                    m.jSt  := -1
+                    m.jExt := loExt
+            else if m.jSt == 1
+                if close > m.jExt
+                    m.jSt := 3
+                else if dispDnBar and close < m.jOpen and (chDn or recentMssDn) and jIn <= 3 * judasWin
+                    m.jSt := 2
+                    f_chip(false, "JUDAS ↓ · " + m.jTag, color.new(color.orange, 15), mkSize)
+            else if m.jSt == -1
+                if close < m.jExt
+                    m.jSt := 3
+                else if dispUpBar and close > m.jOpen and (chUp or recentMssUp) and jIn <= 3 * judasWin
+                    m.jSt := 2
+                    f_chip(true, "JUDAS ↑ · " + m.jTag, color.new(color.orange, 15), mkSize)
+
+    // ---- 9 · Power of Three · AMD -------------------------------------------
+    // Accumulation is the Asia range. Manipulation is a graded raid of one of
+    // its extremes. Distribution is displacement plus a shift closing through
+    // the OPPOSITE side of that range. One sequence per Asia range.
+    if go and showAmd and intra
+        if asiaFresh
+            m.amdSt := 0
+        if not na(sAsia.fhi) and not na(sAsia.flo) and not inAsia
+            if m.amdSt == 0
+                if raidS and str.contains(hiTag, "Asia")
+                    m.amdSt  := 1
+                    m.amdExt := hiExt
+                else if raidL and str.contains(loTag, "Asia")
+                    m.amdSt  := -1
+                    m.amdExt := loExt
+            else if m.amdSt == 1
+                if close > m.amdExt
+                    m.amdSt := 3                    // accepted above = expansion
+                else if dispDnBar and (chDn or recentMssDn) and close < sAsia.flo
+                    m.amdSt := 2
+                    f_chip(false, "AMD ↓ · PO3", color.new(color.teal, 15), mkSize)
+            else if m.amdSt == -1
+                if close < m.amdExt
+                    m.amdSt := 3
+                else if dispUpBar and (chUp or recentMssUp) and close > sAsia.fhi
+                    m.amdSt := 2
+                    f_chip(true, "AMD ↑ · PO3", color.new(color.teal, 15), mkSize)
+    [raidL, raidS, mssU, mssD, dU, dD, fU, fD]
+
+[ictRaidL, ictRaidS, ictMssUp, ictMssDn, ictDispUp, ictDispDn, ictFvgUp, ictFvgDn] = f_ictBar()
+
+// ═══════════════════ MODULE 11 · LAST-BAR RENDER
+// Everything here is rebuilt from scratch on the last bar only: bounded arrays,
+// fully deleted and re-created, so no drawing can leak and no historical object
+// is ever touched.
+f_render() =>
+    if barstate.islast
+        while array.size(lqLbs) > 0
+            label.delete(array.pop(lqLbs))
+        label.delete(m.pdaLb)
+        // ---- BSL / SSL levels with their ICT lifecycle state ----------------
+        if lqLabel and array.size(pools) > 0
+            cand = array.new<int>()
+            rank = array.new<float>()
+            for i = 0 to array.size(pools) - 1
+                Pool p = array.get(pools, i)
+                bool live = p.state <= PS_VAL
+                if live or f_recent(nz(p.raidBar, p.brkBar), 20)
+                    array.push(cand, i)
+                    // resting liquidity outranks history, then level type, then
+                    // how close price actually is to it
+                    array.push(rank, (live ? 1e6 : 0.0) + f_kindPri(p.kind) * 1000.0 +
+                         math.min(p.touches, 4) * 200.0 - math.abs(p.px - close) / math.max(atr, syminfo.mintick))
+            if array.size(cand) > 0
+                ord = array.sort_indices(rank, order.descending)
+                int shown = 0
+                for j = 0 to array.size(ord) - 1
+                    if shown >= lqMaxLbl
+                        break
+                    Pool p = array.get(pools, array.get(cand, array.get(ord, j)))
+                    string side = p.buySide ? "BSL" : "SSL"
+                    array.push(lqLbs, label.new(bar_index + LBL_X, p.px,
+                         side + " " + p.tag + " · " + f_lvlState(p),
+                         style = label.style_label_left,
+                         color = p.state >= PS_RAID ? color.new(COL_NEU, 45) :
+                              color.new(p.buySide ? COL_BEAR : COL_BULL, 35),
+                         textcolor = color.white, size = infoSz,
+                         tooltip = (p.buySide ? "BUY-SIDE LIQUIDITY" : "SELL-SIDE LIQUIDITY") +
+                              "\nLevel    " + str.tostring(p.px, format.mintick) +
+                              "\nType     " + f_kindTxt(p.kind) + " (" + p.tag + ")" +
+                              (p.legs > 1 ? " · " + str.tostring(p.legs) + " equal legs" : "") +
+                              "\nTouches  " + str.tostring(p.touches) +
+                              "\nState    " + f_lvlState(p) +
+                              (p.state >= PS_RAID ? " · raid grade " + f_rqTxt(p.rq) : "") +
+                              "\nAge      " + str.tostring(bar_index - nz(p.bornBar, bar_index)) + " bars · pool #" + str.tostring(p.id)))
+                    shown += 1
+        // ---- what price is sitting in right now, and both stories -----------
+        if showPda
+            string at = ""
+            if array.size(objs) > 0
+                for i = 0 to array.size(objs) - 1
+                    Ict o = array.get(objs, i)
+                    if o.state <= IS_FULL and close <= o.top and close >= o.bot
+                        at += f_ikTxt(o.kind, o.dir) + "  "
+            if rangeOK
+                at += pdPos >= 1 - PD_EXTREME ? "PREMIUM (extreme)  " : pdPos >= 0.5 ? "PREMIUM  " :
+                     pdPos <= PD_EXTREME ? "DISCOUNT (extreme)  " : "DISCOUNT  "
+            if inOTEbuy or inOTEsell
+                at += "OTE (range)  "
+            if atHtfPoiL or atHtfPoiS
+                at += "HTF FVG  "
+            m.pdaLb := label.new(bar_index + 2, close,
+                 "PD arrays @ price: " + (at == "" ? "none" : at) +
+                      "\n▲ story: " + f_narrTxt(nL) + (loId == 0 ? "" : "  [event #" + str.tostring(loId) + "]") +
+                      "\n▼ story: " + f_narrTxt(nS) + (hiId == 0 ? "" : "  [event #" + str.tostring(hiId) + "]") +
+                      "\nHTF " + htfTf + ": " + (htfDir > 0 ? "▲ bull" : htfDir < 0 ? "▼ bear" : "—"),
+                 style = label.style_label_left, color = color.new(color.gray, 55),
+                 textcolor = color.white, size = size.tiny,
+                 tooltip = "The ICT story per side: raid → MSS → displacement → FVG → retrace into a PD array or OTE, with its confluence class. Detection and marking only — this script emits no trade signal.")
+        // ---- keep live arrays extended to the right ------------------------
+        if array.size(objs) > 0
+            for i = 0 to array.size(objs) - 1
+                Ict o = array.get(objs, i)
+                if o.state <= IS_FULL
+                    box.set_right(o.bx, bar_index + 1)
+    true
+
+f_render()
+
+// ---- dealing range, premium / discount, structural OTE, HTF POI -------------
+var box   bxPrem = na
+var box   bxDisc = na
+var box   bxOte  = na
+var line  lnEq   = na
+var label lbOte  = na
+var box   bxHtfB = na
+var box   bxHtfS = na
+if barstate.islast
+    box.delete(bxPrem)
+    box.delete(bxDisc)
+    box.delete(bxOte)
+    line.delete(lnEq)
+    label.delete(lbOte)
+    box.delete(bxHtfB)
+    box.delete(bxHtfS)
+    if showRange and rangeOK
+        int x1 = math.min(nz(rngLoBar, bar_index - 20), nz(rngHiBar, bar_index - 20))
+        int x2 = bar_index + LBL_X
+        lnEq := line.new(x1, eqLvl, x2, eqLvl, color = color.new(color.gray, 40), style = line.style_dashed)
+        bxPrem := box.new(x1, rngHi, x2, eqLvl, border_color = color.new(COL_BEAR, 88),
+             bgcolor = color.new(COL_BEAR, 96), border_style = line.style_dotted,
+             text = "PREMIUM", text_size = size.tiny, text_color = color.new(COL_BEAR, 45),
+             text_halign = text.align_left, text_valign = text.align_top)
+        bxDisc := box.new(x1, eqLvl, x2, rngLo, border_color = color.new(COL_BULL, 88),
+             bgcolor = color.new(COL_BULL, 96), border_style = line.style_dotted,
+             text = "DISCOUNT", text_size = size.tiny, text_color = color.new(COL_BULL, 45),
+             text_halign = text.align_left, text_valign = text.align_bottom)
+    bool drawB = extDir == 1 and bullRange
+    bool drawS = extDir == -1 and bearRange
+    if showRngOte and rangeOK and (drawB or drawS)
+        float ot = drawB ? oteBuyTop : oteSellTop
+        float ob = drawB ? oteBuyBot : oteSellBot
+        color oc = drawB ? COL_BULL : COL_BEAR
+        bxOte := box.new(bar_index - 20, ot, bar_index + LBL_X, ob,
+             border_color = color.new(oc, 45), bgcolor = color.new(oc, 92), border_style = line.style_dotted)
+        lbOte := label.new(bar_index + LBL_X, (ot + ob) / 2, drawB ? "OTE 62-79 % (range)" : "OTE 62-79 % (range)",
+             style = label.style_label_left, color = color.new(oc, 60), textcolor = color.white, size = infoSz)
+    if showHtfPoi and not na(hPoiBTop)
+        bxHtfB := box.new(bar_index - 10, hPoiBTop, bar_index + LBL_X, hPoiBBot,
+             border_color = color.new(COL_BULL, 50), bgcolor = color.new(COL_BULL, 95),
+             border_style = line.style_dashed, text = "HTF " + htfTf + " FVG", text_size = size.tiny,
+             text_color = color.new(COL_BULL, 30), text_halign = text.align_right)
+    if showHtfPoi and not na(hPoiSTop)
+        bxHtfS := box.new(bar_index - 10, hPoiSTop, bar_index + LBL_X, hPoiSBot,
+             border_color = color.new(COL_BEAR, 50), bgcolor = color.new(COL_BEAR, 95),
+             border_style = line.style_dashed, text = "HTF " + htfTf + " FVG", text_size = size.tiny,
+             text_color = color.new(COL_BEAR, 30), text_halign = text.align_right)
+
+// ═══════════════════════════════════ MODULE 12 · ALERTS
+// Every alert is an OBSERVATION. None of them is an entry, and none of them
+// carries a direction to trade — they say what price delivery just did.
+// Use "Once per bar close".
+alertcondition(ictRaidL,  "[LIQ] SSL raid",   "Sell-side liquidity RAIDED on {{ticker}} {{interval}} — taken and closed back inside")
+alertcondition(ictRaidS,  "[LIQ] BSL raid",   "Buy-side liquidity RAIDED on {{ticker}} {{interval}} — taken and closed back inside")
+alertcondition(poolRaids > 0, "[LIQ] Any pool raided", "A tracked liquidity pool was RAIDED on {{ticker}} {{interval}}")
+alertcondition(ictMssUp,  "[MSS] MSS up",     "ICT market-structure shift UP after a liquidity raid on {{ticker}} {{interval}}")
+alertcondition(ictMssDn,  "[MSS] MSS down",   "ICT market-structure shift DOWN after a liquidity raid on {{ticker}} {{interval}}")
+alertcondition(ictDispUp, "[DISP] Displacement up",   "Displacement UP on {{ticker}} {{interval}}")
+alertcondition(ictDispDn, "[DISP] Displacement down", "Displacement DOWN on {{ticker}} {{interval}}")
+alertcondition(ictFvgUp,  "[PDA] Bullish FVG", "A bullish ICT fair value gap formed on {{ticker}} {{interval}}")
+alertcondition(ictFvgDn,  "[PDA] Bearish FVG", "A bearish ICT fair value gap formed on {{ticker}} {{interval}}")
+alertcondition(eChUp or eChDn, "[STRUCT] External CHoCH", "External CHoCH — the protected swing broke with displacement on {{ticker}} {{interval}}")
+alertcondition(eBosUp or eBosDn, "[STRUCT] External BOS", "External BOS on {{ticker}} {{interval}}")
+alertcondition(chUp or chDn, "[STRUCT] Internal CHoCH",   "Internal CHoCH (MSS scale) on {{ticker}} {{interval}}")

@@ -1,0 +1,1740 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+//  ICT + SMC INSTITUTIONAL TOOLKIT                                                    v1.0.0
+//  Pine Script v6 — single-indicator institutional order-flow suite
+//
+//  ARCHITECTURE (top-down, Pine resolves identifiers in declaration order)
+//  ----------------------------------------------------------------------
+//   1. Constants & palette
+//   2. Inputs — grouped settings panel
+//   3. User defined types
+//   4. Global state & drawing registries
+//   5. Core series + utility / drawing helpers
+//   6. Higher timeframe data layer (batched, non-repainting request.security)
+//   7. Pivot & displacement engine
+//   8. Market structure (BOS / CHoCH / MSS / CISD)
+//   9. Liquidity (EQH / EQL / BSL / SSL / sweep / grab / raid)
+//  10. Order blocks (fresh / mitigated / invalidated / breaker / reclaimed / nested / HTF)
+//  11. Imbalances (FVG / IFVG / BPR / VI / opening gap / stacked)
+//  12. Premium–Discount, auto fib, OTE
+//  13. PD-array levels (PDH/PDL/PWH/PWL/PMH/PML/PQH/PQL/PYH/PYL/CDH/CDL)
+//  14. Sessions & kill zones
+//  15. ICT time model (opens, verticals, silver bullet, macros, PO3)
+//  16. Trend engine & HTF bias
+//  17. Entry model & confidence score
+//  18. Dashboard
+//  19. Alerts
+//
+//  NON-REPAINTING CONTRACT
+//  -----------------------
+//   * Structure is confirmed only by candle CLOSE beyond a *confirmed* pivot. Pivots are
+//     ta.pivothigh/low, which by definition lag `right` bars and never revise.
+//   * Every HTF read is `expr[1]` combined with lookahead_on — the canonical idiom that
+//     returns the last CLOSED higher-timeframe value with correct historical alignment.
+//     No future data can leak into a historical bar.
+//   * Nothing is derived from an unconfirmed intrabar value.
+//
+//  OBJECT DISCIPLINE
+//  -----------------
+//   * Every box / line / label is owned by a UDT held in an array. Arrays are trimmed to the
+//     user's cap and the underlying drawing is deleted on eviction (true recycling, never a leak).
+//   * Object construction never sits inside a `?:` — Pine evaluates both ternary branches, which
+//     would silently create an object on every bar. All creation is inside `if na(x)` guards.
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+indicator("ICT + SMC Institutional Toolkit", "ICT│SMC", overlay = true, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500, max_bars_back = 1500)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 1. CONSTANTS & PALETTE
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+G_GEN = "⚙  General"
+G_MS  = "①  Market Structure"
+G_LQ  = "②  Liquidity"
+G_OB  = "③  Order Blocks"
+G_FV  = "④  Fair Value Gaps"
+G_PD  = "⑤  Premium / Discount"
+G_HL  = "⑥  Previous Highs & Lows"
+G_SS  = "⑦  Sessions & Kill Zones"
+G_TM  = "⑧  ICT Time Model"
+G_HT  = "⑨  Higher Timeframe"
+G_TR  = "⑩  Trend Engine"
+G_EM  = "⑪  Entry Model & Confidence"
+G_DB  = "⑫  Dashboard"
+G_AL  = "⑬  Alerts"
+G_CL  = "⑭  Colors & Style"
+G_PF  = "⑮  Performance"
+G_DG  = "⑯  Debug"
+
+DEF_BULL   = #089981
+DEF_BEAR   = #f23645
+DEF_NEUT   = #787b86
+DEF_ACCENT = #ffb300
+DEF_INK    = #d1d4dc
+DEF_PANEL  = #14161a
+DEF_GRID   = #2a2e39
+DEF_VIOLET = #7e57c2
+
+// Zone lifecycle states
+ST_FRESH     = 0    // untouched
+ST_MITIGATED = 1    // wick tagged the zone
+ST_INVALID   = 2    // body closed through the zone
+ST_BREAKER   = 3    // invalidated, then retested from the far side
+ST_RECLAIMED = 4    // invalidated, then reclaimed by a close back inside
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 2. INPUTS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// ── General ───────────────────────────────────────────────────────────────────────────────────
+tzInput     = input.string("America/New_York", "Reference Timezone", options = ["America/New_York", "Europe/London", "Asia/Tokyo", "Australia/Sydney", "UTC", "Exchange"], group = G_GEN, tooltip = "All session and time-model logic is evaluated in this timezone.")
+tz          = tzInput == "Exchange" ? syminfo.timezone : tzInput
+atrLen      = input.int(14, "ATR Length", minval = 2, group = G_GEN)
+labelSize   = input.string("normal", "Label Size", options = ["tiny", "small", "normal", "large"], group = G_GEN, tooltip = "Primary size for structure/signal labels. Secondary labels (zone tags, liquidity, times) render one step smaller.")
+// Primary size — structure breaks, signals
+lblSz       = labelSize == "tiny" ? size.tiny : labelSize == "small" ? size.small : labelSize == "large" ? size.large : size.normal
+// Secondary size — zone tags, liquidity, swing points, time marks (one step below primary)
+lblSzSm     = labelSize == "tiny" ? size.tiny : labelSize == "small" ? size.tiny : labelSize == "large" ? size.normal : size.small
+autoHide    = input.bool(true, "Auto-hide insignificant drawings", group = G_GEN, tooltip = "Zones thinner than the noise floor (ATR × factor) are never drawn.")
+noiseFactor = input.float(0.15, "Noise Floor (× ATR)", minval = 0.0, maxval = 1.0, step = 0.01, group = G_GEN)
+
+// ── Market structure ──────────────────────────────────────────────────────────────────────────
+msEnable    = input.bool(true, "Enable Market Structure", group = G_MS)
+msIntLen    = input.int(3, "Internal Swing Length", minval = 1, group = G_MS, tooltip = "Short pivot length → internal (minor) structure.")
+msExtLen    = input.int(8, "External Swing Length", minval = 2, group = G_MS, tooltip = "Long pivot length → external (major) structure.")
+msShowInt   = input.bool(true,  "Internal Structure", inline = "msie", group = G_MS)
+msShowExt   = input.bool(true,  "External Structure", inline = "msie", group = G_MS)
+msShowBOS   = input.bool(true,  "BOS",   inline = "mslbl", group = G_MS)
+msShowCHoCH = input.bool(true,  "CHoCH", inline = "mslbl", group = G_MS)
+msShowMSS   = input.bool(true,  "MSS",   inline = "mslbl", group = G_MS)
+msShowCISD  = input.bool(true,  "CISD",  inline = "mslbl", group = G_MS)
+msShowSwings= input.bool(false, "Swing Points (HH / HL / LH / LL)", group = G_MS)
+msArrows    = input.bool(false, "Arrows on Structure Break", group = G_MS)
+msColorBars = input.bool(false, "Trend Coloring on Candles", group = G_MS)
+msDispMult  = input.float(1.5, "Displacement Filter (× ATR)", minval = 0.0, step = 0.1, group = G_MS, tooltip = "A CHoCH is promoted to MSS only when the breaking candle range is at least this size.")
+msMaxDraw   = input.int(8, "Max Structure Drawings", minval = 1, maxval = 60, group = G_MS)
+
+// ── Liquidity ─────────────────────────────────────────────────────────────────────────────────
+lqEnable    = input.bool(true, "Enable Liquidity", group = G_LQ)
+lqEqTol     = input.float(0.12, "Equal H/L Tolerance (× ATR)", minval = 0.01, step = 0.01, group = G_LQ)
+lqShowEq    = input.bool(true,  "Equal Highs / Equal Lows", group = G_LQ)
+lqShowPools = input.bool(true,  "Buyside / Sellside Pools", group = G_LQ)
+lqShowInt   = input.bool(false, "Internal Liquidity", inline = "lqie", group = G_LQ)
+lqShowExt   = input.bool(true,  "External Liquidity", inline = "lqie", group = G_LQ)
+lqShowSweep = input.bool(true,  "Sweep / Grab / Raid", group = G_LQ)
+lqSweepClose= input.bool(true,  "Sweep requires close back inside", group = G_LQ, tooltip = "ON = strict sweep (wick through, body rejects). OFF = any penetration counts as a grab.")
+lqRaidMult  = input.float(0.35, "Raid Displacement (× ATR)", minval = 0.0, step = 0.05, group = G_LQ, tooltip = "A sweep followed by displacement of this extra size is upgraded to a RAID.")
+lqLabels    = input.bool(true, "Liquidity Labels", group = G_LQ)
+lqRemove    = input.bool(true, "Auto-remove after mitigation", group = G_LQ)
+lqMax       = input.int(8, "Max Liquidity Levels", minval = 1, maxval = 60, group = G_LQ)
+
+// ── Order blocks ──────────────────────────────────────────────────────────────────────────────
+obEnable    = input.bool(true, "Enable Order Blocks", group = G_OB)
+obSource    = input.string("Wick", "Block Body", options = ["Wick", "Body"], group = G_OB)
+obPick      = input.string("Extreme Candle", "Origin Candle", options = ["Extreme Candle", "Last Opposite Candle"], group = G_OB)
+obLookback  = input.int(20, "Origin Search Lookback", minval = 3, maxval = 60, group = G_OB)
+obShowLast  = input.int(3, "Show Last X per side", minval = 1, maxval = 20, group = G_OB)
+obExtend    = input.int(20, "Extend Right (bars)", minval = 0, maxval = 200, group = G_OB)
+obTransp    = input.int(86, "Transparency", minval = 0, maxval = 95, group = G_OB)
+obShowMit   = input.bool(true,  "Keep Mitigated",   inline = "obk", group = G_OB)
+obShowInv   = input.bool(false, "Keep Invalidated", inline = "obk", group = G_OB)
+obBreaker   = input.bool(true,  "Breaker Blocks",    inline = "obt", group = G_OB)
+obReclaim   = input.bool(true,  "Reclaimed Blocks",  inline = "obt", group = G_OB)
+obNested    = input.bool(true,  "Flag Nested Order Blocks", group = G_OB)
+obLabels    = input.bool(true,  "Order Block Labels", group = G_OB)
+
+// ── Imbalances ────────────────────────────────────────────────────────────────────────────────
+fvEnable    = input.bool(true, "Enable Imbalances", group = G_FV)
+fvShowFVG   = input.bool(true, "FVG",  inline = "fv1", group = G_FV)
+fvShowIFVG  = input.bool(true, "IFVG", inline = "fv1", group = G_FV)
+fvShowBPR   = input.bool(true, "BPR",  inline = "fv1", group = G_FV)
+fvShowVI    = input.bool(false,"Volume Imbalance", inline = "fv2", group = G_FV)
+fvShowOG    = input.bool(true, "Opening Gap",      inline = "fv2", group = G_FV)
+fvMinMult   = input.float(0.15, "Min Gap Size (× ATR)", minval = 0.0, step = 0.01, group = G_FV)
+fvVolFilter = input.bool(false, "Volume-confirmed gaps only", group = G_FV, tooltip = "Requires displacement-candle volume above its SMA.")
+fvVolLen    = input.int(20, "Volume SMA Length", minval = 2, group = G_FV)
+fvMerge     = input.bool(true, "Auto-merge overlapping gaps", group = G_FV)
+fvShrink    = input.bool(true, "Shrink box to unfilled portion", group = G_FV)
+fvShowFill  = input.bool(true, "Show Fill %", group = G_FV)
+fvRemoveFill= input.float(100.0, "Auto-remove at Fill %", minval = 1, maxval = 100, step = 5, group = G_FV)
+fvStack     = input.int(3, "Stacked / Triple threshold", minval = 2, maxval = 6, group = G_FV)
+fvExtend    = input.int(20, "Extend Right (bars)", minval = 0, maxval = 200, group = G_FV)
+fvTransp    = input.int(88, "Transparency", minval = 0, maxval = 95, group = G_FV)
+fvMax       = input.int(4, "Show Last X per side", minval = 1, maxval = 25, group = G_FV)
+
+// ── Premium / discount ────────────────────────────────────────────────────────────────────────
+pdEnable    = input.bool(true, "Enable Premium / Discount", group = G_PD)
+pdSource    = input.string("External", "Dealing Range", options = ["External", "Internal"], group = G_PD)
+pdShowEQ    = input.bool(true, "Equilibrium (50%)", group = G_PD)
+pdShowZones = input.bool(false, "Premium / Discount Zones (full-range shading)", group = G_PD, tooltip = "Paints the whole dealing range. EQ line + fib + OTE carry the same information with far less ink — leave this off for a clean chart.")
+pdShowFib   = input.bool(true, "Auto Fibonacci (62 / 70.5 / 79)", group = G_PD)
+pdShowOTE   = input.bool(true, "OTE Zone", group = G_PD)
+pdTransp    = input.int(95, "Zone Transparency", minval = 0, maxval = 97, group = G_PD)
+pdLabels    = input.bool(true, "Level Labels", group = G_PD)
+
+// ── Previous highs / lows ─────────────────────────────────────────────────────────────────────
+hlEnable    = input.bool(true, "Enable Previous H/L", group = G_HL)
+hlPD        = input.bool(true,  "PDH / PDL", inline = "hl1", group = G_HL)
+hlPW        = input.bool(true,  "PWH / PWL", inline = "hl1", group = G_HL)
+hlPM        = input.bool(false, "PMH / PML", inline = "hl2", group = G_HL)
+hlPQ        = input.bool(false, "PQH / PQL", inline = "hl2", group = G_HL)
+hlPY        = input.bool(false, "PYH / PYL", inline = "hl3", group = G_HL)
+hlCurD      = input.bool(false, "Current Day H/L", inline = "hl3", group = G_HL)
+hlStyleIn   = input.string("Dashed", "Line Style", options = ["Solid", "Dashed", "Dotted"], group = G_HL)
+hlWidth     = input.int(1, "Line Width", minval = 1, maxval = 4, group = G_HL)
+hlLabels    = input.bool(true, "Labels",      inline = "hl4", group = G_HL)
+hlExtend    = input.bool(true, "Auto Extend", inline = "hl4", group = G_HL)
+hlOffset    = input.int(6, "Label Offset (bars)", minval = 0, maxval = 60, group = G_HL)
+hlFade      = input.bool(true, "Fade level once broken", group = G_HL)
+
+// ── Sessions ──────────────────────────────────────────────────────────────────────────────────
+ssEnable = input.bool(true, "Enable Sessions", group = G_SS)
+ssBg     = input.bool(true,  "Background Shading", inline = "ssv1", group = G_SS)
+ssBox    = input.bool(true,  "Range Boxes",        inline = "ssv1", group = G_SS)
+ssHiLo   = input.bool(true,  "Session High / Low", inline = "ssv2", group = G_SS)
+ssMid    = input.bool(false, "Session Midpoint",   inline = "ssv2", group = G_SS)
+ssSweep  = input.bool(true,  "Session Sweep Detection", group = G_SS)
+ssKeep   = input.int(3, "Session ranges to keep", minval = 1, maxval = 10, group = G_SS)
+sSydOn   = input.bool(false, "Sydney",   inline = "s1", group = G_SS)
+sSyd     = input.session("1700-0200", "", inline = "s1", group = G_SS)
+sTokOn   = input.bool(true,  "Tokyo",    inline = "s2", group = G_SS)
+sTok     = input.session("2000-0400", "", inline = "s2", group = G_SS)
+sLonOn   = input.bool(true,  "London",   inline = "s3", group = G_SS)
+sLon     = input.session("0300-1130", "", inline = "s3", group = G_SS)
+sNyOn    = input.bool(true,  "New York", inline = "s4", group = G_SS)
+sNy      = input.session("0800-1700", "", inline = "s4", group = G_SS)
+kzEnable = input.bool(true, "Enable Kill Zones", group = G_SS)
+kAsiaOn  = input.bool(true,  "Asian Range",  inline = "k1", group = G_SS)
+kAsia    = input.session("2000-0000", "", inline = "k1", group = G_SS)
+kLonOn   = input.bool(true,  "London Open",  inline = "k2", group = G_SS)
+kLon     = input.session("0200-0500", "", inline = "k2", group = G_SS)
+kNyOn    = input.bool(true,  "NY Open",      inline = "k3", group = G_SS)
+kNy      = input.session("0700-1000", "", inline = "k3", group = G_SS)
+kLunOn   = input.bool(true,  "NY Lunch",     inline = "k4", group = G_SS)
+kLun     = input.session("1200-1300", "", inline = "k4", group = G_SS)
+kLcOn    = input.bool(true,  "London Close", inline = "k5", group = G_SS)
+kLc      = input.session("1000-1200", "", inline = "k5", group = G_SS)
+
+// ── ICT time model ────────────────────────────────────────────────────────────────────────────
+tmEnable    = input.bool(true, "Enable Time Model", group = G_TM)
+tmMidnight  = input.bool(true,  "Midnight Open (00:00)", inline = "tm1", group = G_TM)
+tmDayOpen   = input.bool(true,  "Daily Open",            inline = "tm1", group = G_TM)
+tmWeekOpen  = input.bool(false, "Weekly Open",           inline = "tm2", group = G_TM)
+tmMonOpen   = input.bool(false, "Monthly Open",          inline = "tm2", group = G_TM)
+tmVerticals = input.bool(true,  "Key Time Verticals (08:30 · 09:30 · 10:00 · 11:00 · 13:30 · 15:00)", group = G_TM)
+tmSilver    = input.bool(true,  "Silver Bullet Windows", inline = "tm3", group = G_TM)
+tmMacros    = input.bool(true,  "ICT Macros",            inline = "tm3", group = G_TM)
+tmPO3       = input.bool(false, "Power of Three (Accumulation → Manipulation → Distribution)", group = G_TM)
+tmKeepDays  = input.int(3, "Days of time drawings to keep", minval = 1, maxval = 10, group = G_TM)
+
+// ── Higher timeframe ──────────────────────────────────────────────────────────────────────────
+htEnable     = input.bool(true, "Enable HTF Layer", group = G_HT)
+htAuto       = input.bool(true, "Auto HTF (derive from chart timeframe)", group = G_HT)
+htTfManual   = input.timeframe("240", "HTF (manual)", options = ["1", "5", "15", "60", "240", "D", "W", "M"], group = G_HT)
+htShowFVG    = input.bool(true,  "HTF FVG",          inline = "ht1", group = G_HT)
+htShowOB     = input.bool(true,  "HTF Order Block",  inline = "ht1", group = G_HT)
+htShowSwings = input.bool(true,  "HTF Swing Levels", inline = "ht2", group = G_HT)
+htShowPrev   = input.bool(false, "HTF Prev H/L",     inline = "ht2", group = G_HT)
+htSwingLen   = input.int(5, "HTF Swing Length", minval = 2, group = G_HT)
+htEmaLen     = input.int(50, "HTF EMA (bias fallback)", minval = 2, group = G_HT)
+htMax        = input.int(2, "Max HTF zones per side", minval = 1, maxval = 12, group = G_HT)
+
+// ── Trend engine ──────────────────────────────────────────────────────────────────────────────
+trEnable    = input.bool(true, "Enable Trend Engine", group = G_TR)
+trUseStruct = input.bool(true,  "Swing Structure", inline = "tr1", group = G_TR)
+trUseEma    = input.bool(false, "EMA Filter",      inline = "tr1", group = G_TR)
+trEmaFast   = input.int(21, "EMA Fast", minval = 2, inline = "tr2", group = G_TR)
+trEmaSlow   = input.int(55, "EMA Slow", minval = 3, inline = "tr2", group = G_TR)
+trUseHtf    = input.bool(true,  "HTF Bias",            inline = "tr3", group = G_TR)
+trUseLiq    = input.bool(true,  "Liquidity Direction", inline = "tr3", group = G_TR)
+trUseFlow   = input.bool(true,  "Order Flow (CISD / displacement)", group = G_TR)
+trRibbon    = input.bool(false, "Trend Ribbon", group = G_TR)
+
+// ── Entry model ───────────────────────────────────────────────────────────────────────────────
+emEnable    = input.bool(true, "Enable Entry Model", group = G_EM)
+emWindow    = input.int(12, "Confluence Window (bars)", minval = 2, maxval = 60, group = G_EM, tooltip = "How recently each confirmation must have printed to still count.")
+emMinScore  = input.int(65, "Minimum Confidence Score", minval = 0, maxval = 100, group = G_EM)
+emNeedShift = input.bool(true, "Require MSS or CISD",      inline = "em1", group = G_EM)
+emNeedSweep = input.bool(true, "Require Liquidity Sweep",  inline = "em1", group = G_EM)
+emNeedZone  = input.bool(true, "Require OB or FVG",        inline = "em2", group = G_EM)
+emNeedPd    = input.bool(true, "Require Discount / Premium", inline = "em2", group = G_EM)
+emNeedHtf   = input.bool(true, "Require HTF Bias Alignment", group = G_EM)
+emKzOnly    = input.bool(false,"Kill Zones only", group = G_EM)
+emOneAtATime= input.bool(true, "One signal per structural leg", group = G_EM)
+emCooldown  = input.int(10, "Signal Cooldown (bars)", minval = 0, maxval = 200, group = G_EM, tooltip = "Hard minimum distance between two signals, regardless of structure. Stops back-to-back prints when consecutive BOS re-arm the leg lock.")
+wSweep      = input.int(20, "Sweep",    inline = "w1", group = G_EM)
+wOb         = input.int(20, "OB",       inline = "w1", group = G_EM)
+wFvg        = input.int(15, "FVG",      inline = "w1", group = G_EM)
+wHtf        = input.int(15, "HTF Trend",inline = "w2", group = G_EM)
+wOte        = input.int(10, "OTE",      inline = "w2", group = G_EM)
+wSess       = input.int(10, "Session",  inline = "w2", group = G_EM)
+wCisd       = input.int(10, "CISD",     inline = "w3", group = G_EM)
+wVol        = input.int(0,  "Volume",   inline = "w3", group = G_EM, tooltip = "Optional. Keep at 0 to leave the scale at 100.")
+emShowSl    = input.bool(true, "Draw invalidation / target guides", group = G_EM)
+emRR        = input.float(2.0, "Target R multiple", minval = 0.5, step = 0.5, group = G_EM)
+
+// ── Dashboard ─────────────────────────────────────────────────────────────────────────────────
+dbEnable    = input.bool(true, "Enable Dashboard", group = G_DB)
+dbPos       = input.string("Top Right", "Position", options = ["Top Left", "Top Right", "Bottom Left", "Bottom Right"], group = G_DB)
+dbSize      = input.string("Normal", "Size", options = ["Compact", "Normal"], group = G_DB)
+dbRowTrend  = input.bool(true, "Trend",     inline = "db1", group = G_DB)
+dbRowHtf    = input.bool(true, "HTF Trend", inline = "db1", group = G_DB)
+dbRowStruct = input.bool(true, "Structure", inline = "db2", group = G_DB)
+dbRowPd     = input.bool(true, "Prem/Disc", inline = "db2", group = G_DB)
+dbRowSess   = input.bool(true, "Session",   inline = "db3", group = G_DB)
+dbRowLiq    = input.bool(true, "Liquidity", inline = "db3", group = G_DB)
+dbRowSig    = input.bool(true, "Signal",    inline = "db4", group = G_DB)
+dbRowAtr    = input.bool(true, "ATR",       inline = "db4", group = G_DB)
+dbRowTick   = input.bool(true, "Tick",      inline = "db5", group = G_DB)
+dbRowStatus = input.bool(true, "Status",    inline = "db5", group = G_DB)
+
+// ── Alerts ────────────────────────────────────────────────────────────────────────────────────
+alEnable  = input.bool(true, "Enable alert() firing", group = G_AL, tooltip = "alertcondition() slots are always compiled and appear in the alert dialog; this switch gates the dynamic alert() calls.")
+alStruct  = input.bool(true, "Structure (BOS / CHoCH / MSS / CISD)", group = G_AL)
+alLiq     = input.bool(true, "Liquidity Sweep / Raid", group = G_AL)
+alOb      = input.bool(true, "OB Created / Mitigated / Breaker", group = G_AL)
+alFvg     = input.bool(true, "FVG / IFVG", group = G_AL)
+alEntry   = input.bool(true, "Entry / Exit", group = G_AL)
+alSession = input.bool(true, "Session Open / Close / Sweep", group = G_AL)
+alLevels  = input.bool(true, "PDH / PDL Break", group = G_AL)
+alPd      = input.bool(true, "Premium / Discount Entry", group = G_AL)
+
+// ── Colors ────────────────────────────────────────────────────────────────────────────────────
+cBull    = input.color(DEF_BULL,   "Bullish",   inline = "c1", group = G_CL)
+cBear    = input.color(DEF_BEAR,   "Bearish",   inline = "c1", group = G_CL)
+cNeut    = input.color(DEF_NEUT,   "Neutral",   inline = "c1", group = G_CL)
+cFresh   = input.color(#089981,    "OB Fresh",  inline = "c2", group = G_CL)
+cMit     = input.color(#787b86,    "Mitigated", inline = "c2", group = G_CL)
+cInv     = input.color(#4a4e59,    "Invalid",   inline = "c2", group = G_CL)
+cFvgBull = input.color(#089981,    "FVG Bull",  inline = "c3", group = G_CL)
+cFvgBear = input.color(#f23645,    "FVG Bear",  inline = "c3", group = G_CL)
+cIfvg    = input.color(DEF_ACCENT, "IFVG",      inline = "c3", group = G_CL)
+cPrem    = input.color(#f23645,    "Premium",   inline = "c4", group = G_CL)
+cDisc    = input.color(#089981,    "Discount",  inline = "c4", group = G_CL)
+cOte     = input.color(DEF_ACCENT, "OTE",       inline = "c4", group = G_CL)
+cLiqB    = input.color(#2962ff,    "Buyside",   inline = "c5", group = G_CL)
+cLiqS    = input.color(#ff6d00,    "Sellside",  inline = "c5", group = G_CL)
+cSyd     = input.color(#9c27b0,    "Sydney",    inline = "c6", group = G_CL)
+cTok     = input.color(#26a69a,    "Tokyo",     inline = "c6", group = G_CL)
+cLon     = input.color(#42a5f5,    "London",    inline = "c7", group = G_CL)
+cNy      = input.color(#ef5350,    "New York",  inline = "c7", group = G_CL)
+cKz      = input.color(#ffb300,    "Kill Zone", inline = "c8", group = G_CL)
+cInk     = input.color(DEF_INK,    "Text",      inline = "c8", group = G_CL)
+cPanel   = input.color(DEF_PANEL,  "Panel",     inline = "c9", group = G_CL)
+cGrid    = input.color(DEF_GRID,   "Border",    inline = "c9", group = G_CL)
+
+// ── Performance ───────────────────────────────────────────────────────────────────────────────
+pfMaxBars = input.int(2000, "History Limit (bars)", minval = 200, maxval = 20000, group = G_PF, tooltip = "Detection is skipped on bars older than this. Large speed win on 1-minute charts.")
+pfZoneAge = input.int(500, "Zone Max Age (bars)", minval = 50, maxval = 5000, group = G_PF, tooltip = "Any OB / FVG / HTF zone older than this is deleted regardless of state. Keeps week-old ghosts off an intraday chart.")
+pfHeavy   = input.bool(true, "Refresh extend / labels on last bar only", group = G_PF, tooltip = "Boxes stretch to the right edge once per realtime tick instead of on every historical bar. Detection logic is unaffected.")
+
+// ── Debug ─────────────────────────────────────────────────────────────────────────────────────
+dgEnable = input.bool(false, "Show Debug Panel", group = G_DG)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 3. USER DEFINED TYPES
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Generic price zone — order blocks, FVG, IFVG, BPR, VI, opening gaps, HTF zones
+type Zone
+    float  top
+    float  bot
+    int    left
+    bool   bull
+    string kind    = "OB"      // OB | FVG | IFVG | BPR | VI | OG | HTF-FVG | HTF-OB
+    int    state   = 0
+    float  extreme = na        // running fill extreme
+    float  fillPct = 0.0
+    int    stack   = 1         // nested / stacked count
+    int    frozen  = na        // bar where the right edge stopped advancing (na = still live)
+    int    born    = na        // bar the zone was created on — it cannot be "touched" that bar
+    bool   dead    = false
+    box    bx      = na
+    label  lb      = na
+
+// Liquidity level
+type Liq
+    float price
+    int   bar
+    bool  buyside
+    bool  external = true
+    bool  swept    = false
+    bool  dead     = false
+    line  ln       = na
+    label lb       = na
+
+// Static PD-array level (PDH, PWL, …)
+type Lvl
+    string name
+    float  price  = na
+    bool   broken = false
+    line   ln     = na
+    label  lb     = na
+
+// Session / kill-zone container
+type Sess
+    string name
+    color  col
+    float  hi         = na
+    float  lo         = na
+    int    hiBar      = na
+    int    loBar      = na
+    int    left       = na
+    bool   active     = false
+    bool   sweptHi    = false
+    bool   sweptLo    = false
+    bool   justClosed = false
+    bool   sweptNow   = false
+    box    bx         = na
+
+// Market structure state. Held in a UDT because Pine forbids writing to an outer-scope
+// scalar from inside a function — object *fields* may be mutated, so the engine stays modular.
+type MS
+    float ph        = na      // confirmed pivot high awaiting a break
+    float pl        = na
+    int   phBar     = na
+    int   plBar     = na
+    float prevPh    = na
+    float prevPl    = na
+    int   dir       = 0       // 1 bullish · -1 bearish · 0 undefined
+    float rangeHi   = na      // dealing range
+    float rangeLo   = na
+    int   rangeHiBar= na
+    int   rangeLoBar= na
+    int   legId     = 0       // increments on every structure break
+
+// Structure events produced by one evaluation pass
+type Evt
+    bool bosUp = false
+    bool bosDn = false
+    bool chUp  = false
+    bool chDn  = false
+    bool mssUp = false
+    bool mssDn = false
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 4. GLOBAL STATE & DRAWING REGISTRIES
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+var array<Zone>  obUp      = array.new<Zone>()
+var array<Zone>  obDn      = array.new<Zone>()
+var array<Zone>  fvUp      = array.new<Zone>()
+var array<Zone>  fvDn      = array.new<Zone>()
+var array<Zone>  htfZ      = array.new<Zone>()
+var array<Liq>   liqs      = array.new<Liq>()
+var array<line>  msLns     = array.new<line>()
+var array<label> msLbs     = array.new<label>()
+var array<line>  tmLns     = array.new<line>()
+var array<label> tmLbs     = array.new<label>()
+var array<box>   sessBoxes = array.new<box>()
+var array<line>  sessLines = array.new<line>()
+var array<label> sigLbs    = array.new<label>()
+var array<line>  sigLns    = array.new<line>()
+
+var MS msExt = MS.new()      // external / major structure
+var MS msInt = MS.new()      // internal / minor structure
+var MS msHtf = MS.new()      // higher timeframe structure
+
+// Rolling confluence memory consumed by the trend engine, entry model and dashboard
+var int    lastSweepDir    = 0
+var int    lastSweepBar    = na
+var int    lastMssDir      = 0
+var int    lastMssBar      = na
+var int    lastCisdDir     = 0
+var int    lastCisdBar     = na
+var int    lastObTouchDir  = 0
+var int    lastObTouchBar  = na
+var int    lastFvgTouchDir = 0
+var int    lastFvgTouchBar = na
+var int    lastSignalLeg   = -1
+var int    lastSignalBar   = na
+var int    lastSignalDir   = 0
+var float  lastScore       = 0.0
+var string structTxt       = "—"
+var string liqTxt          = "—"
+
+// CISD reference prices: the open of the first candle of the current same-colour run
+var float cisdBearOpen = na
+var float cisdBullOpen = na
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 5. CORE SERIES + UTILITY / DRAWING HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+atr     = ta.atr(atrLen)
+volSma  = ta.sma(volume, fvVolLen)
+inRange = bar_index > last_bar_index - pfMaxBars                  // history guard (performance)
+heavyOk = pfHeavy ? (barstate.islast or barstate.isrealtime) : true
+
+f_lineStyle(string s) => s == "Solid" ? line.style_solid : s == "Dotted" ? line.style_dotted : line.style_dashed
+hlStyle = f_lineStyle(hlStyleIn)
+
+f_tablePos(string s) =>
+    switch s
+        "Top Left"    => position.top_left
+        "Top Right"   => position.top_right
+        "Bottom Left" => position.bottom_left
+        => position.bottom_right
+
+// Noise filter — the "hide insignificant drawings" rule
+f_significant(float top, float bot) => not autoHide or math.abs(top - bot) >= atr * noiseFactor
+
+// Was `b` within `win` bars?
+f_recent(int b, int win) => not na(b) and bar_index - b <= win
+
+// ── object recycling ──────────────────────────────────────────────────────────────────────────
+f_killZone(Zone z) =>
+    if not na(z.bx)
+        box.delete(z.bx)
+    if not na(z.lb)
+        label.delete(z.lb)
+    z.dead := true
+
+f_killLiq(Liq l) =>
+    if not na(l.ln)
+        line.delete(l.ln)
+    if not na(l.lb)
+        label.delete(l.lb)
+    l.dead := true
+
+f_trimZones(array<Zone> a, int cap) =>
+    while array.size(a) > cap
+        f_killZone(array.shift(a))
+
+f_trimLiq(array<Liq> a, int cap) =>
+    while array.size(a) > cap
+        f_killLiq(array.shift(a))
+
+f_trimLines(array<line> a, int cap) =>
+    while array.size(a) > cap
+        line.delete(array.shift(a))
+
+f_trimLabels(array<label> a, int cap) =>
+    while array.size(a) > cap
+        label.delete(array.shift(a))
+
+f_trimBoxes(array<box> a, int cap) =>
+    while array.size(a) > cap
+        box.delete(array.shift(a))
+
+// ── zone rendering ────────────────────────────────────────────────────────────────────────────
+f_zoneBase(Zone z) =>
+    switch z.kind
+        "IFVG"    => cIfvg
+        "FVG"     => z.bull ? cFvgBull : cFvgBear
+        "HTF-FVG" => z.bull ? cFvgBull : cFvgBear
+        "BPR"     => z.bull ? cFvgBull : cFvgBear
+        "VI"      => z.bull ? cFvgBull : cFvgBear
+        "OG"      => cNeut
+        => z.bull ? cFresh : cBear
+
+f_zoneColor(Zone z) =>
+    color base = f_zoneBase(z)
+    switch z.state
+        ST_MITIGATED => cMit
+        ST_INVALID   => cInv
+        ST_BREAKER   => DEF_ACCENT
+        ST_RECLAIMED => z.bull ? cBull : cBear
+        => base
+
+f_zoneTag(Zone z) =>
+    string s = switch z.state
+        ST_BREAKER   => "BRK"
+        ST_RECLAIMED => "RCL"
+        ST_MITIGATED => "MIT"
+        => z.kind
+    string pre = z.stack >= fvStack ? "×" + str.tostring(z.stack) + " " : ""
+    string suf = fvShowFill and z.kind != "OB" and z.fillPct > 0 ? " " + str.tostring(math.round(z.fillPct)) + "%" : ""
+    pre + s + suf
+
+// Create the drawing for a zone. Never called from inside a ternary.
+// Also stamps the creation bar: the displacement candle that CREATES a zone always overlaps
+// it geometrically, and counting that as a "touch" inflates confluence on the break bar.
+f_drawZone(Zone z, int transp, int extendBars) =>
+    z.born := bar_index
+    if f_significant(z.top, z.bot)
+        color col = f_zoneColor(z)
+        z.bx := box.new(z.left, z.top, bar_index + extendBars, z.bot, xloc = xloc.bar_index, border_color = color.new(col, math.min(95, transp + 10)), border_width = 1, bgcolor = color.new(col, transp))
+        if obLabels or z.kind != "OB"
+            z.lb := label.new(z.left, z.bull ? z.bot : z.top, f_zoneTag(z), xloc = xloc.bar_index, yloc = yloc.price, color = color.new(col, 100), textcolor = color.new(col, 20), style = z.bull ? label.style_label_up : label.style_label_down, size = lblSzSm)
+    z
+
+// Refresh geometry + styling of a live zone.
+// Only FRESH zones ride the right edge of the chart. The moment a zone is touched or loses
+// state it FREEZES where it was — otherwise every retained zone stretches to the live bar
+// forever and the chart fills with stepped ghost rectangles.
+// Non-fresh zones also render one notch fainter than the base transparency.
+f_refreshZone(Zone z, int transp, int extendBars) =>
+    color col = f_zoneColor(z)
+    int   effT = z.state == ST_FRESH ? transp : math.min(96, transp + 5)
+    if not na(z.bx)
+        box.set_top(z.bx, z.top)
+        box.set_bottom(z.bx, z.bot)
+        box.set_left(z.bx, z.left)
+        box.set_right(z.bx, na(z.frozen) ? bar_index + extendBars : z.frozen + 2)
+        box.set_bgcolor(z.bx, color.new(col, effT))
+        box.set_border_color(z.bx, color.new(col, math.min(96, effT + 8)))
+    if not na(z.lb)
+        label.set_text(z.lb, f_zoneTag(z))
+        label.set_y(z.lb, z.bull ? z.bot : z.top)
+        label.set_textcolor(z.lb, color.new(col, z.state == ST_FRESH ? 20 : 45))
+
+f_touch(Zone z) => bar_index > nz(z.born, bar_index) and low <= z.top and high >= z.bot
+
+// Count fresh zones a candidate overlaps → nested / stacked detection
+f_overlapCount(array<Zone> a, float top, float bot) =>
+    int n = 0
+    if array.size(a) > 0
+        for i = 0 to array.size(a) - 1
+            Zone z = array.get(a, i)
+            if not z.dead and z.state == ST_FRESH and top >= z.bot and bot <= z.top
+                n += 1
+    n
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 6. HIGHER TIMEFRAME DATA LAYER
+//    One batched request. Every expression is shifted [1] and paired with lookahead_on —
+//    the canonical non-repainting idiom (last CLOSED HTF value, correct historical alignment).
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+f_autoHtf() =>
+    switch
+        timeframe.isseconds                                 => "15"
+        timeframe.isminutes and timeframe.multiplier <= 3   => "15"
+        timeframe.isminutes and timeframe.multiplier <= 15  => "60"
+        timeframe.isminutes and timeframe.multiplier <= 60  => "240"
+        timeframe.isminutes and timeframe.multiplier <= 240 => "D"
+        timeframe.isdaily                                   => "W"
+        => "M"
+
+htfTf = htAuto ? f_autoHtf() : htTfManual
+
+[hH1, hL1, hC1, hH2, hL2, hO2, hC2, hH3, hL3, hPh, hPl, hEma, hTime] = request.security(syminfo.tickerid, htfTf, [high[1], low[1], close[1], high[2], low[2], open[2], close[2], high[3], low[3], ta.pivothigh(high, htSwingLen, htSwingLen)[1], ta.pivotlow(low, htSwingLen, htSwingLen)[1], ta.ema(close, htEmaLen)[1], time[1]], lookahead = barmerge.lookahead_on)
+
+newHtfBar = ta.change(hTime) != 0 and not na(hTime)
+
+// PD-array period extremes (previous period = fixed, therefore non-repainting).
+// The current-period open ships in the same call as the previous-period extremes —
+// one request per timeframe instead of two.
+[pdhV, pdlV, dOpen] = request.security(syminfo.tickerid, "D",   [high[1], low[1], open], lookahead = barmerge.lookahead_on)
+[pwhV, pwlV, wOpen] = request.security(syminfo.tickerid, "W",   [high[1], low[1], open], lookahead = barmerge.lookahead_on)
+[pmhV, pmlV, mOpen] = request.security(syminfo.tickerid, "M",   [high[1], low[1], open], lookahead = barmerge.lookahead_on)
+[pqhV, pqlV]        = request.security(syminfo.tickerid, "3M",  [high[1], low[1]],       lookahead = barmerge.lookahead_on)
+[pyhV, pylV]        = request.security(syminfo.tickerid, "12M", [high[1], low[1]],       lookahead = barmerge.lookahead_on)
+[cdhV, cdlV]        = request.security(syminfo.tickerid, "D",   [high, low],             lookahead = barmerge.lookahead_off)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 7. PIVOT & DISPLACEMENT ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+phInt = ta.pivothigh(high, msIntLen, msIntLen)
+plInt = ta.pivotlow(low,  msIntLen, msIntLen)
+phExt = ta.pivothigh(high, msExtLen, msExtLen)
+plExt = ta.pivotlow(low,  msExtLen, msExtLen)
+
+barRange     = high - low
+displacement = barRange >= atr * msDispMult
+bullBar      = close > open
+bearBar      = close < open
+// Volume is na on many FX / index feeds — a na comparison must degrade to "no filter",
+// never to a na bool leaking into the scoring functions.
+hasVol       = not na(volume) and not na(volSma)
+volAbove     = hasVol and volume > volSma
+volOk        = not fvVolFilter or not hasVol or volAbove
+
+emaFast = ta.ema(close, trEmaFast)
+emaSlow = ta.ema(close, trEmaSlow)
+
+// Same-colour candle runs give the "state of delivery" reference price
+if bearBar and (na(cisdBearOpen) or bullBar[1])
+    cisdBearOpen := open
+if bullBar and (na(cisdBullOpen) or bearBar[1])
+    cisdBullOpen := open
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 8. MARKET STRUCTURE ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Register a freshly confirmed pivot; also maintains the dealing range
+f_pushPivot(MS m, float ph, float pl, int len) =>
+    if not na(ph)
+        m.prevPh     := m.ph
+        m.ph         := ph
+        m.phBar      := bar_index - len
+        m.rangeHi    := ph
+        m.rangeHiBar := bar_index - len
+    if not na(pl)
+        m.prevPl     := m.pl
+        m.pl         := pl
+        m.plBar      := bar_index - len
+        m.rangeLo    := pl
+        m.rangeLoBar := bar_index - len
+
+// Confirmation = candle CLOSE beyond a confirmed pivot.
+// A wick-only penetration is a liquidity sweep, not a structure break.
+f_evalBreak(MS m) =>
+    Evt e = Evt.new()
+    if not na(m.ph) and close > m.ph
+        if m.dir == 1
+            e.bosUp := true
+        else if m.dir == -1        // dir == 0 → first break in history: init silently,
+            e.chUp  := true        // there is no prior trend for a "change of character"
+            e.mssUp := displacement
+        m.dir   := 1
+        m.legId := m.legId + 1
+        m.ph    := na
+    else if not na(m.pl) and close < m.pl
+        if m.dir == -1
+            e.bosDn := true
+        else if m.dir == 1
+            e.chDn  := true
+            e.mssDn := displacement
+        m.dir   := -1
+        m.legId := m.legId + 1
+        m.pl    := na
+    e
+
+// Structure line + centred label, both pooled for recycling
+f_msDraw(bool up, float lvl, int fromBar, string txt, color col) =>
+    array.push(msLns, line.new(fromBar, lvl, bar_index, lvl, xloc = xloc.bar_index, color = color.new(col, 25), style = line.style_dashed, width = 1))
+    array.push(msLbs, label.new(math.floor((fromBar + bar_index) / 2), lvl, txt, xloc = xloc.bar_index, yloc = yloc.price, color = color.new(col, 100), textcolor = col, style = up ? label.style_label_down : label.style_label_up, size = lblSz))
+    f_trimLines(msLns, msMaxDraw)
+    f_trimLabels(msLbs, msMaxDraw)
+
+Evt extE = Evt.new()
+Evt intE = Evt.new()
+if msEnable and inRange
+    f_pushPivot(msExt, phExt, plExt, msExtLen)
+    extE := f_evalBreak(msExt)
+    f_pushPivot(msInt, phInt, plInt, msIntLen)
+    intE := f_evalBreak(msInt)
+
+// CISD — delivery flips when price closes back through the origin of the opposing run
+cisdBull = msEnable and msShowCISD and inRange and not na(cisdBearOpen) and close > cisdBearOpen and close[1] <= cisdBearOpen and bullBar
+cisdBear = msEnable and msShowCISD and inRange and not na(cisdBullOpen) and close < cisdBullOpen and close[1] >= cisdBullOpen and bearBar
+
+if cisdBull
+    lastCisdDir := 1
+    lastCisdBar := bar_index
+if cisdBear
+    lastCisdDir := -1
+    lastCisdBar := bar_index
+
+// Label only displacement-backed CISDs — every micro-flip labelled = wallpaper
+if (cisdBull or cisdBear) and displacement
+    label.new(bar_index, cisdBull ? low : high, "CISD", xloc = xloc.bar_index, yloc = yloc.price, color = color.new(cisdBull ? cBull : cBear, 100), textcolor = color.new(cisdBull ? cBull : cBear, 20), style = cisdBull ? label.style_label_up : label.style_label_down, size = lblSzSm)
+
+// External structure labels
+if msEnable and inRange and msShowExt
+    if extE.bosUp and msShowBOS
+        f_msDraw(true, high, math.max(bar_index - 20, nz(msExt.rangeHiBar, bar_index - 5)), "BOS", cBull)
+        structTxt := "Bullish BOS"
+    if extE.bosDn and msShowBOS
+        f_msDraw(false, low, math.max(bar_index - 20, nz(msExt.rangeLoBar, bar_index - 5)), "BOS", cBear)
+        structTxt := "Bearish BOS"
+    if extE.chUp and msShowCHoCH
+        f_msDraw(true, high, math.max(bar_index - 20, nz(msExt.rangeHiBar, bar_index - 5)), extE.mssUp and msShowMSS ? "MSS" : "CHoCH", cBull)
+        structTxt := extE.mssUp ? "Bullish MSS" : "Bullish CHoCH"
+    if extE.chDn and msShowCHoCH
+        f_msDraw(false, low, math.max(bar_index - 20, nz(msExt.rangeLoBar, bar_index - 5)), extE.mssDn and msShowMSS ? "MSS" : "CHoCH", cBear)
+        structTxt := extE.mssDn ? "Bearish MSS" : "Bearish CHoCH"
+
+// Internal structure labels (kept visually subordinate)
+if msEnable and inRange and msShowInt and (intE.chUp or intE.chDn or intE.bosUp or intE.bosDn)
+    bool iUp = intE.chUp or intE.bosUp
+    string iTxt = intE.chUp or intE.chDn ? "iCHoCH" : "iBOS"
+    label.new(bar_index, iUp ? low : high, iTxt, xloc = xloc.bar_index, yloc = yloc.price, color = color.new(iUp ? cBull : cBear, 100), textcolor = color.new(iUp ? cBull : cBear, 35), style = iUp ? label.style_label_up : label.style_label_down, size = lblSzSm)
+
+// Swing point classification
+if msEnable and msShowSwings and inRange
+    if not na(phExt)
+        label.new(bar_index - msExtLen, phExt, na(msExt.prevPh) or phExt > msExt.prevPh ? "HH" : "LH", xloc = xloc.bar_index, yloc = yloc.price, color = color.new(cNeut, 100), textcolor = color.new(cInk, 30), style = label.style_label_down, size = lblSzSm)
+    if not na(plExt)
+        label.new(bar_index - msExtLen, plExt, na(msExt.prevPl) or plExt < msExt.prevPl ? "LL" : "HL", xloc = xloc.bar_index, yloc = yloc.price, color = color.new(cNeut, 100), textcolor = color.new(cInk, 30), style = label.style_label_up, size = lblSzSm)
+
+if extE.mssUp
+    lastMssDir := 1
+    lastMssBar := bar_index
+if extE.mssDn
+    lastMssDir := -1
+    lastMssBar := bar_index
+
+plotshape(msEnable and msArrows and (extE.bosUp or extE.chUp) ? low : na,  "MS Break Up",   shape.triangleup,   location.absolute, DEF_BULL, size = size.tiny)
+plotshape(msEnable and msArrows and (extE.bosDn or extE.chDn) ? high : na, "MS Break Down", shape.triangledown, location.absolute, DEF_BEAR, size = size.tiny)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 9. LIQUIDITY ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+f_addLiq(float price, int bar, bool buyside, bool external, string txt) =>
+    color col = buyside ? cLiqB : cLiqS
+    Liq l = Liq.new(price = price, bar = bar, buyside = buyside, external = external)
+    l.ln := line.new(bar, price, bar_index + 5, price, xloc = xloc.bar_index, color = color.new(col, external ? 45 : 70), style = line.style_dotted, width = 1)
+    if lqLabels
+        l.lb := label.new(bar_index + 5, price, txt, xloc = xloc.bar_index, yloc = yloc.price, color = color.new(col, 100), textcolor = color.new(col, external ? 35 : 60), style = label.style_label_left, size = lblSzSm)
+    array.push(liqs, l)
+    f_trimLiq(liqs, lqMax)
+
+// An equal-high pivot must not ALSO print a BSL line at the same price — one level, one label.
+bool eqHiNow = lqShowEq and not na(phExt) and not na(msExt.prevPh) and math.abs(phExt - msExt.prevPh) <= atr * lqEqTol
+bool eqLoNow = lqShowEq and not na(plExt) and not na(msExt.prevPl) and math.abs(plExt - msExt.prevPl) <= atr * lqEqTol
+if lqEnable and inRange
+    // Equal highs / lows
+    if eqHiNow
+        f_addLiq(math.max(phExt, msExt.prevPh), bar_index - msExtLen, true, true, "EQH")
+    if eqLoNow
+        f_addLiq(math.min(plExt, msExt.prevPl), bar_index - msExtLen, false, true, "EQL")
+    // Untapped pivots = resting liquidity (skipped when the same pivot just made an EQH/EQL)
+    if lqShowPools and lqShowExt and not na(phExt) and not eqHiNow
+        f_addLiq(phExt, bar_index - msExtLen, true, true, "BSL")
+    if lqShowPools and lqShowExt and not na(plExt) and not eqLoNow
+        f_addLiq(plExt, bar_index - msExtLen, false, true, "SSL")
+    if lqShowPools and lqShowInt and not na(phInt)
+        f_addLiq(phInt, bar_index - msIntLen, true, false, "il")
+    if lqShowPools and lqShowInt and not na(plInt)
+        f_addLiq(plInt, bar_index - msIntLen, false, false, "il")
+
+// Sweep / grab detection and level maintenance
+bool sweepHigh = false      // buyside taken → bearish implication
+bool sweepLow  = false
+if lqEnable and array.size(liqs) > 0
+    for i = array.size(liqs) - 1 to 0
+        Liq l = array.get(liqs, i)
+        bool taken  = l.buyside ? high > l.price : low < l.price
+        bool reject = l.buyside ? close < l.price : close > l.price
+        if taken and not l.swept
+            if lqSweepClose ? reject : true
+                l.swept := true
+                if l.buyside
+                    sweepHigh := true
+                else
+                    sweepLow := true
+                if lqShowSweep and lqLabels
+                    label.new(bar_index, l.price, "×", xloc = xloc.bar_index, yloc = yloc.price, color = color.new(l.buyside ? cLiqB : cLiqS, 100), textcolor = color.new(l.buyside ? cLiqB : cLiqS, 10), style = l.buyside ? label.style_label_down : label.style_label_up, size = lblSzSm)
+        bool dropLiq = l.swept and lqRemove
+        if dropLiq
+            f_killLiq(l)
+            array.remove(liqs, i)
+        if not dropLiq and heavyOk and not na(l.ln)
+            line.set_x2(l.ln, bar_index + 5)
+            if not na(l.lb)
+                label.set_x(l.lb, bar_index + 5)
+
+if sweepHigh
+    lastSweepDir := -1
+    lastSweepBar := bar_index
+    liqTxt       := "Buyside taken"
+if sweepLow
+    lastSweepDir := 1
+    lastSweepBar := bar_index
+    liqTxt       := "Sellside taken"
+
+// Raid = sweep immediately followed by displacement away from the swept level
+raid = lqEnable and f_recent(lastSweepBar, 3) and barRange >= atr * (msDispMult + lqRaidMult) and ((lastSweepDir == 1 and bullBar) or (lastSweepDir == -1 and bearBar))
+if raid
+    liqTxt := "RAID"
+    if lqShowSweep
+        label.new(bar_index, lastSweepDir == 1 ? low : high, "RAID", xloc = xloc.bar_index, yloc = yloc.price, color = color.new(DEF_ACCENT, 100), textcolor = DEF_ACCENT, style = lastSweepDir == 1 ? label.style_label_up : label.style_label_down, size = lblSzSm)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 10. ORDER BLOCK ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Origin-candle search result. A mutable holder is used instead of a returned tuple so the
+// search stays a reusable function without relying on local-scope tuple declarations.
+type Cand
+    int   idx = na
+    float top = na
+    float bot = na
+
+// Locate the origin candle of the impulse that just broke structure.
+// "Extreme Candle"      -> the deepest opposing candle inside the lookback (institutional default)
+// "Last Opposite Candle"-> the classic single candle immediately before the impulse
+// NOTE: written as a single-branch `if` on purpose. Pine unifies the return types of every
+// branch of an if/else-if chain even when the result is discarded, so a chain whose branches
+// end in different types (e.g. `break` vs a float assignment) fails to compile with CE10235.
+f_findOrigin(Cand c, bool bullBreak, int lb) =>
+    float best = bullBreak ? 1e20 : -1e20
+    bool  lastMode = obPick == "Last Opposite Candle"
+    bool  done = false
+    for i = 1 to lb
+        bool opposite = not done and (bullBreak ? close[i] < open[i] : close[i] > open[i])
+        bool better   = opposite and (lastMode or (bullBreak ? low[i] < best : high[i] > best))
+        if better
+            best  := bullBreak ? math.min(best, low[i]) : math.max(best, high[i])
+            c.idx := i
+            c.top := obSource == "Body" ? math.max(open[i], close[i]) : high[i]
+            c.bot := obSource == "Body" ? math.min(open[i], close[i]) : low[i]
+            done  := lastMode
+
+// True when a candidate zone is essentially the same level as a live zone already on the
+// chart (≥ 60% of the smaller range overlapping). Consecutive BOS in one leg otherwise mint
+// near-identical blocks stacked on top of each other.
+f_dupZone(array<Zone> a, float top, float bot) =>
+    bool dup = false
+    if array.size(a) > 0
+        for i = 0 to array.size(a) - 1
+            Zone z = array.get(a, i)
+            if not z.dead and z.state == ST_FRESH
+                float ovl = math.min(top, z.top) - math.max(bot, z.bot)
+                float ref = math.min(top - bot, z.top - z.bot)
+                if ovl > 0 and ref > 0 and ovl / ref >= 0.6
+                    dup := true
+                    break
+    dup
+
+f_newOb(bool bull) =>
+    bool created = false
+    Cand c = Cand.new()
+    f_findOrigin(c, bull, obLookback)
+    if not na(c.idx) and f_significant(c.top, c.bot) and not f_dupZone(bull ? obUp : obDn, c.top, c.bot)
+        Zone z = Zone.new(top = c.top, bot = c.bot, left = bar_index - c.idx, bull = bull, kind = "OB")
+        z.extreme := bull ? c.top : c.bot
+        z.stack   := obNested ? f_overlapCount(bull ? obUp : obDn, c.top, c.bot) + 1 : 1
+        f_drawZone(z, obTransp, obExtend)
+        array.push(bull ? obUp : obDn, z)
+        f_trimZones(bull ? obUp : obDn, obShowLast)
+        created := true
+    created
+
+bool obNewUp = false
+bool obNewDn = false
+if obEnable and inRange
+    if extE.bosUp or extE.chUp
+        obNewUp := f_newOb(true)
+    if extE.bosDn or extE.chDn
+        obNewDn := f_newOb(false)
+
+// Lifecycle: fresh → mitigated → invalidated → breaker / reclaimed
+// NOTE: Pine forbids assigning to global scalars inside a function (CE10088), so the touch
+// direction is returned in the tuple and the `lastObTouch*` globals are written at call site.
+f_updateObs(array<Zone> a) =>
+    bool touched   = false
+    bool mitigated = false
+    bool breaker   = false
+    int  touchDir  = 0
+    if obEnable and array.size(a) > 0
+        for i = array.size(a) - 1 to 0
+            Zone z = array.get(a, i)
+            bool closedThrough = z.bull ? close < z.bot : close > z.top
+            bool tagged        = f_touch(z)
+            // Snapshot BEFORE this bar's transitions: a breaker needs a retest on a LATER
+            // bar — the invalidating candle itself always "tags" the zone it just broke,
+            // and promoting on that same bar would mint a breaker out of every invalidation.
+            bool wasInvalid = z.state == ST_INVALID
+
+            if z.state == ST_FRESH and tagged
+                z.state   := ST_MITIGATED
+                z.frozen  := bar_index          // freeze the right edge at first touch
+                mitigated := true
+                touched   := true
+                touchDir  := z.bull ? 1 : -1
+            else if z.state == ST_MITIGATED and tagged
+                touched  := true
+                touchDir := z.bull ? 1 : -1
+
+            if (z.state == ST_FRESH or z.state == ST_MITIGATED) and closedThrough
+                z.state  := ST_INVALID
+                z.frozen := nz(z.frozen, bar_index)
+
+            // Previously-invalidated block retested on a later bar → breaker block.
+            // A breaker is active again: unfreeze so it rides the right edge.
+            if wasInvalid and obBreaker and tagged and z.state == ST_INVALID
+                z.state  := ST_BREAKER
+                z.frozen := na
+                breaker  := true
+
+            // Previously-invalidated block reclaimed by a close back inside its range
+            if wasInvalid and obReclaim and z.state == ST_INVALID and close > z.bot and close < z.top
+                z.state  := ST_RECLAIMED
+                z.frozen := na
+
+            bool expired = bar_index - z.left > pfZoneAge
+            bool drop = expired or (z.state == ST_MITIGATED and not obShowMit) or (z.state == ST_INVALID and not obShowInv and not obBreaker)
+            if drop
+                f_killZone(z)
+                array.remove(a, i)
+            if not drop and heavyOk
+                f_refreshZone(z, obTransp, obExtend)
+    [touched, mitigated, breaker, touchDir]
+
+[obTouchU, obMitU, obBrkU, obDirU] = f_updateObs(obUp)
+[obTouchD, obMitD, obBrkD, obDirD] = f_updateObs(obDn)
+
+if obTouchU
+    lastObTouchDir := obDirU
+    lastObTouchBar := bar_index
+if obTouchD
+    lastObTouchDir := obDirD
+    lastObTouchBar := bar_index
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 11. IMBALANCE ENGINE — FVG / IFVG / BPR / VI / OPENING GAP
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Merge a candidate into an overlapping fresh gap of the same direction
+f_tryMerge(array<Zone> a, float top, float bot) =>
+    bool merged = false
+    if fvMerge and array.size(a) > 0
+        for i = array.size(a) - 1 to 0
+            Zone z = array.get(a, i)
+            if not z.dead and z.state == ST_FRESH and top >= z.bot and bot <= z.top
+                z.top   := math.max(z.top, top)
+                z.bot   := math.min(z.bot, bot)
+                z.stack := z.stack + 1
+                merged  := true
+                break
+    merged
+
+f_newGap(bool bull, float top, float bot, int leftBar, string kind) =>
+    bool created = false
+    array<Zone> a = bull ? fvUp : fvDn
+    if f_significant(top, bot) and math.abs(top - bot) >= atr * fvMinMult and not f_tryMerge(a, top, bot)
+        Zone z = Zone.new(top = top, bot = bot, left = leftBar, bull = bull, kind = kind)
+        z.stack := f_overlapCount(a, top, bot) + 1
+        f_drawZone(z, fvTransp, fvExtend)
+        array.push(a, z)
+        f_trimZones(a, fvMax)
+        created := true
+    created
+
+bool fvgNewUp = false
+bool fvgNewDn = false
+
+if fvEnable and inRange and volOk
+    // Classic three-candle fair value gap
+    if fvShowFVG and low > high[2] and close[1] > open[1]
+        fvgNewUp := f_newGap(true, low, high[2], bar_index - 2, "FVG")
+    if fvShowFVG and high < low[2] and close[1] < open[1]
+        fvgNewDn := f_newGap(false, low[2], high, bar_index - 2, "FVG")
+    // Volume imbalance — body gap whose wicks still overlap
+    if fvShowVI and open > close[1] and low <= close[1]
+        f_newGap(true, open, close[1], bar_index - 1, "VI")
+    if fvShowVI and open < close[1] and high >= close[1]
+        f_newGap(false, close[1], open, bar_index - 1, "VI")
+
+// True opening gap between sessions / days
+newDay = ta.change(time("D")) != 0
+if fvEnable and fvShowOG and inRange and newDay and not na(close[1])
+    if open > high[1]
+        f_newGap(true, open, high[1], bar_index - 1, "OG")
+    if open < low[1]
+        f_newGap(false, low[1], open, bar_index - 1, "OG")
+
+// Lifecycle: fill tracking → shrink → inversion (IFVG) → removal
+// Touch direction returned in the tuple (see f_updateObs note re CE10088).
+f_updateGaps(array<Zone> a) =>
+    bool inverted = false
+    bool touched  = false
+    int  touchDir = 0
+    if fvEnable and array.size(a) > 0
+        for i = array.size(a) - 1 to 0
+            Zone z = array.get(a, i)
+            float span = math.max(z.top - z.bot, syminfo.mintick)
+
+            if z.bull
+                z.extreme := na(z.extreme) ? low : math.min(z.extreme, low)
+                z.fillPct := math.min(100.0, math.max(0.0, (z.top - math.max(z.extreme, z.bot)) / span * 100.0))
+            else
+                z.extreme := na(z.extreme) ? high : math.max(z.extreme, high)
+                z.fillPct := math.min(100.0, math.max(0.0, (math.min(z.extreme, z.top) - z.bot) / span * 100.0))
+
+            if f_touch(z)
+                touched  := true
+                touchDir := z.bull ? 1 : -1
+
+            // Inversion: a gap traded fully through flips polarity and becomes an IFVG.
+            // The inverted gap is live again — reset fill tracking AND unfreeze the right edge.
+            bool through   = z.bull ? close < z.bot : close > z.top
+            bool invertNow = through and z.kind == "FVG" and fvShowIFVG
+            if invertNow
+                z.kind    := "IFVG"
+                z.bull    := not z.bull
+                z.state   := ST_FRESH
+                z.extreme := na
+                z.fillPct := 0.0
+                z.frozen  := na
+                inverted  := true
+            if through and not invertNow
+                z.state  := ST_INVALID
+                z.frozen := nz(z.frozen, bar_index)
+
+            // Shrink the box to the unfilled portion only
+            if fvShrink and z.state == ST_FRESH and not na(z.extreme)
+                if z.bull and z.extreme > z.bot and z.extreme < z.top
+                    z.top := z.extreme
+                if not z.bull and z.extreme < z.top and z.extreme > z.bot
+                    z.bot := z.extreme
+
+            bool dropGap = z.state == ST_INVALID or z.fillPct >= fvRemoveFill or bar_index - z.left > pfZoneAge
+            if dropGap
+                f_killZone(z)
+                array.remove(a, i)
+            if not dropGap and heavyOk
+                f_refreshZone(z, fvTransp, fvExtend)
+    [inverted, touched, touchDir]
+
+[ifvgUp, fvgTouchU, fvgDirU] = f_updateGaps(fvUp)
+[ifvgDn, fvgTouchD, fvgDirD] = f_updateGaps(fvDn)
+
+if fvgTouchU
+    lastFvgTouchDir := fvgDirU
+    lastFvgTouchBar := bar_index
+if fvgTouchD
+    lastFvgTouchDir := fvgDirD
+    lastFvgTouchBar := bar_index
+
+// BPR — an up-gap and a down-gap sharing price form a balanced price range
+if fvEnable and fvShowBPR and inRange and (fvgNewUp or fvgNewDn) and array.size(fvUp) > 0 and array.size(fvDn) > 0
+    Zone zu = array.get(fvUp, array.size(fvUp) - 1)
+    Zone zd = array.get(fvDn, array.size(fvDn) - 1)
+    float bTop = math.min(zu.top, zd.top)
+    float bBot = math.max(zu.bot, zd.bot)
+    if bTop > bBot and f_significant(bTop, bBot)
+        Zone z = Zone.new(top = bTop, bot = bBot, left = math.max(zu.left, zd.left), bull = close > (bTop + bBot) / 2, kind = "BPR")
+        f_drawZone(z, math.max(0, fvTransp - 5), fvExtend)
+        array.push(z.bull ? fvUp : fvDn, z)
+        f_trimZones(z.bull ? fvUp : fvDn, fvMax)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 12. PREMIUM / DISCOUNT, AUTO FIB, OTE
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+MS pdRef = pdSource == "Internal" ? msInt : msExt
+float rHi = pdRef.rangeHi
+float rLo = pdRef.rangeLo
+bool  rOk = pdEnable and not na(rHi) and not na(rLo) and rHi > rLo
+
+float eq    = rOk ? (rHi + rLo) / 2.0 : na
+float rSpan = rOk ? rHi - rLo : na
+bool  bullLeg = pdRef.dir >= 0
+// Retracement measured from the direction of the current leg
+float fib62  = rOk ? (bullLeg ? rHi - rSpan * 0.620 : rLo + rSpan * 0.620) : na
+float fib705 = rOk ? (bullLeg ? rHi - rSpan * 0.705 : rLo + rSpan * 0.705) : na
+float fib79  = rOk ? (bullLeg ? rHi - rSpan * 0.790 : rLo + rSpan * 0.790) : na
+
+var box   pdPrem = na
+var box   pdDisc = na
+var box   pdOte  = na
+var line  lnEq   = na
+var line  ln62   = na
+var line  ln705  = na
+var line  ln79   = na
+var label lbEq   = na
+
+// Create-once / update-forever line helper (no object creation inside a ternary)
+f_syncLine(line src, float y, int left, color col, string st) =>
+    line l = src
+    if na(l)
+        l := line.new(left, y, bar_index, y, xloc = xloc.bar_index, color = col, style = st, width = 1)
+    line.set_xy1(l, left, y)
+    line.set_xy2(l, bar_index + 3, y)
+    line.set_color(l, col)
+    l
+
+if rOk and heavyOk
+    // Anchor at the dealing-range origin but never draw wider than 150 bars — a fib grid
+    // stretched across the whole screen reads as wallpaper, not as a level.
+    int lft = math.max(bar_index - 150, math.min(nz(pdRef.rangeHiBar, bar_index), nz(pdRef.rangeLoBar, bar_index)))
+    if pdShowZones
+        if na(pdPrem)
+            pdPrem := box.new(lft, rHi, bar_index, eq, xloc = xloc.bar_index, border_color = color.new(cPrem, 92), bgcolor = color.new(cPrem, pdTransp))
+        box.set_lefttop(pdPrem, lft, rHi)
+        box.set_rightbottom(pdPrem, bar_index + 3, eq)
+        box.set_bgcolor(pdPrem, color.new(cPrem, pdTransp))
+        if na(pdDisc)
+            pdDisc := box.new(lft, eq, bar_index, rLo, xloc = xloc.bar_index, border_color = color.new(cDisc, 92), bgcolor = color.new(cDisc, pdTransp))
+        box.set_lefttop(pdDisc, lft, eq)
+        box.set_rightbottom(pdDisc, bar_index + 3, rLo)
+        box.set_bgcolor(pdDisc, color.new(cDisc, pdTransp))
+    if pdShowEQ
+        lnEq := f_syncLine(lnEq, eq, lft, color.new(cNeut, 20), line.style_dashed)
+        if pdLabels
+            if na(lbEq)
+                lbEq := label.new(bar_index + 3, eq, "EQ", xloc = xloc.bar_index, yloc = yloc.price, color = color.new(cNeut, 100), textcolor = color.new(cInk, 20), style = label.style_label_left, size = lblSzSm)
+            label.set_xy(lbEq, bar_index + 3, eq)
+    if pdShowFib
+        ln62  := f_syncLine(ln62,  fib62,  lft, color.new(cOte, 50), line.style_dotted)
+        ln705 := f_syncLine(ln705, fib705, lft, color.new(cOte, 25), line.style_solid)
+        ln79  := f_syncLine(ln79,  fib79,  lft, color.new(cOte, 50), line.style_dotted)
+    if pdShowOTE
+        float oTop = math.max(fib62, fib79)
+        float oBot = math.min(fib62, fib79)
+        if na(pdOte)
+            pdOte := box.new(lft, oTop, bar_index, oBot, xloc = xloc.bar_index, border_color = color.new(cOte, 78), bgcolor = color.new(cOte, math.max(0, pdTransp - 8)))
+        box.set_lefttop(pdOte, lft, oTop)
+        box.set_rightbottom(pdOte, bar_index + 3, oBot)
+
+inPremium  = rOk and close > eq
+inDiscount = rOk and close < eq
+inOte      = rOk and low <= math.max(fib62, fib79) and high >= math.min(fib62, fib79)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 13. PD-ARRAY LEVELS — previous period highs & lows
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+var array<Lvl> lvls = array.new<Lvl>()
+if barstate.isfirst
+    array.push(lvls, Lvl.new(name = "PDH"))
+    array.push(lvls, Lvl.new(name = "PDL"))
+    array.push(lvls, Lvl.new(name = "PWH"))
+    array.push(lvls, Lvl.new(name = "PWL"))
+    array.push(lvls, Lvl.new(name = "PMH"))
+    array.push(lvls, Lvl.new(name = "PML"))
+    array.push(lvls, Lvl.new(name = "PQH"))
+    array.push(lvls, Lvl.new(name = "PQL"))
+    array.push(lvls, Lvl.new(name = "PYH"))
+    array.push(lvls, Lvl.new(name = "PYL"))
+    array.push(lvls, Lvl.new(name = "CDH"))
+    array.push(lvls, Lvl.new(name = "CDL"))
+
+f_lvlColor(string n) =>
+    switch str.substring(n, 1, 2)
+        "D" => cLiqB
+        "W" => cOte
+        "M" => cPrem
+        "Q" => DEF_VIOLET
+        "Y" => #26c6da
+        => cNeut
+
+// Keeps price/broken state on every bar; only touches drawings when `draw` is true
+f_syncLvl(Lvl lv, float price, bool show, bool draw) =>
+    bool hide = not show or na(price)
+    if hide and not na(lv.ln)
+        line.delete(lv.ln)
+        lv.ln := na
+    if hide and not na(lv.lb)
+        label.delete(lv.lb)
+        lv.lb := na
+    if not hide
+        if price != lv.price
+            lv.price  := price
+            lv.broken := false
+        bool isHigh = str.endswith(lv.name, "H")
+        if not lv.broken and ((isHigh and close > price) or (not isHigh and close < price))
+            lv.broken := true
+        if draw
+            color col  = f_lvlColor(lv.name)
+            color colF = hlFade and lv.broken ? color.new(col, 68) : color.new(col, 20)
+            if na(lv.ln)
+                lv.ln := line.new(bar_index - 1, price, bar_index, price, xloc = xloc.bar_index, extend = hlExtend ? extend.right : extend.none, color = colF, style = hlStyle, width = hlWidth)
+            line.set_xy1(lv.ln, bar_index - 1, price)
+            line.set_xy2(lv.ln, bar_index, price)
+            line.set_color(lv.ln, colF)
+            if hlLabels
+                if na(lv.lb)
+                    lv.lb := label.new(bar_index + hlOffset, price, lv.name, xloc = xloc.bar_index, yloc = yloc.price, color = color.new(col, 100), textcolor = colF, style = label.style_label_left, size = lblSzSm)
+                label.set_xy(lv.lb, bar_index + hlOffset, price)
+                label.set_textcolor(lv.lb, colF)
+
+f_lvlPrice(string n) =>
+    switch n
+        "PDH" => pdhV
+        "PDL" => pdlV
+        "PWH" => pwhV
+        "PWL" => pwlV
+        "PMH" => pmhV
+        "PML" => pmlV
+        "PQH" => pqhV
+        "PQL" => pqlV
+        "PYH" => pyhV
+        "PYL" => pylV
+        "CDH" => cdhV
+        => cdlV
+
+f_lvlShow(string n) =>
+    switch str.substring(n, 0, 2)
+        "PD" => hlPD
+        "PW" => hlPW
+        "PM" => hlPM
+        "PQ" => hlPQ
+        "PY" => hlPY
+        => hlCurD
+
+bool pdhBreak = false
+bool pdlBreak = false
+if hlEnable and array.size(lvls) > 0
+    for i = 0 to array.size(lvls) - 1
+        Lvl lv = array.get(lvls, i)
+        bool was = lv.broken
+        f_syncLvl(lv, f_lvlPrice(lv.name), f_lvlShow(lv.name), heavyOk)
+        if not was and lv.broken
+            if lv.name == "PDH"
+                pdhBreak := true
+            if lv.name == "PDL"
+                pdlBreak := true
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 14. SESSIONS & KILL ZONES
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+f_inSess(simple string s) => not na(time(timeframe.period, s, tz))
+
+inSyd  = ssEnable and sSydOn  and f_inSess(sSyd)
+inTok  = ssEnable and sTokOn  and f_inSess(sTok)
+inLon  = ssEnable and sLonOn  and f_inSess(sLon)
+inNy   = ssEnable and sNyOn   and f_inSess(sNy)
+inAsia = kzEnable and kAsiaOn and f_inSess(kAsia)
+inKLon = kzEnable and kLonOn  and f_inSess(kLon)
+inKNy  = kzEnable and kNyOn   and f_inSess(kNy)
+inLun  = kzEnable and kLunOn  and f_inSess(kLun)
+inLc   = kzEnable and kLcOn   and f_inSess(kLc)
+
+anyKz   = inAsia or inKLon or inKNy or inLc
+sessTxt = inNy and inLon ? "London × NY" : inNy ? "New York" : inLon ? "London" : inTok ? "Tokyo" : inSyd ? "Sydney" : "Closed"
+kzTxt   = inKNy ? "NY Open KZ" : inKLon ? "London Open KZ" : inLc ? "London Close" : inLun ? "NY Lunch" : inAsia ? "Asian Range" : "—"
+
+// Background shading costs no drawing objects.
+// ONE shade per bar — kill zone wins over its parent session, sessions never stack on each
+// other. Stacked translucent bgcolors are what turn a chart into brown soup.
+color bgSess = anyKz ? color.new(cKz, 96) :
+     inNy  ? color.new(cNy,  97) :
+     inLon ? color.new(cLon, 97) :
+     inTok ? color.new(cTok, 97) :
+     inSyd ? color.new(cSyd, 97) : na
+bgcolor(ssEnable and ssBg ? bgSess : na, title = "Session / Kill Zone BG")
+
+var array<Sess> sessions = array.new<Sess>()
+if barstate.isfirst
+    array.push(sessions, Sess.new(name = "Asia", col = cTok))
+    array.push(sessions, Sess.new(name = "LO",   col = cLon))
+    array.push(sessions, Sess.new(name = "NYO",  col = cNy))
+
+// Tracks one session range; results are written back onto the object (no local tuple).
+f_updateSess(Sess s, bool active) =>
+    s.justClosed := false
+    s.sweptNow   := false
+    if active
+        if not s.active
+            s.active  := true
+            s.hi      := high
+            s.lo      := low
+            s.hiBar   := bar_index
+            s.loBar   := bar_index
+            s.left    := bar_index
+            s.sweptHi := false
+            s.sweptLo := false
+            if ssBox
+                s.bx := box.new(bar_index, high, bar_index, low, xloc = xloc.bar_index, border_color = color.new(s.col, 78), bgcolor = color.new(s.col, 96))
+                array.push(sessBoxes, s.bx)
+                f_trimBoxes(sessBoxes, ssKeep * 3)
+        else
+            if high > s.hi
+                s.hi    := high
+                s.hiBar := bar_index
+            if low < s.lo
+                s.lo    := low
+                s.loBar := bar_index
+        if not na(s.bx)
+            box.set_lefttop(s.bx, s.left, s.hi)
+            box.set_rightbottom(s.bx, bar_index, s.lo)
+    else if s.active
+        s.active     := false
+        s.justClosed := true
+        if ssHiLo and not na(s.hi)
+            array.push(sessLines, line.new(s.hiBar, s.hi, bar_index + 30, s.hi, xloc = xloc.bar_index, color = color.new(s.col, 55), style = line.style_solid, width = 1))
+            array.push(sessLines, line.new(s.loBar, s.lo, bar_index + 30, s.lo, xloc = xloc.bar_index, color = color.new(s.col, 55), style = line.style_solid, width = 1))
+        if ssMid and not na(s.hi)
+            array.push(sessLines, line.new(s.left, (s.hi + s.lo) / 2, bar_index + 30, (s.hi + s.lo) / 2, xloc = xloc.bar_index, color = color.new(s.col, 68), style = line.style_dotted, width = 1))
+        f_trimLines(sessLines, ssKeep * 3)
+    // Post-session sweep of the stored range
+    if ssSweep and not s.active and not na(s.hi)
+        if not s.sweptHi and high > s.hi and close < s.hi
+            s.sweptHi  := true
+            s.sweptNow := true
+        if not s.sweptLo and low < s.lo and close > s.lo
+            s.sweptLo  := true
+            s.sweptNow := true
+
+bool sessSwept = false
+bool sessClose = false
+if ssEnable and inRange and array.size(sessions) == 3
+    f_updateSess(array.get(sessions, 0), inAsia)
+    f_updateSess(array.get(sessions, 1), inKLon)
+    f_updateSess(array.get(sessions, 2), inKNy)
+    for i = 0 to 2
+        Sess s = array.get(sessions, i)
+        if s.justClosed
+            sessClose := true
+        if s.sweptNow
+            sessSwept := true
+    if sessSwept
+        liqTxt := "Session sweep"
+
+sessOpen = ssEnable and ((inNy and not inNy[1]) or (inLon and not inLon[1]) or (inTok and not inTok[1]))
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 15. ICT TIME MODEL
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+nyH      = hour(time, tz)
+nyM      = minute(time, tz)
+newNyDay = ta.change(dayofmonth(time, tz)) != 0
+
+var float midnightOpen = na
+if tmEnable and newNyDay
+    midnightOpen := open
+
+f_timeLine(string txt) =>
+    array.push(tmLns, line.new(bar_index, low, bar_index, high, xloc = xloc.bar_index, extend = extend.both, color = color.new(cInk, 78), style = line.style_dotted, width = 1))
+    array.push(tmLbs, label.new(bar_index, high, txt, xloc = xloc.bar_index, yloc = yloc.price, color = color.new(cInk, 100), textcolor = color.new(cInk, 40), style = label.style_label_down, size = lblSzSm))
+    f_trimLines(tmLns, 6 * tmKeepDays)
+    f_trimLabels(tmLbs, 6 * tmKeepDays)
+
+if tmEnable and tmVerticals and inRange and timeframe.isintraday
+    if nyH == 8 and nyM == 30
+        f_timeLine("08:30")
+    if nyH == 9 and nyM == 30
+        f_timeLine("09:30 NYO")
+    if nyH == 10 and nyM == 0
+        f_timeLine("10:00")
+    if nyH == 11 and nyM == 0
+        f_timeLine("11:00")
+    if nyH == 13 and nyM == 30
+        f_timeLine("13:30")
+    if nyH == 15 and nyM == 0
+        f_timeLine("15:00")
+
+// Silver Bullet windows (NY): 03:00-04:00 · 10:00-11:00 · 14:00-15:00
+inSilver = tmEnable and tmSilver and timeframe.isintraday and (nyH == 3 or nyH == 10 or nyH == 14)
+// ICT macros: the 20-minute windows straddling the top of each hour, 09:50 → 15:10
+inMacro  = tmEnable and tmMacros and timeframe.isintraday and (nyM >= 50 or nyM <= 10) and nyH >= 9 and nyH <= 15
+// Silver bullet / macro shading also collapses to one layer, and stays off wherever a
+// session shade is already painting the bar.
+color bgTime = inSilver ? color.new(DEF_ACCENT, 97) : inMacro ? color.new(DEF_VIOLET, 97) : na
+bgcolor(na(bgSess) or not ssBg ? bgTime : na, title = "Silver Bullet / Macro BG")
+
+plot(tmEnable and tmMidnight ? midnightOpen : na, "Midnight Open", color.new(cInk,  25), 1, plot.style_linebr)
+plot(tmEnable and tmDayOpen  ? dOpen        : na, "Daily Open",    color.new(cLiqB, 25), 1, plot.style_linebr)
+plot(tmEnable and tmWeekOpen ? wOpen        : na, "Weekly Open",   color.new(cOte,  30), 1, plot.style_linebr)
+plot(tmEnable and tmMonOpen  ? mOpen        : na, "Monthly Open",  color.new(cPrem, 35), 1, plot.style_linebr)
+
+// Power of Three: accumulation (Asia) → manipulation (London) → distribution (NY)
+po3Txt = inAsia ? "Accumulation" : inKLon ? "Manipulation" : inKNy ? "Distribution" : "—"
+if tmEnable and tmPO3 and inRange and timeframe.isintraday and po3Txt != "—" and (inAsia != inAsia[1] or inKLon != inKLon[1] or inKNy != inKNy[1])
+    label.new(bar_index, high, po3Txt, xloc = xloc.bar_index, yloc = yloc.price, color = color.new(DEF_VIOLET, 100), textcolor = color.new(DEF_VIOLET, 20), style = label.style_label_down, size = lblSzSm)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 16. HTF LAYER & TREND ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// HTF structure state machine, driven only by confirmed HTF pivots and closes
+if htEnable and newHtfBar
+    if not na(hPh)
+        msHtf.prevPh := msHtf.ph
+        msHtf.ph     := hPh
+    if not na(hPl)
+        msHtf.prevPl := msHtf.pl
+        msHtf.pl     := hPl
+    if not na(msHtf.ph) and hC1 > msHtf.ph
+        msHtf.dir := 1
+        msHtf.ph  := na
+    else if not na(msHtf.pl) and hC1 < msHtf.pl
+        msHtf.dir := -1
+        msHtf.pl  := na
+
+htfEmaBias = na(hEma) ? 0 : hC1 > hEma ? 1 : -1
+htfBias    = htEnable ? (msHtf.dir != 0 ? msHtf.dir : htfEmaBias) : 0
+htfBiasTxt = htfBias == 1 ? "Bullish" : htfBias == -1 ? "Bearish" : "Neutral"
+
+// HTF imbalances and order blocks, computed from the confirmed HTF candle window.
+// HTF zones are CONTEXT, not entries — they render fainter than chart-timeframe zones
+// (transp + 6) so a daily FVG on a 3-minute chart does not drown the price action.
+htfTranspF = math.min(96, fvTransp + 6)
+htfTranspO = math.min(96, obTransp + 6)
+if htEnable and newHtfBar and inRange
+    if htShowFVG and hL1 > hH3 and hC2 > hO2 and not f_dupZone(htfZ, hL1, hH3)
+        Zone z = Zone.new(top = hL1, bot = hH3, left = bar_index, bull = true, kind = "HTF-FVG")
+        f_drawZone(z, htfTranspF, fvExtend)
+        array.push(htfZ, z)
+    if htShowFVG and hH1 < hL3 and hC2 < hO2 and not f_dupZone(htfZ, hL3, hH1)
+        Zone z = Zone.new(top = hL3, bot = hH1, left = bar_index, bull = false, kind = "HTF-FVG")
+        f_drawZone(z, htfTranspF, fvExtend)
+        array.push(htfZ, z)
+    if htShowOB and hC1 > hH2 and hC2 < hO2 and not f_dupZone(htfZ, hH2, hL2)
+        Zone z = Zone.new(top = hH2, bot = hL2, left = bar_index, bull = true, kind = "HTF-OB")
+        f_drawZone(z, htfTranspO, obExtend)
+        array.push(htfZ, z)
+    if htShowOB and hC1 < hL2 and hC2 > hO2 and not f_dupZone(htfZ, hH2, hL2)
+        Zone z = Zone.new(top = hH2, bot = hL2, left = bar_index, bull = false, kind = "HTF-OB")
+        f_drawZone(z, htfTranspO, obExtend)
+        array.push(htfZ, z)
+    f_trimZones(htfZ, htMax * 2)
+
+if htEnable and array.size(htfZ) > 0
+    for i = array.size(htfZ) - 1 to 0
+        Zone z = array.get(htfZ, i)
+        bool dropHtf = (z.bull ? close < z.bot : close > z.top) or bar_index - z.left > pfZoneAge
+        if dropHtf
+            f_killZone(z)
+            array.remove(htfZ, i)
+        if not dropHtf and heavyOk
+            f_refreshZone(z, z.kind == "HTF-OB" ? htfTranspO : htfTranspF, fvExtend)
+
+plot(htEnable and htShowSwings and not na(msHtf.ph) ? msHtf.ph : na, "HTF Swing High", color.new(cLiqB, 45), 1, plot.style_linebr)
+plot(htEnable and htShowSwings and not na(msHtf.pl) ? msHtf.pl : na, "HTF Swing Low",  color.new(cLiqS, 45), 1, plot.style_linebr)
+plot(htEnable and htShowPrev ? hH1 : na, "HTF Prev High", color.new(cNeut, 58), 1, plot.style_linebr)
+plot(htEnable and htShowPrev ? hL1 : na, "HTF Prev Low",  color.new(cNeut, 58), 1, plot.style_linebr)
+
+// Composite trend vote
+int trVotes = 0
+int trCount = 0
+if trEnable
+    if trUseStruct and msExt.dir != 0
+        trVotes += msExt.dir
+        trCount += 1
+    if trUseEma
+        trVotes += emaFast > emaSlow ? 1 : -1
+        trCount += 1
+    if trUseHtf and htfBias != 0
+        trVotes += htfBias
+        trCount += 1
+    if trUseLiq and lastSweepDir != 0 and f_recent(lastSweepBar, emWindow * 2)
+        trVotes += lastSweepDir
+        trCount += 1
+    if trUseFlow and lastCisdDir != 0 and f_recent(lastCisdBar, emWindow * 2)
+        trVotes += lastCisdDir
+        trCount += 1
+
+trendDir = trCount == 0 ? 0 : trVotes > 0 ? 1 : trVotes < 0 ? -1 : 0
+trendTxt = trendDir == 1 ? "Bullish" : trendDir == -1 ? "Bearish" : "Ranging"
+trendCol = trendDir == 1 ? cBull : trendDir == -1 ? cBear : cNeut
+
+barcolor(msEnable and msColorBars ? color.new(trendCol, 35) : na, title = "Trend Candles")
+pRib1 = plot(trEnable and trRibbon ? emaFast : na, "Ribbon Fast", color.new(trendCol, 55), 1)
+pRib2 = plot(trEnable and trRibbon ? emaSlow : na, "Ribbon Slow", color.new(trendCol, 75), 1)
+fill(pRib1, pRib2, color = trEnable and trRibbon ? color.new(trendCol, 90) : na, title = "Ribbon Fill")
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 17. ENTRY MODEL & CONFIDENCE SCORE
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Direction-aware confluence flags
+cSweepB = f_recent(lastSweepBar, emWindow) and lastSweepDir ==  1
+cSweepS = f_recent(lastSweepBar, emWindow) and lastSweepDir == -1
+cCisdB  = f_recent(lastCisdBar,  emWindow) and lastCisdDir  ==  1
+cCisdS  = f_recent(lastCisdBar,  emWindow) and lastCisdDir  == -1
+cMssB   = f_recent(lastMssBar,   emWindow) and lastMssDir   ==  1
+cMssS   = f_recent(lastMssBar,   emWindow) and lastMssDir   == -1
+cShiftB = cMssB or cCisdB
+cShiftS = cMssS or cCisdS
+cObB    = f_recent(lastObTouchBar,  emWindow) and lastObTouchDir  ==  1
+cObS    = f_recent(lastObTouchBar,  emWindow) and lastObTouchDir  == -1
+cFvgB   = f_recent(lastFvgTouchBar, emWindow) and lastFvgTouchDir ==  1
+cFvgS   = f_recent(lastFvgTouchBar, emWindow) and lastFvgTouchDir == -1
+cHtfB   = htfBias ==  1
+cHtfS   = htfBias == -1
+cKzOk   = anyKz or inSilver
+cVolOk  = volAbove
+
+f_score(bool sweep, bool ob, bool fvg, bool htfAl, bool ote, bool kz, bool cisd, bool vol) =>
+    int s = 0
+    s += sweep ? wSweep : 0
+    s += ob    ? wOb    : 0
+    s += fvg   ? wFvg   : 0
+    s += htfAl ? wHtf   : 0
+    s += ote   ? wOte   : 0
+    s += kz    ? wSess  : 0
+    s += cisd  ? wCisd  : 0
+    s += vol   ? wVol   : 0
+    s
+
+scoreBuy  = f_score(cSweepB, cObB, cFvgB, cHtfB, inOte and inDiscount, cKzOk, cCisdB, cVolOk)
+scoreSell = f_score(cSweepS, cObS, cFvgS, cHtfS, inOte and inPremium,  cKzOk, cCisdS, cVolOk)
+
+f_gates(bool sweep, bool shift, bool zone, bool pdOk, bool htfAl) =>
+    (not emNeedSweep or sweep) and (not emNeedShift or shift) and (not emNeedZone or zone) and (not emNeedPd or pdOk) and (not emNeedHtf or htfAl) and (not emKzOnly or cKzOk)
+
+// A gate whose source module is DISABLED auto-passes — otherwise switching off, say,
+// Premium/Discount silently kills the entire entry model (its flag would be false forever).
+gSweepB = cSweepB or not lqEnable
+gSweepS = cSweepS or not lqEnable
+gShiftB = cShiftB or not msEnable
+gShiftS = cShiftS or not msEnable
+gZoneB  = cObB or cFvgB or (not obEnable and not fvEnable)
+gZoneS  = cObS or cFvgS or (not obEnable and not fvEnable)
+gPdB    = inDiscount or not rOk
+gPdS    = inPremium  or not rOk
+gHtfB   = cHtfB or not htEnable
+gHtfS   = cHtfS or not htEnable
+
+rawBuy  = emEnable and inRange and f_gates(gSweepB, gShiftB, gZoneB, gPdB, gHtfB) and scoreBuy  >= emMinScore
+rawSell = emEnable and inRange and f_gates(gSweepS, gShiftS, gZoneS, gPdS, gHtfS) and scoreSell >= emMinScore
+
+// One signal per structural leg + a hard bar cooldown (consecutive BOS in one move bump the
+// leg id, which used to re-arm the lock immediately), committed only on bar close so a live
+// bar cannot flash a signal that vanishes before it confirms.
+legOk   = not emOneAtATime or msExt.legId != lastSignalLeg
+coolOk  = na(lastSignalBar) or bar_index - lastSignalBar >= emCooldown
+buySig  = rawBuy  and not rawSell and legOk and coolOk and barstate.isconfirmed
+sellSig = rawSell and not rawBuy  and legOk and coolOk and barstate.isconfirmed
+
+f_grade(float s) => s >= 80 ? "HIGH" : s >= 60 ? "MEDIUM" : "LOW"
+
+if buySig or sellSig
+    lastSignalLeg := msExt.legId
+    lastSignalBar := bar_index
+    lastSignalDir := buySig ? 1 : -1
+    lastScore     := buySig ? scoreBuy : scoreSell
+    color sCol = buySig ? cBull : cBear
+    array.push(sigLbs, label.new(bar_index, buySig ? low : high, (buySig ? "BUY" : "SELL") + "  " + str.tostring(math.round(lastScore)) + "%\n" + f_grade(lastScore), xloc = xloc.bar_index, yloc = yloc.price, color = color.new(sCol, 12), textcolor = color.white, style = buySig ? label.style_label_up : label.style_label_down, size = lblSz))
+    f_trimLabels(sigLbs, 20)
+    if emShowSl
+        // Floor the risk at ¼ ATR — a signal candle closing on its own low would otherwise
+        // produce a zero-distance stop and a target glued to entry.
+        float risk   = math.max(buySig ? close - math.min(low, low[1]) : math.max(high, high[1]) - close, atr * 0.25)
+        float stopPx = buySig ? close - risk : close + risk
+        float tgtPx  = buySig ? close + risk * emRR : close - risk * emRR
+        array.push(sigLns, line.new(bar_index, stopPx, bar_index + 20, stopPx, xloc = xloc.bar_index, color = color.new(cBear, 45), style = line.style_dotted, width = 1))
+        array.push(sigLns, line.new(bar_index, tgtPx,  bar_index + 20, tgtPx,  xloc = xloc.bar_index, color = color.new(cBull, 45), style = line.style_dotted, width = 1))
+        f_trimLines(sigLns, 40)
+
+// Exit: an opposing structure break after a live signal — marked on the chart so the
+// signal lifecycle is visible end-to-end, not just in the alert stream.
+exitSig = emEnable and lastSignalDir != 0 and ((lastSignalDir == 1 and (extE.chDn or extE.bosDn)) or (lastSignalDir == -1 and (extE.chUp or extE.bosUp)))
+if exitSig
+    array.push(sigLbs, label.new(bar_index, lastSignalDir == 1 ? high : low, "✕", xloc = xloc.bar_index, yloc = yloc.price, color = color.new(cNeut, 100), textcolor = color.new(cInk, 25), style = lastSignalDir == 1 ? label.style_label_down : label.style_label_up, size = size.small))
+    f_trimLabels(sigLbs, 20)
+    lastSignalDir := 0
+
+liveScore = trendDir == 1 ? scoreBuy : trendDir == -1 ? scoreSell : math.max(scoreBuy, scoreSell)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 18. DASHBOARD
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+var table db = na
+var array<string> dbK = array.new<string>()
+var array<string> dbV = array.new<string>()
+var array<color>  dbC = array.new<color>()
+
+if dbEnable and barstate.islast
+    array.clear(dbK)
+    array.clear(dbV)
+    array.clear(dbC)
+
+    if dbRowTrend
+        array.push(dbK, "Trend")
+        array.push(dbV, trendTxt)
+        array.push(dbC, trendCol)
+    if dbRowHtf
+        array.push(dbK, "HTF Bias · " + htfTf)
+        array.push(dbV, htfBiasTxt)
+        array.push(dbC, htfBias == 1 ? cBull : htfBias == -1 ? cBear : cNeut)
+    if dbRowStruct
+        array.push(dbK, "Structure")
+        array.push(dbV, structTxt)
+        array.push(dbC, msExt.dir == 1 ? cBull : msExt.dir == -1 ? cBear : cNeut)
+    if dbRowPd
+        array.push(dbK, "Premium / Discount")
+        array.push(dbV, rOk ? (inPremium ? "Premium" : "Discount") + (inOte ? " · OTE" : "") : "—")
+        array.push(dbC, not rOk ? cNeut : inPremium ? cPrem : cDisc)
+    if dbRowSess
+        array.push(dbK, "Session")
+        array.push(dbV, sessTxt + (kzTxt == "—" ? "" : "  │  " + kzTxt))
+        array.push(dbC, anyKz ? cKz : color.new(cInk, 40))
+    if dbRowLiq
+        array.push(dbK, "Liquidity")
+        array.push(dbV, liqTxt)
+        array.push(dbC, liqTxt == "RAID" ? DEF_ACCENT : color.new(cInk, 30))
+    if dbRowSig
+        array.push(dbK, "Signal")
+        array.push(dbV, str.tostring(math.round(liveScore)) + "%  " + f_grade(liveScore))
+        array.push(dbC, liveScore >= 80 ? cBull : liveScore >= 60 ? DEF_ACCENT : cNeut)
+    if dbRowAtr
+        array.push(dbK, "ATR " + str.tostring(atrLen))
+        array.push(dbV, str.tostring(atr, format.mintick))
+        array.push(dbC, color.new(cInk, 30))
+    if dbRowTick
+        array.push(dbK, "Tick")
+        array.push(dbV, str.tostring(syminfo.mintick))
+        array.push(dbC, color.new(cInk, 45))
+    if dbRowStatus
+        array.push(dbK, "Market")
+        array.push(dbV, barstate.isrealtime ? "LIVE" : "HISTORY")
+        array.push(dbC, barstate.isrealtime ? cBull : cNeut)
+
+    if na(db)
+        db := table.new(f_tablePos(dbPos), 2, 14, bgcolor = color.new(cPanel, 8), border_color = color.new(cGrid, 30), border_width = 1, frame_color = color.new(cGrid, 20), frame_width = 1)
+    table.clear(db, 0, 0, 1, 13)
+
+    string tSz = dbSize == "Compact" ? size.small : size.normal
+    table.cell(db, 0, 0, "ICT │ SMC", text_color = color.new(cInk, 8), text_size = tSz, text_halign = text.align_left,  bgcolor = color.new(cGrid, 25))
+    table.cell(db, 1, 0, timeframe.period,   text_color = color.new(DEF_ACCENT, 12), text_size = tSz, text_halign = text.align_right, bgcolor = color.new(cGrid, 25))
+    if array.size(dbK) > 0
+        for i = 0 to array.size(dbK) - 1
+            table.cell(db, 0, i + 1, array.get(dbK, i), text_color = color.new(cInk, 40), text_size = tSz, text_halign = text.align_left,  bgcolor = color.new(cPanel, 18))
+            table.cell(db, 1, i + 1, array.get(dbV, i), text_color = array.get(dbC, i),   text_size = tSz, text_halign = text.align_right, bgcolor = color.new(cPanel, 18))
+
+var table dbg = na
+if dgEnable and barstate.islast
+    if na(dbg)
+        dbg := table.new(position.bottom_left, 2, 7, bgcolor = color.new(cPanel, 10), border_width = 1)
+    table.cell(dbg, 0, 0, "OB up/dn",   text_color = cInk, text_size = lblSzSm)
+    table.cell(dbg, 1, 0, str.tostring(array.size(obUp)) + " / " + str.tostring(array.size(obDn)), text_color = cInk, text_size = lblSzSm)
+    table.cell(dbg, 0, 1, "FVG up/dn",  text_color = cInk, text_size = lblSzSm)
+    table.cell(dbg, 1, 1, str.tostring(array.size(fvUp)) + " / " + str.tostring(array.size(fvDn)), text_color = cInk, text_size = lblSzSm)
+    table.cell(dbg, 0, 2, "Liq levels", text_color = cInk, text_size = lblSzSm)
+    table.cell(dbg, 1, 2, str.tostring(array.size(liqs)), text_color = cInk, text_size = lblSzSm)
+    table.cell(dbg, 0, 3, "HTF zones",  text_color = cInk, text_size = lblSzSm)
+    table.cell(dbg, 1, 3, str.tostring(array.size(htfZ)), text_color = cInk, text_size = lblSzSm)
+    table.cell(dbg, 0, 4, "Leg id",     text_color = cInk, text_size = lblSzSm)
+    table.cell(dbg, 1, 4, str.tostring(msExt.legId), text_color = cInk, text_size = lblSzSm)
+    table.cell(dbg, 0, 5, "Range",      text_color = cInk, text_size = lblSzSm)
+    table.cell(dbg, 1, 5, str.tostring(rHi, format.mintick) + " / " + str.tostring(rLo, format.mintick), text_color = cInk, text_size = lblSzSm)
+    table.cell(dbg, 0, 6, "Score B/S",  text_color = cInk, text_size = lblSzSm)
+    table.cell(dbg, 1, 6, str.tostring(scoreBuy) + " / " + str.tostring(scoreSell), text_color = cInk, text_size = lblSzSm)
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// 19. ALERTS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+// Static slots — each appears as its own condition in the TradingView alert dialog
+alertcondition(extE.bosUp,           "BOS Bullish",        "Bullish BOS · {{ticker}} {{interval}}")
+alertcondition(extE.bosDn,           "BOS Bearish",        "Bearish BOS · {{ticker}} {{interval}}")
+alertcondition(extE.chUp,            "CHoCH Bullish",      "Bullish CHoCH · {{ticker}} {{interval}}")
+alertcondition(extE.chDn,            "CHoCH Bearish",      "Bearish CHoCH · {{ticker}} {{interval}}")
+alertcondition(extE.mssUp,           "MSS Bullish",        "Bullish MSS · {{ticker}} {{interval}}")
+alertcondition(extE.mssDn,           "MSS Bearish",        "Bearish MSS · {{ticker}} {{interval}}")
+alertcondition(cisdBull,             "CISD Bullish",       "Bullish CISD · {{ticker}} {{interval}}")
+alertcondition(cisdBear,             "CISD Bearish",       "Bearish CISD · {{ticker}} {{interval}}")
+alertcondition(sweepHigh or sweepLow,"Liquidity Sweep",    "Liquidity sweep · {{ticker}} {{interval}}")
+alertcondition(raid,                 "Liquidity Raid",     "Liquidity raid · {{ticker}} {{interval}}")
+alertcondition(obNewUp,              "OB Created Bullish", "Bullish order block created · {{ticker}}")
+alertcondition(obNewDn,              "OB Created Bearish", "Bearish order block created · {{ticker}}")
+alertcondition(obMitU or obMitD,     "OB Mitigated",       "Order block mitigated · {{ticker}}")
+alertcondition(obBrkU or obBrkD,     "Breaker Block",      "Breaker block formed · {{ticker}}")
+alertcondition(fvgNewUp or fvgNewDn, "FVG Created",        "FVG created · {{ticker}} {{interval}}")
+alertcondition(ifvgUp or ifvgDn,     "IFVG Formed",        "Inverse FVG · {{ticker}} {{interval}}")
+alertcondition(buySig,               "Entry BUY",          "BUY setup · {{ticker}} {{interval}}")
+alertcondition(sellSig,              "Entry SELL",         "SELL setup · {{ticker}} {{interval}}")
+alertcondition(exitSig,              "Exit",               "Exit signal · {{ticker}} {{interval}}")
+alertcondition(sessOpen,             "Session Open",       "Session open · {{ticker}}")
+alertcondition(sessClose,            "Session Close",      "Session close · {{ticker}}")
+alertcondition(sessSwept,            "Session Sweep",      "Session range swept · {{ticker}}")
+alertcondition(pdhBreak,             "PDH Break",          "PDH broken · {{ticker}}")
+alertcondition(pdlBreak,             "PDL Break",          "PDL broken · {{ticker}}")
+alertcondition(inPremium  and not inPremium[1],  "Premium Entry",  "Price entered premium · {{ticker}}")
+alertcondition(inDiscount and not inDiscount[1], "Discount Entry", "Price entered discount · {{ticker}}")
+
+// Dynamic firing — one "Any alert() function call" alert covers every enabled category
+if alEnable
+    if alStruct and (extE.bosUp or extE.bosDn or extE.chUp or extE.chDn or cisdBull or cisdBear)
+        alert(structTxt + " · " + syminfo.ticker + " " + timeframe.period, alert.freq_once_per_bar_close)
+    if alLiq and (sweepHigh or sweepLow or raid)
+        alert((raid ? "RAID " : "Sweep ") + (sweepHigh ? "buyside" : "sellside") + " · " + syminfo.ticker, alert.freq_once_per_bar_close)
+    if alOb and (obNewUp or obNewDn or obMitU or obMitD or obBrkU or obBrkD)
+        alert("Order block event · " + syminfo.ticker, alert.freq_once_per_bar_close)
+    if alFvg and (fvgNewUp or fvgNewDn or ifvgUp or ifvgDn)
+        alert((ifvgUp or ifvgDn ? "IFVG" : "FVG") + " · " + syminfo.ticker, alert.freq_once_per_bar_close)
+    if alEntry and (buySig or sellSig)
+        alert((buySig ? "BUY " : "SELL ") + str.tostring(math.round(buySig ? scoreBuy : scoreSell)) + "% " + f_grade(buySig ? scoreBuy : scoreSell) + " · " + syminfo.ticker + " " + timeframe.period, alert.freq_once_per_bar_close)
+    if alEntry and exitSig
+        alert("EXIT · " + syminfo.ticker, alert.freq_once_per_bar_close)
+    if alSession and (sessOpen or sessClose or sessSwept)
+        alert("Session event · " + sessTxt + " · " + syminfo.ticker, alert.freq_once_per_bar_close)
+    if alLevels and (pdhBreak or pdlBreak)
+        alert((pdhBreak ? "PDH" : "PDL") + " break · " + syminfo.ticker, alert.freq_once_per_bar_close)
+    if alPd and ((inPremium and not inPremium[1]) or (inDiscount and not inDiscount[1]))
+        alert((inPremium ? "Premium" : "Discount") + " entry · " + syminfo.ticker, alert.freq_once_per_bar_close)
