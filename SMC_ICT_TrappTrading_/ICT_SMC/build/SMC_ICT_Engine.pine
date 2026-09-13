@@ -17,6 +17,9 @@ var string GRP_SESS = "7 - Sessions"
 var string GRP_ENT  = "8 - Entry Engine"
 var string GRP_RISK = "9 - Risk"
 var string GRP_VIS  = "10 - Visuals"
+var string GRP_TL   = "11 - Trendline (B)"
+var string GRP_CISD = "12 - CISD (B)"
+var string GRP_SMT  = "13 - SMT (B)"
 
 // -- Phase 1 - Structure --
 swingLen    = input.int(5, "Swing Length", minval = 3, maxval = 20, group = GRP_ST)
@@ -95,6 +98,29 @@ zoneExtend = input.int(20, "Zone Extend (bars)", minval = 0, maxval = 200, group
 showDash   = input.bool(true,  "Show Dashboard", group = GRP_VIS)
 showDebug  = input.bool(false, "Show Debug (state machine)", group = GRP_VIS)
 
+// -- Phase 17 / 18 - Dynamic Trendline (TIER B - default off) --
+tlOn        = input.bool(false, "Enable Dynamic Trendline", group = GRP_TL)
+tlMaxAge    = input.int(200, "Max Anchor Age (bars)",    minval = 30, maxval = 1000, group = GRP_TL)
+tlMinBars   = input.int(10,  "Min Bars Between Anchors", minval = 5,  maxval = 100,  group = GRP_TL)
+tlMaxLines  = input.int(4,   "Max Lines Per Side",       minval = 1,  maxval = 10,   group = GRP_TL)
+tlBreakMode = input.string("Close", "TL Break Mode", options = ["Close", "Wick"], group = GRP_TL)
+tlqOn       = input.bool(false, "Treat TL Break as Liquidity (TLQ)", group = GRP_TL)
+tlChanOn    = input.bool(false, "Draw Parallel Channel", group = GRP_TL)
+tlShow      = input.bool(true,  "Draw Trendlines", group = GRP_TL)
+
+// -- Phase 19 - CISD (TIER B - default off) --
+cisdOn            = input.bool(false, "Enable CISD", group = GRP_CISD)
+cisdMaxRun        = input.int(6, "Max Candle Run", minval = 2, maxval = 12, group = GRP_CISD)
+cisdAsDisplacement = input.bool(false, "CISD can replace Displacement", group = GRP_CISD)
+cisdShow          = input.bool(true, "Draw CISD level", group = GRP_CISD)
+
+// -- Phase 20 - SMT Divergence (TIER B - default off) --
+smtOn   = input.bool(false, "Enable SMT Divergence", group = GRP_SMT)
+smtSym  = input.symbol("", "Correlated Symbol", group = GRP_SMT)
+smtInv  = input.bool(false, "Inverse Correlation (e.g. DXY)", group = GRP_SMT)
+smtLook = input.int(20, "Lookback", minval = 5, maxval = 60, group = GRP_SMT)
+smtShow = input.bool(true, "Mark SMT", group = GRP_SMT)
+
 // === 02 - TYPES ============================================================
 type Swing
     int    barIndex   = 0
@@ -146,6 +172,34 @@ type Setup
     int    entryBar      = 0
     bool   signalEmitted = false
 
+type Trendline
+    string id           = ""
+    int    x1           = 0
+    float  y1           = 0.0
+    int    x2           = 0
+    float  y2           = 0.0
+    float  slope        = 0.0
+    bool   isSupport    = true
+    int    touchCount   = 2
+    int    lastTouchBar = 0
+    bool   broken       = false
+    int    brokenBar    = 0
+    bool   retested     = false
+    float  strength     = 0.0
+    float  chanOffset   = 0.0
+    line   drawing      = na
+    line   chanLine     = na
+
+type Gap
+    string kind       = "NWOG"
+    float  top        = 0.0
+    float  bottom     = 0.0
+    float  ce         = 0.0
+    int    createdBar = 0
+    bool   filled     = false
+    box    drawing    = na
+    line   ceLine     = na
+
 // === 03 - STATE (var) ======================================================
 var array<Swing>    swings    = array.new<Swing>()
 var array<LiqLevel> liquidity = array.new<LiqLevel>()
@@ -171,6 +225,17 @@ var bool sslConsumed = false
 
 var int totalLong  = 0
 var int totalShort = 0
+
+var array<Trendline> trendlines = array.new<Trendline>()
+var array<Gap>       gaps       = array.new<Gap>()
+
+var int   prevSwingHighBar = na
+var int   prevSwingLowBar  = na
+
+var float cisdBullLevel = na
+var float cisdBearLevel = na
+var int   runDown       = 0
+var int   runUp         = 0
 
 // === 04 - HELPERS ==========================================================
 f_nextLiqAbove(float px) =>
@@ -244,6 +309,7 @@ if not na(ph)
     hiLbl := na(lastSwingHigh) ? "HH" : (p > lastSwingHigh ? "HH" : "LH")
     array.push(swings, Swing.new(bar_index - swingLen, p, true, hiLbl, false))
     prevSwingHigh    := lastSwingHigh
+    prevSwingHighBar := lastSwingHighBar
     lastSwingHigh    := p
     lastSwingHighBar := bar_index - swingLen
     bslConsumed      := false
@@ -254,6 +320,7 @@ if not na(pl)
     loLbl := na(lastSwingLow) ? "LL" : (p < lastSwingLow ? "LL" : "HL")
     array.push(swings, Swing.new(bar_index - swingLen, p, false, loLbl, false))
     prevSwingLow    := lastSwingLow
+    prevSwingLowBar := lastSwingLowBar
     lastSwingLow    := p
     lastSwingLowBar := bar_index - swingLen
     sslConsumed     := false
@@ -332,6 +399,103 @@ inLondon = sessOn and not na(time(timeframe.period, londonSess, sessTz))
 inNy     = sessOn and not na(time(timeframe.period, nySess, sessTz))
 inKz     = inLondon or inNy
 
+// === 05B - TIER B MODULES - TRENDLINE HELPERS (Phase 17 / 18) ==============
+f_tlPriceAt(Trendline t, int bi) =>
+    t.y2 + t.slope * (bi - t.x2)
+
+f_tlClean(int x1, float y1, int x2, float y2, bool isSup) =>
+    bool ok  = true
+    int  len = x2 - x1
+    float sl = len > 0 ? (y2 - y1) / len : 0.0
+    if len > 0
+        for i = 0 to len
+            int off = bar_index - (x1 + i)
+            if off >= 0 and off < 4000
+                float lineY = y1 + sl * i
+                if isSup and close[off] < lineY - syminfo.mintick
+                    ok := false
+                if not isSup and close[off] > lineY + syminfo.mintick
+                    ok := false
+    ok
+
+f_tlStrength(Trendline t) =>
+    float touchScore = math.min(t.touchCount, 6) * 12
+    float ageScore   = math.min((bar_index - t.x1) / 10.0, 15)
+    float slopeNorm  = math.abs(t.slope) / math.max(atrVal / 10.0, syminfo.mintick)
+    float angleScore = slopeNorm > 0.2 and slopeNorm < 3.0 ? 13 : 0
+    math.min(touchScore + ageScore + angleScore, 100)
+
+f_tlDupe(float slope, float yNow, bool isSup) =>
+    bool dupe = false
+    if array.size(trendlines) > 0
+        for i = 0 to array.size(trendlines) - 1
+            Trendline t = array.get(trendlines, i)
+            if t.isSupport == isSup and not t.broken
+                float ty = f_tlPriceAt(t, bar_index)
+                if math.abs(ty - yNow) < atrVal * 0.5 and math.abs(t.slope - slope) < math.max(atrVal * 0.05, syminfo.mintick)
+                    dupe := true
+    dupe
+
+f_tlBuild(int x1, float y1, int x2, float y2, bool isSup) =>
+    bool ok = false
+    if x2 - x1 >= tlMinBars and bar_index - x1 <= tlMaxAge
+        bool dirOk = isSup ? y2 > y1 : y2 < y1
+        if dirOk
+            float sl   = (y2 - y1) / (x2 - x1)
+            float yNow = y2 + sl * (bar_index - x2)
+            if not f_tlDupe(sl, yNow, isSup) and f_tlClean(x1, y1, x2, y2, isSup)
+                float maxDev = 0.0
+                for i = 0 to x2 - x1
+                    int off = bar_index - (x1 + i)
+                    if off >= 0 and off < 4000
+                        float lineY = y1 + sl * i
+                        float dev   = isSup ? high[off] - lineY : lineY - low[off]
+                        maxDev := math.max(maxDev, dev)
+                array.push(trendlines, Trendline.new(id = "TL_" + str.tostring(bar_index) + (isSup ? "S" : "R"), x1 = x1, y1 = y1, x2 = x2, y2 = y2, slope = sl, isSupport = isSup, touchCount = 2, lastTouchBar = x2, chanOffset = maxDev))
+                ok := true
+    ok
+
+f_tlPrune() =>
+    if array.size(trendlines) > 0
+        for i = array.size(trendlines) - 1 to 0
+            Trendline t = array.get(trendlines, i)
+            bool expired = t.broken and bar_index - t.brokenBar > 20
+            bool tooOld  = bar_index - t.x1 > tlMaxAge * 2
+            if expired or tooOld
+                if not na(t.drawing)
+                    line.delete(t.drawing)
+                    t.drawing := na
+                if not na(t.chanLine)
+                    line.delete(t.chanLine)
+                    t.chanLine := na
+                array.remove(trendlines, i)
+    int nSup = 0
+    int nRes = 0
+    if array.size(trendlines) > 0
+        for i = array.size(trendlines) - 1 to 0
+            Trendline t = array.get(trendlines, i)
+            if t.isSupport
+                nSup += 1
+                if nSup > tlMaxLines
+                    if not na(t.drawing)
+                        line.delete(t.drawing)
+                        t.drawing := na
+                    if not na(t.chanLine)
+                        line.delete(t.chanLine)
+                        t.chanLine := na
+                    array.remove(trendlines, i)
+            else
+                nRes += 1
+                if nRes > tlMaxLines
+                    if not na(t.drawing)
+                        line.delete(t.drawing)
+                        t.drawing := na
+                    if not na(t.chanLine)
+                        line.delete(t.chanLine)
+                        t.chanLine := na
+                    array.remove(trendlines, i)
+    true
+
 // === 06 - LAYER 2 - EVENTS =================================================
 confirmed = barstate.isconfirmed
 
@@ -392,6 +556,101 @@ if confirmed and liqOn and array.size(liquidity) > 0
 // -- Phase 5 - MSS (sweep -> displacement -> structure break; handled in Layer 3)
 mssUp = isBullDisp and not na(intHigh) and close > intHigh
 mssDn = isBearDisp and not na(intLow) and close < intLow
+
+// -- Phase 17 / 18 - Trendline build, touch, break, TLQ sweep
+bool tlqBull = false
+bool tlqBear = false
+bool tlBreakUp = false
+bool tlBreakDn = false
+
+if tlOn and confirmed
+    if newSwingLow and not na(prevSwingLow) and not na(prevSwingLowBar)
+        f_tlBuild(prevSwingLowBar, prevSwingLow, lastSwingLowBar, lastSwingLow, true)
+    if newSwingHigh and not na(prevSwingHigh) and not na(prevSwingHighBar)
+        f_tlBuild(prevSwingHighBar, prevSwingHigh, lastSwingHighBar, lastSwingHigh, false)
+
+if tlOn and confirmed and array.size(trendlines) > 0
+    for i = 0 to array.size(trendlines) - 1
+        Trendline t = array.get(trendlines, i)
+        float lineY = f_tlPriceAt(t, bar_index)
+        if not t.broken
+            // touch (cooldown 3 bars, correct side close)
+            bool near = math.abs(close - lineY) <= atrVal * 0.25
+            bool side = t.isSupport ? close >= lineY : close <= lineY
+            if near and side and bar_index - t.lastTouchBar >= 3
+                t.touchCount   += 1
+                t.lastTouchBar := bar_index
+            // TLQ sweep = wick outside, close back inside
+            bool sweepSup = t.isSupport and low < lineY and close > lineY and (close - low) / rangeSize > 0.5
+            bool sweepRes = not t.isSupport and high > lineY and close < lineY and (high - close) / rangeSize > 0.5
+            bool brokeSup = t.isSupport and (tlBreakMode == "Close" ? close < lineY : low < lineY)
+            bool brokeRes = not t.isSupport and (tlBreakMode == "Close" ? close > lineY : high > lineY)
+            if sweepSup
+                tlqBull := true
+                if tlqOn
+                    array.push(liquidity, LiqLevel.new(kind = "TLQ", price = lineY, createdBar = bar_index, swept = true, sweptBar = bar_index))
+            else if sweepRes
+                tlqBear := true
+                if tlqOn
+                    array.push(liquidity, LiqLevel.new(kind = "TLQ", price = lineY, createdBar = bar_index, swept = true, sweptBar = bar_index))
+            else if brokeSup or brokeRes
+                t.broken    := true
+                t.brokenBar := bar_index
+                tlBreakDn   := brokeSup ? true : tlBreakDn
+                tlBreakUp   := brokeRes ? true : tlBreakUp
+        else
+            // retest within 20 bars after break
+            if bar_index - t.brokenBar <= 20 and math.abs(close - lineY) <= atrVal * 0.25
+                t.retested := true
+        t.strength := f_tlStrength(t)
+
+if tlOn and confirmed
+    f_tlPrune()
+
+// TLQ feeds the SAME door as SSL/BSL sweep - never a separate signal path
+if tlOn and tlqOn and confirmed
+    if tlqBull
+        sslSwept      := true
+        sweptSslLevel := na(sweptSslLevel) ? low : math.max(sweptSslLevel, low)
+    if tlqBear
+        bslSwept      := true
+        sweptBslLevel := na(sweptBslLevel) ? high : math.min(sweptBslLevel, high)
+
+// -- Phase 19 - CISD (Change in State of Delivery)
+if close < open
+    runDown += 1
+else
+    runDown := 0
+if close > open
+    runUp += 1
+else
+    runUp := 0
+
+if runDown >= 2 and runDown <= cisdMaxRun
+    cisdBullLevel := open[runDown - 1]
+if runUp >= 2 and runUp <= cisdMaxRun
+    cisdBearLevel := open[runUp - 1]
+
+bullCISD = cisdOn and not na(cisdBullLevel) and close > cisdBullLevel and close > open
+bearCISD = cisdOn and not na(cisdBearLevel) and close < cisdBearLevel and close < open
+
+// CISD may substitute displacement only when explicitly enabled
+dispBullOk = isBullDisp or (cisdOn and cisdAsDisplacement and bullCISD)
+dispBearOk = isBearDisp or (cisdOn and cisdAsDisplacement and bearCISD)
+
+// -- Phase 20 - SMT Divergence (score only, never a signal)
+smtSymOk  = str.length(smtSym) > 0
+smtSymUse = smtOn and smtSymOk ? smtSym : syminfo.tickerid
+[cHigh, cLow] = request.security(smtSymUse, timeframe.period, [high[1], low[1]], lookahead = barmerge.lookahead_off)
+
+myLowN  = ta.lowest(low, smtLook)
+myHighN = ta.highest(high, smtLook)
+coLowN  = ta.lowest(cLow, smtLook)
+coHighN = ta.highest(cHigh, smtLook)
+
+smtReady = smtOn and smtSymOk and not na(cHigh) and not na(cLow)
+bullSMT  = smtReady and (smtInv ? (low <= myLowN and cHigh < coHighN) : (low <= myLowN and cLow > coLowN))
+bearSMT  = smtReady and (smtInv ? (high >= myHighN and cLow > coLowN) : (high >= myHighN and cHigh < coHighN))
 
 // -- Phase 6 - FVG detection
 f_zoneExists(string kind, string dir, float top, float bot) =>
@@ -535,7 +794,7 @@ if engineOn and confirmed
     else if activeLong.state == "LIQUIDITY_SWEPT"
         if bar_index - activeLong.sweepBar > mssTimeout
             activeLong.state := "INVALIDATED"
-        else if isBullDisp and bar_index > activeLong.sweepBar
+        else if dispBullOk and bar_index > activeLong.sweepBar
             activeLong.state := "DISPLACEMENT_CONFIRMED"
     else if activeLong.state == "DISPLACEMENT_CONFIRMED"
         if bar_index - activeLong.sweepBar > mssTimeout
@@ -599,7 +858,7 @@ if engineOn and confirmed
     else if activeShort.state == "LIQUIDITY_SWEPT"
         if bar_index - activeShort.sweepBar > mssTimeout
             activeShort.state := "INVALIDATED"
-        else if isBearDisp and bar_index > activeShort.sweepBar
+        else if dispBearOk and bar_index > activeShort.sweepBar
             activeShort.state := "DISPLACEMENT_CONFIRMED"
     else if activeShort.state == "DISPLACEMENT_CONFIRMED"
         if bar_index - activeShort.sweepBar > mssTimeout
@@ -790,6 +1049,48 @@ if shortSignal
     label.new(bar_index, high, "SHORT\nE " + str.tostring(activeShort.entryPrice, format.mintick) + "\nSL " + str.tostring(activeShort.slPrice, format.mintick) + "\nTP " + str.tostring(activeShort.tp1, format.mintick) + "\nRR " + str.tostring(activeShort.rr, "#.##") + " | S" + str.tostring(activeShort.score), style = label.style_label_down, color = colBear, textcolor = color.white, size = size.small)
     line.new(bar_index, activeShort.slPrice, bar_index + 20, activeShort.slPrice, color = colBear, style = line.style_solid, width = 1)
     line.new(bar_index, activeShort.tp1,     bar_index + 20, activeShort.tp1,     color = colBull, style = line.style_solid, width = 1)
+
+// -- Phase 17 / 18 - trendline drawing
+if tlOn and tlShow and array.size(trendlines) > 0
+    for i = 0 to array.size(trendlines) - 1
+        Trendline t = array.get(trendlines, i)
+        color tc = t.isSupport ? colBull : colBear
+        int   tp = math.max(0, math.min(80, 80 - math.round(t.strength * 0.6)))
+        if na(t.drawing)
+            t.drawing := line.new(t.x1, t.y1, bar_index, f_tlPriceAt(t, bar_index), color = color.new(tc, tp), width = 1)
+        else
+            line.set_color(t.drawing, color.new(t.broken ? color.gray : tc, tp))
+            if not t.broken
+                line.set_xy2(t.drawing, bar_index, f_tlPriceAt(t, bar_index))
+        if tlChanOn and not t.broken and t.chanOffset >= atrVal * 1.5
+            float off1 = t.isSupport ? t.y1 + t.chanOffset : t.y1 - t.chanOffset
+            float off2 = t.isSupport ? f_tlPriceAt(t, bar_index) + t.chanOffset : f_tlPriceAt(t, bar_index) - t.chanOffset
+            if na(t.chanLine)
+                t.chanLine := line.new(t.x1, off1, bar_index, off2, color = color.new(tc, 70), style = line.style_dotted, width = 1)
+            else
+                line.set_xy1(t.chanLine, t.x1, off1)
+                line.set_xy2(t.chanLine, bar_index, off2)
+
+// -- Phase 19 - CISD level
+var line cisdLnB = na
+var line cisdLnS = na
+if cisdOn and cisdShow and barstate.islast
+    if not na(cisdBullLevel)
+        if na(cisdLnB)
+            cisdLnB := line.new(bar_index - 20, cisdBullLevel, bar_index + 5, cisdBullLevel, color = color.new(colBull, 40), style = line.style_dashed)
+        else
+            line.set_xy1(cisdLnB, bar_index - 20, cisdBullLevel)
+            line.set_xy2(cisdLnB, bar_index + 5, cisdBullLevel)
+    if not na(cisdBearLevel)
+        if na(cisdLnS)
+            cisdLnS := line.new(bar_index - 20, cisdBearLevel, bar_index + 5, cisdBearLevel, color = color.new(colBear, 40), style = line.style_dashed)
+        else
+            line.set_xy1(cisdLnS, bar_index - 20, cisdBearLevel)
+            line.set_xy2(cisdLnS, bar_index + 5, cisdBearLevel)
+
+// -- Phase 20 - SMT marker
+plotshape(smtShow and bullSMT, title = "Bull SMT", style = shape.xcross, location = location.belowbar, color = color.new(colBull, 0), size = size.tiny)
+plotshape(smtShow and bearSMT, title = "Bear SMT", style = shape.xcross, location = location.abovebar, color = color.new(colBear, 0), size = size.tiny)
 
 // === 10 - DASHBOARD ========================================================
 var table dash = table.new(position.top_right, 2, 8, border_width = 1)
