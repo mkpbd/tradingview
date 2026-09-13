@@ -20,6 +20,10 @@ var string GRP_VIS  = "10 - Visuals"
 var string GRP_TL   = "11 - Trendline (B)"
 var string GRP_CISD = "12 - CISD (B)"
 var string GRP_SMT  = "13 - SMT (B)"
+var string GRP_AMD  = "14 - AMD / PO3 (B)"
+var string GRP_TRAP = "15 - Trap / Turtle Soup (B)"
+var string GRP_SD   = "16 - Supply-Demand / MB / RB (B)"
+var string GRP_BPR  = "17 - BPR / Void / Entry Ref (B)"
 
 // -- Phase 1 - Structure --
 swingLen    = input.int(5, "Swing Length", minval = 3, maxval = 20, group = GRP_ST)
@@ -120,6 +124,39 @@ smtSym  = input.symbol("", "Correlated Symbol", group = GRP_SMT)
 smtInv  = input.bool(false, "Inverse Correlation (e.g. DXY)", group = GRP_SMT)
 smtLook = input.int(20, "Lookback", minval = 5, maxval = 60, group = GRP_SMT)
 smtShow = input.bool(true, "Mark SMT", group = GRP_SMT)
+
+// -- Phase 21 - AMD / Power of 3 (TIER B - default off) --
+amdOn     = input.bool(false, "Enable AMD / PO3", group = GRP_AMD)
+amdAsiaS  = input.session("2000-0000", "Accumulation (Asia)",   group = GRP_AMD)
+amdJudasS = input.session("0200-0500", "Manipulation (London)", group = GRP_AMD)
+amdDistS  = input.session("0700-1100", "Distribution (NY)",     group = GRP_AMD)
+amdShow   = input.bool(true, "Draw Asia Range Box", group = GRP_AMD)
+
+// -- Phase 22 - Trap / Turtle Soup (TIER B - default off) --
+trapOn   = input.bool(false, "Enable Trap Detection", group = GRP_TRAP)
+trapBars = input.int(5,  "Max Bars Outside", minval = 1, maxval = 15, group = GRP_TRAP)
+tsOn     = input.bool(false, "Enable Turtle Soup", group = GRP_TRAP)
+tsLook   = input.int(20, "Turtle Soup Lookback", minval = 10, maxval = 60, group = GRP_TRAP)
+trapShow = input.bool(true, "Mark Trap / Turtle Soup", group = GRP_TRAP)
+
+// -- Phase 23 - Supply/Demand, Mitigation Block, Rejection Block (TIER B - default off) --
+sdOn       = input.bool(false, "Enable Supply / Demand Zones", group = GRP_SD)
+sdBars     = input.int(3, "Cluster Bars", minval = 2, maxval = 6, group = GRP_SD)
+sdTight    = input.float(0.8, "Max Cluster Range (ATR x)", minval = 0.2, maxval = 2.0, step = 0.1, group = GRP_SD)
+mbOn       = input.bool(false, "Enable Mitigation Block", group = GRP_SD)
+rbOn       = input.bool(false, "Enable Rejection Block", group = GRP_SD)
+rbWickMin  = input.float(0.6, "Min Wick Ratio (RB)", minval = 0.4, maxval = 0.9, step = 0.05, group = GRP_SD)
+colSd      = input.color(color.new(#26a69a, 85), "S/D", inline = "c4", group = GRP_SD)
+colRb      = input.color(color.new(#795548, 82), "MB / RB", inline = "c4", group = GRP_SD)
+
+// -- Phase 24 - BPR / Liquidity Void / Entry Reference (TIER B - default off) --
+bprOn    = input.bool(false, "Enable BPR", group = GRP_BPR)
+voidOn   = input.bool(false, "Enable Liquidity Void", group = GRP_BPR)
+voidBars = input.int(3, "Min Void Candles", minval = 3, maxval = 6, group = GRP_BPR)
+voidOv   = input.float(0.2, "Max Overlap Ratio", minval = 0.05, maxval = 0.5, step = 0.05, group = GRP_BPR)
+entryRef = input.string("Close", "Entry Reference", options = ["Close", "Zone Edge", "CE", "Zone Full"], group = GRP_BPR)
+colBpr   = input.color(color.new(#e91e63, 80), "BPR", inline = "c5", group = GRP_BPR)
+colVoid  = input.color(color.new(#607d8b, 88), "Void", inline = "c5", group = GRP_BPR)
 
 // === 02 - TYPES ============================================================
 type Swing
@@ -236,6 +273,16 @@ var float cisdBullLevel = na
 var float cisdBearLevel = na
 var int   runDown       = 0
 var int   runUp         = 0
+
+var float asiaHigh     = na
+var float asiaLow      = na
+var bool  asiaRangeSet = false
+var string amdPhase    = "NONE"
+var string amdBias     = "NEUTRAL"
+var box   asiaBox      = na
+
+var int barsAbove = 0
+var int barsBelow = 0
 
 // === 04 - HELPERS ==========================================================
 f_nextLiqAbove(float px) =>
@@ -398,6 +445,38 @@ inAsia   = sessOn and not na(time(timeframe.period, asiaSess, sessTz))
 inLondon = sessOn and not na(time(timeframe.period, londonSess, sessTz))
 inNy     = sessOn and not na(time(timeframe.period, nySess, sessTz))
 inKz     = inLondon or inNy
+
+// -- Phase 21 - AMD / Power of 3 + Judas Swing (TIER B)
+inAsiaAmd = amdOn and not na(time(timeframe.period, amdAsiaS, sessTz))
+inJudas   = amdOn and not na(time(timeframe.period, amdJudasS, sessTz))
+inDist    = amdOn and not na(time(timeframe.period, amdDistS, sessTz))
+
+if newDay
+    asiaHigh     := na
+    asiaLow      := na
+    asiaRangeSet := false
+    amdPhase     := "NONE"
+    amdBias      := "NEUTRAL"
+
+if inAsiaAmd
+    asiaHigh := na(asiaHigh) ? high : math.max(asiaHigh, high)
+    asiaLow  := na(asiaLow)  ? low  : math.min(asiaLow,  low)
+    amdPhase := "ACCUM"
+
+if not inAsiaAmd and inAsiaAmd[1]
+    asiaRangeSet := true
+
+judasBull = inJudas and asiaRangeSet and not na(asiaLow)  and low  < asiaLow  and close > asiaLow
+judasBear = inJudas and asiaRangeSet and not na(asiaHigh) and high > asiaHigh and close < asiaHigh
+
+if judasBull
+    amdPhase := "MANIP"
+    amdBias  := "BULL"
+if judasBear
+    amdPhase := "MANIP"
+    amdBias  := "BEAR"
+if inDist and (amdPhase == "MANIP" or amdPhase == "DISTRIB")
+    amdPhase := "DISTRIB"
 
 // === 05B - TIER B MODULES - TRENDLINE HELPERS (Phase 17 / 18) ==============
 f_tlPriceAt(Trendline t, int bi) =>
@@ -652,6 +731,31 @@ smtReady = smtOn and smtSymOk and not na(cHigh) and not na(cLow)
 bullSMT  = smtReady and (smtInv ? (low <= myLowN and cHigh < coHighN) : (low <= myLowN and cLow > coLowN))
 bearSMT  = smtReady and (smtInv ? (high >= myHighN and cLow > coLowN) : (high >= myHighN and cHigh < coHighN))
 
+f_zonePriority(string kind) =>
+    int r = switch kind
+        "UNICORN" => 7
+        "FVG"     => 6
+        "OB"      => 5
+        "BPR"     => 5
+        "BB"      => 4
+        "IFVG"    => 4
+        "MB"      => 3
+        "RB"      => 2
+        "SD"      => 1
+        => 0
+    r
+
+f_coveredByBetter(string kind, float top, float bot) =>
+    bool covered = false
+    int  rank    = f_zonePriority(kind)
+    if array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            Zone z = array.get(zones, i)
+            if z.state != "INVALID" and z.state != "FILLED" and f_zonePriority(z.kind) >= rank
+                if top <= z.top and bot >= z.bottom
+                    covered := true
+    covered
+
 // -- Phase 6 - FVG detection
 f_zoneExists(string kind, string dir, float top, float bot) =>
     bool found = false
@@ -711,6 +815,120 @@ if confirmed and obOn and isBearDisp and mssDn
         if fresh and obTop > obBot and not f_zoneExists("OB", "BEAR", obTop, obBot)
             f_pushZone("OB", "BEAR", obTop, obBot)
             newBearZone := true
+
+// -- Phase 22 - Trap + Turtle Soup (TIER B) - feeds the SAME sweep door
+if not na(lastSwingHigh) and close > lastSwingHigh
+    barsAbove += 1
+else
+    barsAbove := 0
+if not na(lastSwingLow) and close < lastSwingLow
+    barsBelow += 1
+else
+    barsBelow := 0
+
+bullTrap = trapOn and not na(lastSwingHigh) and barsAbove[1] >= 1 and barsAbove[1] <= trapBars and close < lastSwingHigh
+bearTrap = trapOn and not na(lastSwingLow)  and barsBelow[1] >= 1 and barsBelow[1] <= trapBars and close > lastSwingLow
+
+tsHiLevel = ta.highest(high[1], tsLook)
+tsLoLevel = ta.lowest(low[1], tsLook)
+tsShort   = tsOn and high > tsHiLevel and close < tsHiLevel
+tsLong    = tsOn and low  < tsLoLevel and close > tsLoLevel
+
+if confirmed and (bullTrap or tsShort)
+    bslSwept      := true
+    float lvl     = bullTrap ? lastSwingHigh : tsHiLevel
+    sweptBslLevel := na(sweptBslLevel) ? math.max(lvl, high) : sweptBslLevel
+    array.push(liquidity, LiqLevel.new(kind = "TRAP", price = lvl, createdBar = bar_index, swept = true, sweptBar = bar_index))
+
+if confirmed and (bearTrap or tsLong)
+    sslSwept      := true
+    float lvl     = bearTrap ? lastSwingLow : tsLoLevel
+    sweptSslLevel := na(sweptSslLevel) ? math.min(lvl, low) : sweptSslLevel
+    array.push(liquidity, LiqLevel.new(kind = "TRAP", price = lvl, createdBar = bar_index, swept = true, sweptBar = bar_index))
+
+// -- Phase 23 - Supply / Demand cluster zones (TIER B)
+sdClustHigh = ta.highest(high[1], sdBars)
+sdClustLow  = ta.lowest(low[1], sdBars)
+sdTightOk   = (sdClustHigh - sdClustLow) < atrVal * sdTight
+
+if confirmed and sdOn and sdTightOk and isBullDisp and not f_coveredByBetter("SD", sdClustHigh, sdClustLow)
+    f_pushZone("SD", "BULL", sdClustHigh, sdClustLow)
+    newBullZone := true
+
+if confirmed and sdOn and sdTightOk and isBearDisp and not f_coveredByBetter("SD", sdClustHigh, sdClustLow)
+    f_pushZone("SD", "BEAR", sdClustHigh, sdClustLow)
+    newBearZone := true
+
+// -- Phase 23 - Rejection Block (wick based)
+rbUpWick   = high - math.max(open, close)
+rbDownWick = math.min(open, close) - low
+
+if confirmed and rbOn and rbDownWick / rangeSize >= rbWickMin and not f_coveredByBetter("RB", math.min(open, close), low)
+    f_pushZone("RB", "BULL", math.min(open, close), low)
+    newBullZone := true
+
+if confirmed and rbOn and rbUpWick / rangeSize >= rbWickMin and not f_coveredByBetter("RB", high, math.max(open, close))
+    f_pushZone("RB", "BEAR", high, math.max(open, close))
+    newBearZone := true
+
+// -- Phase 23 - Mitigation Block: touched OB that never filled, then displacement again
+if confirmed and mbOn and array.size(zones) > 0
+    for i = array.size(zones) - 1 to 0
+        Zone z = array.get(zones, i)
+        if z.kind == "OB" and z.state == "TOUCHED" and z.mitigationPct < 1.0
+            bool again = z.direction == "BULL" ? isBullDisp : isBearDisp
+            if again and not f_coveredByBetter("MB", z.top, z.bottom)
+                f_pushZone("MB", z.direction, z.top, z.bottom)
+                newBullZone := z.direction == "BULL" ? true : newBullZone
+                newBearZone := z.direction == "BEAR" ? true : newBearZone
+
+// -- Phase 24 - BPR: bull FVG and bear FVG overlapping at the same price
+if confirmed and bprOn and (bullFvgRaw or bearFvgRaw) and array.size(zones) > 0
+    float newTop = bullFvgRaw ? low : high
+    float newBot = bullFvgRaw ? high[2] : low[2]
+    string newDir = bullFvgRaw ? "BULL" : "BEAR"
+    for i = array.size(zones) - 1 to 0
+        Zone z = array.get(zones, i)
+        if z.kind == "FVG" and z.direction != newDir and z.state != "INVALID" and z.state != "FILLED"
+            float bTop = math.min(newTop, z.top)
+            float bBot = math.max(newBot, z.bottom)
+            if bTop > bBot and not f_coveredByBetter("BPR", bTop, bBot)
+                f_pushZone("BPR", newDir, bTop, bBot)
+                newBullZone := newDir == "BULL" ? true : newBullZone
+                newBearZone := newDir == "BEAR" ? true : newBearZone
+
+// -- Phase 24 - Liquidity Void: consecutive candles running with almost no overlap
+voidOverlap1 = math.max(0.0, math.min(high, high[1]) - math.max(low, low[1])) / rangeSize
+voidOverlap2 = math.max(0.0, math.min(high[1], high[2]) - math.max(low[1], low[2])) / math.max(high[1] - low[1], syminfo.mintick)
+voidRun      = voidOverlap1 < voidOv and voidOverlap2 < voidOv
+
+if confirmed and voidOn and voidRun
+    float vTop = math.max(math.max(high, high[1]), high[2])
+    float vBot = math.min(math.min(low, low[1]), low[2])
+    if vTop > vBot
+        array.push(gaps, Gap.new(kind = "VOID", top = vTop, bottom = vBot, ce = (vTop + vBot) / 2, createdBar = bar_index))
+        if array.size(gaps) > 30
+            Gap og = array.shift(gaps)
+            if not na(og.drawing)
+                box.delete(og.drawing)
+            if not na(og.ceLine)
+                line.delete(og.ceLine)
+
+// -- gap lifecycle (Phase 24 / 25)
+if confirmed and array.size(gaps) > 0
+    for i = array.size(gaps) - 1 to 0
+        Gap g = array.get(gaps, i)
+        if not g.filled and low <= g.ce and high >= g.ce
+            g.filled := true
+        if g.filled or bar_index - g.createdBar > 500
+            if not na(g.drawing)
+                box.delete(g.drawing)
+                g.drawing := na
+            if not na(g.ceLine)
+                line.delete(g.ceLine)
+                g.ceLine := na
+            if bar_index - g.createdBar > 500
+                array.remove(gaps, i)
 
 // -- Phase 6 / 7 - Zone lifecycle: NEW -> ACTIVE -> TOUCHED -> MITIGATED -> FILLED
 if confirmed and array.size(zones) > 0
@@ -773,6 +991,20 @@ f_score(string dir, Zone poi) =>
     sc -= htfBias == (dir == "LONG" ? "BEAR" : "BULL") ? 3 : 0
     math.max(sc, 0)
 
+f_entryLevel(string dir, Zone poi) =>
+    float lvl = close
+    if not na(poi)
+        if entryRef == "Zone Edge"
+            lvl := dir == "LONG" ? poi.top : poi.bottom
+        else if entryRef == "CE"
+            lvl := poi.ce
+        else if entryRef == "Zone Full"
+            lvl := dir == "LONG" ? poi.bottom : poi.top
+    lvl
+
+f_entryReached(string dir, float lvl) =>
+    entryRef == "Close" ? true : (dir == "LONG" ? low <= lvl : high >= lvl)
+
 ctxLongOk  = (not requireHtf or htfBias == "BULL") and (not requirePd or inDiscount)
 ctxShortOk = (not requireHtf or htfBias == "BEAR") and (not requirePd or inPremium)
 
@@ -823,7 +1055,8 @@ if engineOn and confirmed
         if na(activeLong.poi) or activeLong.poi.state == "FILLED" or activeLong.poi.state == "INVALID" or bar_index - activeLong.poiBar > poiTimeout
             activeLong.state := "INVALIDATED"
         else
-            float entryL  = close
+            float entryL  = f_entryLevel("LONG", activeLong.poi)
+            bool  reachL  = f_entryReached("LONG", entryL)
             float slL     = activeLong.sweepLevel - atrVal * slBufferMult
             float riskL   = math.max(entryL - slL, syminfo.mintick)
             float tpLiqL  = f_nextLiqAbove(entryL)
@@ -831,7 +1064,7 @@ if engineOn and confirmed
             float rrL     = (tpL - entryL) / riskL
             int   scL     = f_score("LONG", activeLong.poi)
             bool  kzOkL   = not killZoneReq or inKz
-            if rrL >= minRR and scL >= minScore and kzOkL and entryL > slL
+            if reachL and rrL >= minRR and scL >= minScore and kzOkL and entryL > slL
                 activeLong.entryPrice := entryL
                 activeLong.slPrice    := slL
                 activeLong.tp1        := tpL
@@ -887,7 +1120,8 @@ if engineOn and confirmed
         if na(activeShort.poi) or activeShort.poi.state == "FILLED" or activeShort.poi.state == "INVALID" or bar_index - activeShort.poiBar > poiTimeout
             activeShort.state := "INVALIDATED"
         else
-            float entryS = close
+            float entryS = f_entryLevel("SHORT", activeShort.poi)
+            bool  reachS = f_entryReached("SHORT", entryS)
             float slS    = activeShort.sweepLevel + atrVal * slBufferMult
             float riskS  = math.max(slS - entryS, syminfo.mintick)
             float tpLiqS = f_nextLiqBelow(entryS)
@@ -895,7 +1129,7 @@ if engineOn and confirmed
             float rrS    = (entryS - tpS) / riskS
             int   scS    = f_score("SHORT", activeShort.poi)
             bool  kzOkS  = not killZoneReq or inKz
-            if rrS >= minRR and scS >= minScore and kzOkS and slS > entryS
+            if reachS and rrS >= minRR and scS >= minScore and kzOkS and slS > entryS
                 activeShort.entryPrice := entryS
                 activeShort.slPrice    := slS
                 activeShort.tp1        := tpS
@@ -954,6 +1188,12 @@ if confirmed and array.size(zones) > 0
                 z.ceLine := na
             array.remove(zones, i)
 
+// liquidity hard cap (TLQ / TRAP pushes bypass f_pushLiq)
+if array.size(liquidity) > 50
+    LiqLevel oldL = array.shift(liquidity)
+    if not na(oldL.drawing)
+        line.delete(oldL.drawing)
+
 if array.size(zones) > 100
     Zone oldZ = array.shift(zones)
     if not na(oldZ.drawing)
@@ -999,8 +1239,8 @@ if liqOn and array.size(liquidity) > 0
 if showZones and array.size(zones) > 0
     for i = 0 to array.size(zones) - 1
         Zone z = array.get(zones, i)
-        bool vis = z.kind == "FVG" ? fvgOn : z.kind == "OB" ? obOn : bbOn
-        color zc = z.kind == "FVG" ? colFvg : z.kind == "OB" ? colOb : colBb
+        bool vis = z.kind == "FVG" ? fvgOn : z.kind == "OB" ? obOn : z.kind == "SD" ? sdOn : z.kind == "MB" ? mbOn : z.kind == "RB" ? rbOn : z.kind == "BPR" ? bprOn : bbOn
+        color zc = z.kind == "FVG" ? colFvg : z.kind == "OB" ? colOb : z.kind == "SD" ? colSd : (z.kind == "MB" or z.kind == "RB") ? colRb : z.kind == "BPR" ? colBpr : colBb
         if vis and na(z.drawing)
             z.drawing := box.new(z.createdBar, z.top, z.createdBar + zoneExtend, z.bottom, border_color = color.new(zc, 40), bgcolor = zc, text = f_zoneLabel(z.kind, z.direction), text_size = size.tiny, text_color = color.new(color.gray, 20), text_halign = text.align_left)
             if showCE
@@ -1091,6 +1331,30 @@ if cisdOn and cisdShow and barstate.islast
 // -- Phase 20 - SMT marker
 plotshape(smtShow and bullSMT, title = "Bull SMT", style = shape.xcross, location = location.belowbar, color = color.new(colBull, 0), size = size.tiny)
 plotshape(smtShow and bearSMT, title = "Bear SMT", style = shape.xcross, location = location.abovebar, color = color.new(colBear, 0), size = size.tiny)
+
+// -- Phase 21 - Asia range box
+if amdOn and amdShow and barstate.islast and not na(asiaHigh) and not na(asiaLow)
+    if na(asiaBox)
+        asiaBox := box.new(bar_index - 50, asiaHigh, bar_index, asiaLow, border_color = color.new(color.purple, 40), bgcolor = color.new(color.purple, 92))
+    else
+        box.set_lefttop(asiaBox, bar_index - 50, asiaHigh)
+        box.set_rightbottom(asiaBox, bar_index, asiaLow)
+
+// -- Phase 22 - trap / turtle soup markers
+plotshape(trapShow and (bullTrap or tsShort), title = "Bull Trap", style = shape.labeldown, location = location.abovebar, color = color.new(colBear, 20), text = "TRAP", textcolor = color.white, size = size.tiny)
+plotshape(trapShow and (bearTrap or tsLong),  title = "Bear Trap", style = shape.labelup,   location = location.belowbar, color = color.new(colBull, 20), text = "TRAP", textcolor = color.white, size = size.tiny)
+
+// -- Phase 24 - liquidity void boxes
+if voidOn and array.size(gaps) > 0
+    for i = 0 to array.size(gaps) - 1
+        Gap g = array.get(gaps, i)
+        if na(g.drawing) and not g.filled
+            g.drawing := box.new(g.createdBar - 2, g.top, g.createdBar + zoneExtend, g.bottom, border_color = color.new(colVoid, 60), bgcolor = colVoid, text = g.kind, text_size = size.tiny, text_color = color.new(color.gray, 30))
+            g.ceLine  := line.new(g.createdBar - 2, g.ce, g.createdBar + zoneExtend, g.ce, color = color.new(colVoid, 30), style = line.style_dashed)
+        if not na(g.drawing) and not g.filled and bar_index + zoneExtend > box.get_right(g.drawing)
+            box.set_right(g.drawing, bar_index + zoneExtend)
+            if not na(g.ceLine)
+                line.set_x2(g.ceLine, bar_index + zoneExtend)
 
 // === 10 - DASHBOARD ========================================================
 var table dash = table.new(position.top_right, 2, 8, border_width = 1)
