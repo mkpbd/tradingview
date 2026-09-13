@@ -24,6 +24,13 @@ var string GRP_AMD  = "14 - AMD / PO3 (B)"
 var string GRP_TRAP = "15 - Trap / Turtle Soup (B)"
 var string GRP_SD   = "16 - Supply-Demand / MB / RB (B)"
 var string GRP_BPR  = "17 - BPR / Void / Entry Ref (B)"
+var string GRP_GAP  = "18 - Opening Gaps (B)"
+var string GRP_DOL  = "19 - IRL / ERL / DOL (B)"
+var string GRP_SB   = "20 - Silver Bullet / Macro (B)"
+var string GRP_MOD  = "21 - Market Model / Unicorn (B)"
+var string GRP_BIAS = "22 - Daily Bias (B)"
+var string GRP_TGT  = "23 - Std Dev Targets (B)"
+var string GRP_SCORE = "24 - Score Model (B)"
 
 // -- Phase 1 - Structure --
 swingLen    = input.int(5, "Swing Length", minval = 3, maxval = 20, group = GRP_ST)
@@ -158,6 +165,49 @@ entryRef = input.string("Close", "Entry Reference", options = ["Close", "Zone Ed
 colBpr   = input.color(color.new(#e91e63, 80), "BPR", inline = "c5", group = GRP_BPR)
 colVoid  = input.color(color.new(#607d8b, 88), "Void", inline = "c5", group = GRP_BPR)
 
+// -- Phase 25 - Opening Gaps (TIER B - default off) --
+nwogOn  = input.bool(false, "New Week Opening Gap (NWOG)", group = GRP_GAP)
+ndogOn  = input.bool(false, "New Day Opening Gap (NDOG)", group = GRP_GAP)
+orgOn   = input.bool(false, "Opening Range Gap (ORG)", group = GRP_GAP)
+gapKeep = input.int(3, "Keep Last N Gaps per kind", minval = 1, maxval = 10, group = GRP_GAP)
+colGap  = input.color(color.new(#00bcd4, 85), "Gap", group = GRP_GAP)
+
+// -- Phase 26 - IRL / ERL / Draw on Liquidity (TIER B - default off) --
+dolOn   = input.bool(false, "Enable Draw on Liquidity", group = GRP_DOL)
+dolShow = input.bool(true,  "Draw DOL Target Line", group = GRP_DOL)
+
+// -- Phase 27 - Silver Bullet / Macro (TIER B - default off) --
+sbOn    = input.bool(false, "Enable Silver Bullet Window", group = GRP_SB)
+sb1     = input.session("1000-1100", "NY AM",  group = GRP_SB)
+sb2     = input.session("1400-1500", "NY PM",  group = GRP_SB)
+sb3     = input.session("0300-0400", "London", group = GRP_SB)
+sbOnly  = input.bool(false, "Signals ONLY inside SB window", group = GRP_SB)
+sbShade = input.bool(false, "Shade SB windows", group = GRP_SB)
+macroOn = input.bool(false, "Macro Windows (:50-:10)", group = GRP_SB)
+
+// -- Phase 28 - Market Model / Unicorn (TIER B - default off) --
+uniOn   = input.bool(false, "Enable Unicorn (BB + FVG overlap)", group = GRP_MOD)
+uniOv   = input.float(0.5, "Min Overlap Ratio", minval = 0.2, maxval = 0.95, step = 0.05, group = GRP_MOD)
+mmOn    = input.bool(false, "Enable MMBM / MMSM tracking", group = GRP_MOD)
+colUni  = input.color(color.new(#ffd600, 75), "Unicorn", group = GRP_MOD)
+
+// -- Phase 29 - Daily Bias / Weekly Profile (TIER B - default off) --
+dbOn    = input.bool(false, "Enable Daily Bias", group = GRP_BIAS)
+dbShow  = input.bool(true,  "Draw Weekly / Daily Open", group = GRP_BIAS)
+
+// -- Phase 30 - Std Dev Projections (TIER B - default off) --
+sdevOn   = input.bool(false, "Std Dev Projections", group = GRP_TGT)
+sdevStr  = input.string("2,2.5,4", "Multipliers (comma separated)", group = GRP_TGT)
+sdevAsTp = input.bool(false, "Use as TP when no liquidity target", group = GRP_TGT)
+
+// -- Phase 31 - Score v2 (TIER B - v1 stays default so Tier A results never move) --
+scoreModel  = input.string("v1", "Score Model", options = ["v1", "v2"], group = GRP_SCORE)
+minScoreV2  = input.int(8, "Min Score v2", minval = 0, maxval = 14, group = GRP_SCORE)
+
+// -- Phase 32 - Visual density --
+densityMode = input.string("Normal", "Visual Density", options = ["Minimal", "Normal", "Full"], group = GRP_VIS)
+dashPos     = input.string("Top Right", "Dashboard Position", options = ["Top Right", "Top Left", "Bottom Left"], group = GRP_VIS)
+
 // === 02 - TYPES ============================================================
 type Swing
     int    barIndex   = 0
@@ -208,6 +258,21 @@ type Setup
     int    score         = 0
     int    entryBar      = 0
     bool   signalEmitted = false
+    string modelName     = "STANDARD"
+    float  dolTarget     = 0.0
+    bool   cisdConfirmed = false
+    bool   smtPresent    = false
+    bool   trapConfirmed = false
+    bool   tlqConfirmed  = false
+    int    scoreCtx      = 0
+    int    scoreLiq      = 0
+    int    scoreStr      = 0
+    int    scoreMom      = 0
+    int    scorePoi      = 0
+    int    scoreLoc      = 0
+    int    scoreTime     = 0
+    int    scoreCorr     = 0
+    int    scorePen      = 0
 
 type Trendline
     string id           = ""
@@ -283,6 +348,22 @@ var box   asiaBox      = na
 
 var int barsAbove = 0
 var int barsBelow = 0
+
+var string marketModel = "NONE"
+var float  dolTarget   = na
+var line   dolLine     = na
+var line   wOpenLn     = na
+var line   dOpenLn     = na
+var array<line> sdevLines = array.new<line>()
+
+var string prevLongState  = "IDLE"
+var string prevShortState = "IDLE"
+var int    longStateBar   = 0
+var int    shortStateBar  = 0
+var int    todayLong      = 0
+var int    todayShort     = 0
+var int    drawnLines     = 0
+var int    drawnLabels    = 0
 
 // === 04 - HELPERS ==========================================================
 f_nextLiqAbove(float px) =>
@@ -382,8 +463,8 @@ if not na(ipl)
     intLow := low[intSwingLen]
 
 // -- Phase 2 - Liquidity Mapping
-[pdhRaw, pdlRaw] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_off)
-[pwhRaw, pwlRaw] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_off)
+[pdhRaw, pdlRaw, pdcRaw] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1]], lookahead = barmerge.lookahead_off)
+[pwhRaw, pwlRaw, pwcRaw] = request.security(syminfo.tickerid, "W", [high[1], low[1], close[1]], lookahead = barmerge.lookahead_off)
 
 newDay  = ta.change(time("D")) != 0
 newWeek = ta.change(time("W")) != 0
@@ -445,6 +526,52 @@ inAsia   = sessOn and not na(time(timeframe.period, asiaSess, sessTz))
 inLondon = sessOn and not na(time(timeframe.period, londonSess, sessTz))
 inNy     = sessOn and not na(time(timeframe.period, nySess, sessTz))
 inKz     = inLondon or inNy
+
+// -- Phase 27 - Silver Bullet / Macro windows (TIER B)
+inSB1   = sbOn and not na(time(timeframe.period, sb1, sessTz))
+inSB2   = sbOn and not na(time(timeframe.period, sb2, sessTz))
+inSB3   = sbOn and not na(time(timeframe.period, sb3, sessTz))
+inSB    = inSB1 or inSB2 or inSB3
+macroOk = macroOn and tfSec < 3600
+minNow  = minute(time, sessTz)
+inMacro = macroOk and (minNow >= 50 or minNow <= 10)
+
+// -- Phase 29 - Weekly / Daily open (valuewhen, never request.security -> no repaint)
+weeklyOpen = ta.valuewhen(newWeek, open, 0)
+dailyOpen  = ta.valuewhen(newDay, open, 0)
+
+pdhSwept = not na(pdhRaw) and high > pdhRaw
+pdlSwept = not na(pdlRaw) and low  < pdlRaw
+
+dbScore = (htfBias == "BULL" ? 2 : htfBias == "BEAR" ? -2 : 0) + (pdlSwept ? 1 : 0) + (pdhSwept ? -1 : 0) + (not na(weeklyOpen) and close > weeklyOpen ? 1 : -1)
+dailyBias = not dbOn ? "NEUTRAL" : dbScore >= 2 ? "BULL" : dbScore <= -2 ? "BEAR" : "NEUTRAL"
+
+// -- Phase 25 - Opening Gaps (NWOG / NDOG / ORG)
+f_pushGap(string kind, float a, float b) =>
+    float gTop = math.max(a, b)
+    float gBot = math.min(a, b)
+    if gTop - gBot >= syminfo.mintick
+        array.push(gaps, Gap.new(kind = kind, top = gTop, bottom = gBot, ce = (gTop + gBot) / 2, createdBar = bar_index))
+        int cnt = 0
+        if array.size(gaps) > 0
+            for i = array.size(gaps) - 1 to 0
+                Gap g = array.get(gaps, i)
+                if g.kind == kind
+                    cnt += 1
+                    if cnt > gapKeep
+                        if not na(g.drawing)
+                            box.delete(g.drawing)
+                        if not na(g.ceLine)
+                            line.delete(g.ceLine)
+                        array.remove(gaps, i)
+    true
+
+if nwogOn and newWeek and not na(pwcRaw)
+    f_pushGap("NWOG", open, pwcRaw)
+if ndogOn and newDay and not na(pdcRaw)
+    f_pushGap("NDOG", open, pdcRaw)
+if orgOn and inNy and not inNy[1]
+    f_pushGap("ORG", open, close[1])
 
 // -- Phase 21 - AMD / Power of 3 + Judas Swing (TIER B)
 inAsiaAmd = amdOn and not na(time(timeframe.period, amdAsiaS, sessTz))
@@ -977,6 +1104,21 @@ f_reset(Setup s) =>
     s.score         := 0
     s.entryBar      := 0
     s.signalEmitted := false
+    s.modelName     := "STANDARD"
+    s.dolTarget     := 0.0
+    s.cisdConfirmed := false
+    s.smtPresent    := false
+    s.trapConfirmed := false
+    s.tlqConfirmed  := false
+    s.scoreCtx      := 0
+    s.scoreLiq      := 0
+    s.scoreStr      := 0
+    s.scoreMom      := 0
+    s.scorePoi      := 0
+    s.scoreLoc      := 0
+    s.scoreTime     := 0
+    s.scoreCorr     := 0
+    s.scorePen      := 0
     true
 
 f_score(string dir, Zone poi) =>
@@ -1005,11 +1147,126 @@ f_entryLevel(string dir, Zone poi) =>
 f_entryReached(string dir, float lvl) =>
     entryRef == "Close" ? true : (dir == "LONG" ? low <= lvl : high >= lvl)
 
+// -- Phase 26 - IRL / ERL + Draw on Liquidity (TIER B)
+dolBias   = htfBias != "NEUTRAL" ? htfBias : trendDir
+dolTarget := not dolOn ? na : dolBias == "BULL" ? f_nextLiqAbove(close) : dolBias == "BEAR" ? f_nextLiqBelow(close) : na
+
+// -- Phase 28 - Unicorn: Breaker + FVG overlap on the same price (runs only on new zone bars)
+if confirmed and uniOn and (newBullZone or newBearZone) and array.size(zones) > 1
+    for i = array.size(zones) - 1 to 0
+        Zone za = array.get(zones, i)
+        bool aliveA = za.state != "INVALID" and za.state != "FILLED"
+        if aliveA and za.kind == "FVG"
+            for j = array.size(zones) - 1 to 0
+                Zone zb = array.get(zones, j)
+                bool aliveB = zb.state != "INVALID" and zb.state != "FILLED"
+                if aliveB and zb.kind == "BB" and zb.direction == za.direction
+                    float ovTop = math.min(za.top, zb.top)
+                    float ovBot = math.max(za.bottom, zb.bottom)
+                    float hMin  = math.max(math.min(za.top - za.bottom, zb.top - zb.bottom), syminfo.mintick)
+                    if ovTop > ovBot and (ovTop - ovBot) / hMin >= uniOv and not f_coveredByBetter("UNICORN", ovTop, ovBot)
+                        f_pushZone("UNICORN", za.direction, ovTop, ovBot)
+
+// -- Phase 28 - MMBM / MMSM market model
+if mmOn and confirmed and rangeOk
+    if sslSwept and not na(sweptSslLevel) and sweptSslLevel <= rangeLow + rangeSpan * 0.1
+        marketModel := "MMBM"
+    if bslSwept and not na(sweptBslLevel) and sweptBslLevel >= rangeHigh - rangeSpan * 0.1
+        marketModel := "MMSM"
+
+// -- Phase 30 - Std Dev projection helper
+f_sdevTarget(string dir, float sweepLvl, float mssLvl) =>
+    float lvl = na
+    if sdevOn and not na(sweepLvl) and not na(mssLvl)
+        float unit = math.abs(mssLvl - sweepLvl)
+        if unit > 0
+            array<string> parts = str.split(sdevStr, ",")
+            if array.size(parts) > 0
+                float m = math.abs(str.tonumber(array.get(parts, 0)))
+                if not na(m)
+                    lvl := dir == "LONG" ? sweepLvl + unit * m : sweepLvl - unit * m
+    lvl
+
+// -- Phase 31 - Score v2: class based, one point per class, hard caps
+f_scoreV2(Setup st, string dir) =>
+    bool isLong = dir == "LONG"
+    // Context (max 2)
+    int ctx = 0
+    ctx += htfBias == (isLong ? "BULL" : "BEAR") ? 2 : 0
+    ctx += dbOn and dailyBias == (isLong ? "BULL" : "BEAR") ? 1 : 0
+    ctx += amdOn and amdBias == (isLong ? "BULL" : "BEAR") ? 1 : 0
+    ctx := math.min(ctx, 2)
+    // Liquidity (max 2)
+    int liq = 2
+    // Structure (max 2)
+    int stc = 2
+    stc += st.cisdConfirmed ? 1 : 0
+    stc := math.min(stc, 2)
+    // Momentum (max 2)
+    int mom = 2
+    // POI (max 1) + confluence (max 2)
+    int poiS = na(st.poi) ? 0 : 1
+    int conf = 0
+    if not na(st.poi)
+        conf += st.poi.kind == "UNICORN" ? 2 : 0
+        conf += st.poi.kind == "BPR" ? 1 : 0
+    conf := math.min(conf, 2)
+    // Location (max 1)
+    int loc = 0
+    loc += (isLong ? inDiscount : inPremium) ? 1 : 0
+    loc += (isLong ? inOteBull : inOteBear) ? 1 : 0
+    loc := math.min(loc, 1)
+    // Time (max 1)
+    int tim = 0
+    tim += inKz ? 1 : 0
+    tim += inSB ? 1 : 0
+    tim += inMacro ? 1 : 0
+    tim += amdOn and amdPhase == "DISTRIB" ? 1 : 0
+    tim := math.min(tim, 1)
+    // Correlation (max 1)
+    int cor = st.smtPresent ? 1 : 0
+    // Penalties
+    int pen = 0
+    pen -= htfBias == (isLong ? "BEAR" : "BULL") ? 3 : 0
+    pen -= dbOn and dailyBias == (isLong ? "BEAR" : "BULL") ? 2 : 0
+    pen -= amdOn and amdPhase == "MANIP" and amdBias == (isLong ? "BEAR" : "BULL") ? 2 : 0
+    pen -= not na(st.poi) and st.poi.touchCount >= 2 ? 1 : 0
+    pen -= (isLong ? inPremium : inDiscount) ? 2 : 0
+    st.scoreCtx  := ctx
+    st.scoreLiq  := liq
+    st.scoreStr  := stc
+    st.scoreMom  := mom
+    st.scorePoi  := poiS
+    st.scoreLoc  := loc
+    st.scoreTime := tim
+    st.scoreCorr := cor
+    st.scorePen  := pen
+    math.max(ctx + liq + stc + mom + poiS + conf + loc + tim + cor + pen, 0)
+
+f_scoreFinal(Setup st, string dir) =>
+    scoreModel == "v2" ? f_scoreV2(st, dir) : f_score(dir, st.poi)
+
+f_scoreThreshold() =>
+    scoreModel == "v2" ? minScoreV2 : minScore
+
 ctxLongOk  = (not requireHtf or htfBias == "BULL") and (not requirePd or inDiscount)
 ctxShortOk = (not requireHtf or htfBias == "BEAR") and (not requirePd or inPremium)
 
 bool longTrigger  = false
 bool shortTrigger = false
+
+// -- Phase 31 - evidence flags collected while a setup is alive (never emit, only score)
+if confirmed
+    if activeLong.state != "IDLE"
+        activeLong.smtPresent    := activeLong.smtPresent or bullSMT
+        activeLong.cisdConfirmed := activeLong.cisdConfirmed or bullCISD
+        activeLong.trapConfirmed := activeLong.trapConfirmed or bearTrap or tsLong
+        activeLong.tlqConfirmed  := activeLong.tlqConfirmed or tlqBull
+    if activeShort.state != "IDLE"
+        activeShort.smtPresent    := activeShort.smtPresent or bearSMT
+        activeShort.cisdConfirmed := activeShort.cisdConfirmed or bearCISD
+        activeShort.trapConfirmed := activeShort.trapConfirmed or bullTrap or tsShort
+        activeShort.tlqConfirmed  := activeShort.tlqConfirmed or tlqBear
 
 // ---------------- LONG ----------------
 if engineOn and confirmed
@@ -1060,17 +1317,21 @@ if engineOn and confirmed
             float slL     = activeLong.sweepLevel - atrVal * slBufferMult
             float riskL   = math.max(entryL - slL, syminfo.mintick)
             float tpLiqL  = f_nextLiqAbove(entryL)
-            float tpL     = na(tpLiqL) ? entryL + riskL * 2.0 : tpLiqL
+            float tpSdL   = f_sdevTarget("LONG", activeLong.sweepLevel, activeLong.mssLevel)
+            float tpL     = not na(tpLiqL) ? tpLiqL : (sdevOn and sdevAsTp and not na(tpSdL) ? tpSdL : entryL + riskL * 2.0)
             float rrL     = (tpL - entryL) / riskL
-            int   scL     = f_score("LONG", activeLong.poi)
+            int   scL     = f_scoreFinal(activeLong, "LONG")
             bool  kzOkL   = not killZoneReq or inKz
-            if reachL and rrL >= minRR and scL >= minScore and kzOkL and entryL > slL
+            bool  sbOkL   = not sbOnly or inSB
+            if reachL and sbOkL and rrL >= minRR and scL >= f_scoreThreshold() and kzOkL and entryL > slL
                 activeLong.entryPrice := entryL
                 activeLong.slPrice    := slL
                 activeLong.tp1        := tpL
                 activeLong.rr         := rrL
                 activeLong.score      := scL
                 activeLong.state      := "ENTRY_TRIGGERED"
+                activeLong.modelName  := not na(activeLong.poi) and activeLong.poi.kind == "UNICORN" ? "UNICORN" : inSB ? "SILVER_BULLET" : marketModel == "MMBM" ? "MMBM" : "STANDARD"
+                activeLong.dolTarget  := na(dolTarget) ? 0.0 : dolTarget
                 longTrigger           := true
     else if activeLong.state == "TRADE_ACTIVE"
         if low <= activeLong.slPrice or high >= activeLong.tp1 or bar_index - activeLong.entryBar > tradeTimeout
@@ -1125,17 +1386,21 @@ if engineOn and confirmed
             float slS    = activeShort.sweepLevel + atrVal * slBufferMult
             float riskS  = math.max(slS - entryS, syminfo.mintick)
             float tpLiqS = f_nextLiqBelow(entryS)
-            float tpS    = na(tpLiqS) ? entryS - riskS * 2.0 : tpLiqS
+            float tpSdS  = f_sdevTarget("SHORT", activeShort.sweepLevel, activeShort.mssLevel)
+            float tpS    = not na(tpLiqS) ? tpLiqS : (sdevOn and sdevAsTp and not na(tpSdS) ? tpSdS : entryS - riskS * 2.0)
             float rrS    = (entryS - tpS) / riskS
-            int   scS    = f_score("SHORT", activeShort.poi)
+            int   scS    = f_scoreFinal(activeShort, "SHORT")
             bool  kzOkS  = not killZoneReq or inKz
-            if reachS and rrS >= minRR and scS >= minScore and kzOkS and slS > entryS
+            bool  sbOkS  = not sbOnly or inSB
+            if reachS and sbOkS and rrS >= minRR and scS >= f_scoreThreshold() and kzOkS and slS > entryS
                 activeShort.entryPrice := entryS
                 activeShort.slPrice    := slS
                 activeShort.tp1        := tpS
                 activeShort.rr         := rrS
                 activeShort.score      := scS
                 activeShort.state      := "ENTRY_TRIGGERED"
+                activeShort.modelName  := not na(activeShort.poi) and activeShort.poi.kind == "UNICORN" ? "UNICORN" : inSB ? "SILVER_BULLET" : marketModel == "MMSM" ? "MMSM" : "STANDARD"
+                activeShort.dolTarget  := na(dolTarget) ? 0.0 : dolTarget
                 shortTrigger           := true
     else if activeShort.state == "TRADE_ACTIVE"
         if high >= activeShort.slPrice or low <= activeShort.tp1 or bar_index - activeShort.entryBar > tradeTimeout
@@ -1156,6 +1421,7 @@ if longSignal
     activeLong.entryBar      := bar_index
     activeLong.state         := "TRADE_ACTIVE"
     totalLong                += 1
+    todayLong                += 1
     if not na(activeLong.poi)
         activeLong.poi.consumed := true
 
@@ -1164,8 +1430,20 @@ if shortSignal
     activeShort.entryBar      := bar_index
     activeShort.state         := "TRADE_ACTIVE"
     totalShort                += 1
+    todayShort                += 1
     if not na(activeShort.poi)
         activeShort.poi.consumed := true
+
+// -- Phase 32 - bars-in-state tracking
+if activeLong.state != prevLongState
+    prevLongState := activeLong.state
+    longStateBar  := bar_index
+if activeShort.state != prevShortState
+    prevShortState := activeShort.state
+    shortStateBar  := bar_index
+if newDay
+    todayLong  := 0
+    todayShort := 0
 
 // === 08 - CLEANUP ==========================================================
 if confirmed
@@ -1203,17 +1481,20 @@ if array.size(zones) > 100
 
 // === 09 - DRAWING ==========================================================
 // -- Phase 1 - swing labels
-if showSwings and not na(ph)
+densFull = densityMode == "Full"
+densNorm = densityMode == "Full" or densityMode == "Normal"
+
+if showSwings and densNorm and not na(ph)
     label.new(bar_index - swingLen, high[swingLen], hiLbl, style = label.style_label_down, color = color.new(colBear, 20), textcolor = color.white, size = size.tiny)
-if showSwings and not na(pl)
+if showSwings and densNorm and not na(pl)
     label.new(bar_index - swingLen, low[swingLen], loLbl, style = label.style_label_up, color = color.new(colBull, 20), textcolor = color.white, size = size.tiny)
 
 // -- Phase 3 - BOS / CHoCH
-if showBOS and (bosUp or chochUp) and not na(lastSwingHigh) and not na(lastSwingHighBar)
+if showBOS and densNorm and (bosUp or chochUp) and not na(lastSwingHigh) and not na(lastSwingHighBar)
     line.new(lastSwingHighBar, lastSwingHigh, bar_index, lastSwingHigh, color = colBull, style = line.style_dashed, width = 1)
     label.new(bar_index, lastSwingHigh, chochUp ? "CHoCH" : "BOS", style = label.style_label_down, color = color.new(chochUp ? color.orange : colBull, 20), textcolor = color.white, size = size.tiny)
 
-if showBOS and (bosDn or chochDn) and not na(lastSwingLow) and not na(lastSwingLowBar)
+if showBOS and densNorm and (bosDn or chochDn) and not na(lastSwingLow) and not na(lastSwingLowBar)
     line.new(lastSwingLowBar, lastSwingLow, bar_index, lastSwingLow, color = colBear, style = line.style_dashed, width = 1)
     label.new(bar_index, lastSwingLow, chochDn ? "CHoCH" : "BOS", style = label.style_label_up, color = color.new(chochDn ? color.orange : colBear, 20), textcolor = color.white, size = size.tiny)
 
@@ -1222,7 +1503,7 @@ plotshape(showDisp and isBullDisp, title = "Bull Displacement", style = shape.tr
 plotshape(showDisp and isBearDisp, title = "Bear Displacement", style = shape.triangledown, location = location.abovebar, color = colBear, size = size.tiny)
 
 // -- Phase 2 - liquidity lines
-if liqOn and array.size(liquidity) > 0
+if liqOn and densNorm and array.size(liquidity) > 0
     for i = 0 to array.size(liquidity) - 1
         LiqLevel lv = array.get(liquidity, i)
         bool vis = lv.kind == "BSL" or lv.kind == "SSL" ? showBslSsl : lv.kind == "EQH" or lv.kind == "EQL" ? showEq : lv.kind == "PDH" or lv.kind == "PDL" ? showPdhPdl : showPwhPwl
@@ -1239,8 +1520,10 @@ if liqOn and array.size(liquidity) > 0
 if showZones and array.size(zones) > 0
     for i = 0 to array.size(zones) - 1
         Zone z = array.get(zones, i)
-        bool vis = z.kind == "FVG" ? fvgOn : z.kind == "OB" ? obOn : z.kind == "SD" ? sdOn : z.kind == "MB" ? mbOn : z.kind == "RB" ? rbOn : z.kind == "BPR" ? bprOn : bbOn
-        color zc = z.kind == "FVG" ? colFvg : z.kind == "OB" ? colOb : z.kind == "SD" ? colSd : (z.kind == "MB" or z.kind == "RB") ? colRb : z.kind == "BPR" ? colBpr : colBb
+        bool isPoiNow = (not na(activeLong.poi) and z.id == activeLong.poi.id) or (not na(activeShort.poi) and z.id == activeShort.poi.id)
+        bool kindOn = z.kind == "FVG" ? fvgOn : z.kind == "OB" ? obOn : z.kind == "SD" ? sdOn : z.kind == "MB" ? mbOn : z.kind == "RB" ? rbOn : z.kind == "BPR" ? bprOn : z.kind == "UNICORN" ? uniOn : bbOn
+        bool vis = kindOn and (densNorm or isPoiNow)
+        color zc = z.kind == "FVG" ? colFvg : z.kind == "OB" ? colOb : z.kind == "SD" ? colSd : (z.kind == "MB" or z.kind == "RB") ? colRb : z.kind == "BPR" ? colBpr : z.kind == "UNICORN" ? colUni : colBb
         if vis and na(z.drawing)
             z.drawing := box.new(z.createdBar, z.top, z.createdBar + zoneExtend, z.bottom, border_color = color.new(zc, 40), bgcolor = zc, text = f_zoneLabel(z.kind, z.direction), text_size = size.tiny, text_color = color.new(color.gray, 20), text_halign = text.align_left)
             if showCE
@@ -1291,7 +1574,7 @@ if shortSignal
     line.new(bar_index, activeShort.tp1,     bar_index + 20, activeShort.tp1,     color = colBull, style = line.style_solid, width = 1)
 
 // -- Phase 17 / 18 - trendline drawing
-if tlOn and tlShow and array.size(trendlines) > 0
+if tlOn and tlShow and densNorm and array.size(trendlines) > 0
     for i = 0 to array.size(trendlines) - 1
         Trendline t = array.get(trendlines, i)
         color tc = t.isSupport ? colBull : colBear
@@ -1356,25 +1639,89 @@ if voidOn and array.size(gaps) > 0
             if not na(g.ceLine)
                 line.set_x2(g.ceLine, bar_index + zoneExtend)
 
+// -- Phase 25 - opening gap boxes
+if array.size(gaps) > 0
+    for i = 0 to array.size(gaps) - 1
+        Gap g = array.get(gaps, i)
+        bool gvis = g.kind == "VOID" ? voidOn : g.kind == "NWOG" ? nwogOn : g.kind == "NDOG" ? ndogOn : orgOn
+        if gvis and na(g.drawing) and not g.filled and g.kind != "VOID"
+            g.drawing := box.new(g.createdBar, g.top, g.createdBar + zoneExtend, g.bottom, border_color = color.new(colGap, 60), bgcolor = colGap, text = g.kind, text_size = size.tiny, text_color = color.new(color.gray, 30))
+            g.ceLine  := line.new(g.createdBar, g.ce, g.createdBar + zoneExtend, g.ce, color = color.new(colGap, 30), style = line.style_dashed)
+        if gvis and not na(g.drawing) and not g.filled and bar_index + zoneExtend > box.get_right(g.drawing)
+            box.set_right(g.drawing, bar_index + zoneExtend)
+            if not na(g.ceLine)
+                line.set_x2(g.ceLine, bar_index + zoneExtend)
+
+// -- Phase 26 - DOL target line
+if dolOn and dolShow and barstate.islast and not na(dolTarget)
+    if na(dolLine)
+        dolLine := line.new(bar_index - 30, dolTarget, bar_index + 15, dolTarget, color = color.new(color.yellow, 20), style = line.style_arrow_right, width = 2)
+    else
+        line.set_xy1(dolLine, bar_index - 30, dolTarget)
+        line.set_xy2(dolLine, bar_index + 15, dolTarget)
+
+// -- Phase 27 - SB window shading
+bgcolor(sbShade and inSB ? color.new(color.teal, 90) : na, title = "Silver Bullet")
+
+// -- Phase 29 - weekly / daily open lines
+if dbOn and dbShow and barstate.islast
+    if not na(weeklyOpen)
+        if na(wOpenLn)
+            wOpenLn := line.new(bar_index - 60, weeklyOpen, bar_index + 10, weeklyOpen, color = color.new(color.orange, 30), style = line.style_dotted, width = 2)
+        else
+            line.set_xy1(wOpenLn, bar_index - 60, weeklyOpen)
+            line.set_xy2(wOpenLn, bar_index + 10, weeklyOpen)
+    if not na(dailyOpen)
+        if na(dOpenLn)
+            dOpenLn := line.new(bar_index - 30, dailyOpen, bar_index + 10, dailyOpen, color = color.new(color.blue, 30), style = line.style_dotted, width = 1)
+        else
+            line.set_xy1(dOpenLn, bar_index - 30, dailyOpen)
+            line.set_xy2(dOpenLn, bar_index + 10, dailyOpen)
+
+// -- Phase 30 - std dev projection lines for the active setup
+if sdevOn and barstate.islast
+    if array.size(sdevLines) > 0
+        for i = array.size(sdevLines) - 1 to 0
+            line.delete(array.get(sdevLines, i))
+            array.remove(sdevLines, i)
+    Setup act = activeLong.state != "IDLE" ? activeLong : activeShort
+    if act.state != "IDLE" and act.sweepLevel != 0.0 and act.mssLevel != 0.0
+        float unit = math.abs(act.mssLevel - act.sweepLevel)
+        array<string> mparts = str.split(sdevStr, ",")
+        if unit > 0 and array.size(mparts) > 0
+            for i = 0 to array.size(mparts) - 1
+                float m = math.abs(str.tonumber(array.get(mparts, i)))
+                if not na(m)
+                    float lvl = act.direction == "LONG" ? act.sweepLevel + unit * m : act.sweepLevel - unit * m
+                    array.push(sdevLines, line.new(bar_index - 5, lvl, bar_index + 12, lvl, color = color.new(color.gray, 40), style = line.style_dotted))
+
 // === 10 - DASHBOARD ========================================================
-var table dash = table.new(position.top_right, 2, 8, border_width = 1)
+dashPosition = dashPos == "Top Left" ? position.top_left : dashPos == "Bottom Left" ? position.bottom_left : position.top_right
+var table dash = table.new(position.top_right, 2, 11, border_width = 1)
 if showDash and barstate.islast
+    table.set_position(dash, dashPosition)
     table.cell(dash, 0, 0, "SMC-ICT", text_color = color.white, bgcolor = color.new(color.blue, 20), text_size = size.small)
     table.cell(dash, 1, 0, timeframe.period + " / " + htfTF, text_color = color.white, bgcolor = color.new(color.blue, 20), text_size = size.small)
-    table.cell(dash, 0, 1, "HTF Bias", text_size = size.small)
-    table.cell(dash, 1, 1, htfBias, text_color = htfBias == "BULL" ? colBull : htfBias == "BEAR" ? colBear : color.gray, text_size = size.small)
-    table.cell(dash, 0, 2, "Trend (LTF)", text_size = size.small)
-    table.cell(dash, 1, 2, trendDir, text_color = trendDir == "BULL" ? colBull : trendDir == "BEAR" ? colBear : color.gray, text_size = size.small)
-    table.cell(dash, 0, 3, "P / D", text_size = size.small)
-    table.cell(dash, 1, 3, rangeOk ? (inDiscount ? "DISCOUNT" : "PREMIUM") : "n/a", text_size = size.small)
-    table.cell(dash, 0, 4, "Session", text_size = size.small)
-    table.cell(dash, 1, 4, inNy ? "NY" : inLondon ? "LONDON" : inAsia ? "ASIA" : "-", text_size = size.small)
-    table.cell(dash, 0, 5, "Zones / Liq", text_size = size.small)
-    table.cell(dash, 1, 5, str.tostring(array.size(zones)) + " / " + str.tostring(array.size(liquidity)), text_size = size.small)
-    table.cell(dash, 0, 6, "LONG state", text_size = size.small)
-    table.cell(dash, 1, 6, activeLong.state, text_size = size.small)
-    table.cell(dash, 0, 7, "SHORT state", text_size = size.small)
-    table.cell(dash, 1, 7, activeShort.state, text_size = size.small)
+    table.cell(dash, 0, 1, "HTF / Daily Bias", text_size = size.small)
+    table.cell(dash, 1, 1, htfBias + " / " + dailyBias, text_color = htfBias == "BULL" ? colBull : htfBias == "BEAR" ? colBear : color.gray, text_size = size.small)
+    table.cell(dash, 0, 2, "AMD / Session", text_size = size.small)
+    table.cell(dash, 1, 2, amdPhase + " / " + (inNy ? "NY" : inLondon ? "LONDON" : inAsia ? "ASIA" : "-") + (inSB ? " +SB" : ""), text_size = size.small)
+    table.cell(dash, 0, 3, "Trend / Model", text_size = size.small)
+    table.cell(dash, 1, 3, trendDir + " / " + marketModel, text_size = size.small)
+    table.cell(dash, 0, 4, "P / D", text_size = size.small)
+    table.cell(dash, 1, 4, rangeOk ? (inDiscount ? "DISCOUNT" : "PREMIUM") : "n/a", text_size = size.small)
+    table.cell(dash, 0, 5, "LONG state", text_size = size.small)
+    table.cell(dash, 1, 5, activeLong.state + " (" + str.tostring(bar_index - longStateBar) + "b)", text_size = size.small)
+    table.cell(dash, 0, 6, "SHORT state", text_size = size.small)
+    table.cell(dash, 1, 6, activeShort.state + " (" + str.tostring(bar_index - shortStateBar) + "b)", text_size = size.small)
+    table.cell(dash, 0, 7, "Score (" + scoreModel + ")", text_size = size.small)
+    table.cell(dash, 1, 7, str.tostring(activeLong.score) + " L / " + str.tostring(activeShort.score) + " S  [thr " + str.tostring(f_scoreThreshold()) + "]", text_size = size.small)
+    table.cell(dash, 0, 8, "DOL target", text_size = size.small)
+    table.cell(dash, 1, 8, na(dolTarget) ? "-" : str.tostring(dolTarget, format.mintick) + "  (" + str.tostring(math.abs(dolTarget - close) / math.max(atrVal, syminfo.mintick), "#.#") + " ATR)", text_size = size.small)
+    table.cell(dash, 0, 9, "Objects z/l/g/t", text_size = size.small)
+    table.cell(dash, 1, 9, str.tostring(array.size(zones)) + "/" + str.tostring(array.size(liquidity)) + "/" + str.tostring(array.size(gaps)) + "/" + str.tostring(array.size(trendlines)), text_size = size.small)
+    table.cell(dash, 0, 10, "Signals today / all", text_size = size.small)
+    table.cell(dash, 1, 10, str.tostring(todayLong + todayShort) + " / " + str.tostring(totalLong + totalShort), text_size = size.small)
 
 var table dbg = table.new(position.bottom_right, 2, 6, border_width = 1)
 if showDebug and barstate.islast
@@ -1393,10 +1740,10 @@ if showDebug and barstate.islast
 
 // === 11 - ALERTS ===========================================================
 if longSignal and confirmed
-    alert("LONG " + syminfo.ticker + " | E:" + str.tostring(activeLong.entryPrice, format.mintick) + " SL:" + str.tostring(activeLong.slPrice, format.mintick) + " TP:" + str.tostring(activeLong.tp1, format.mintick) + " RR:" + str.tostring(activeLong.rr, "#.##") + " Score:" + str.tostring(activeLong.score), alert.freq_once_per_bar_close)
+    alert("LONG " + syminfo.ticker + " | E:" + str.tostring(activeLong.entryPrice, format.mintick) + " SL:" + str.tostring(activeLong.slPrice, format.mintick) + " TP:" + str.tostring(activeLong.tp1, format.mintick) + " RR:" + str.tostring(activeLong.rr, "#.##") + " Score:" + str.tostring(activeLong.score) + " Model:" + activeLong.modelName, alert.freq_once_per_bar_close)
 
 if shortSignal and confirmed
-    alert("SHORT " + syminfo.ticker + " | E:" + str.tostring(activeShort.entryPrice, format.mintick) + " SL:" + str.tostring(activeShort.slPrice, format.mintick) + " TP:" + str.tostring(activeShort.tp1, format.mintick) + " RR:" + str.tostring(activeShort.rr, "#.##") + " Score:" + str.tostring(activeShort.score), alert.freq_once_per_bar_close)
+    alert("SHORT " + syminfo.ticker + " | E:" + str.tostring(activeShort.entryPrice, format.mintick) + " SL:" + str.tostring(activeShort.slPrice, format.mintick) + " TP:" + str.tostring(activeShort.tp1, format.mintick) + " RR:" + str.tostring(activeShort.rr, "#.##") + " Score:" + str.tostring(activeShort.score) + " Model:" + activeShort.modelName, alert.freq_once_per_bar_close)
 
 if confirmed and (bosUp or bosDn)
     alert("BOS " + (bosUp ? "UP" : "DOWN") + " " + syminfo.ticker, alert.freq_once_per_bar_close)

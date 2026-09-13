@@ -71,3 +71,53 @@ File: `SMC_ICT_Engine.pine` — Pine Script **v6**, single `indicator()`.
 
 Tier B (Phase 17–34) — Trendline engine, CISD, SMT, AMD/PO3, Trap, BPR, Silver Bullet, Score v2।
 Tier B-র প্রতিটা module-এর toggle **default `false`** হবে (plan-এর নিয়ম ২)।
+
+---
+
+# TIER B (Phase 17-34) — added
+
+সব Tier B toggle **default `false`**। সব off = Tier A-র আচরণ হুবহু ফিরে আসে (Phase 34 test 11)।
+
+| Phase | Input group | কী করে |
+|---|---|---|
+| 17 Trendline | `11 - Trendline (B)` | শুধু confirmed swing anchor, validity একবার build-time-এ check, touch cooldown 3 bar, strength 0-100, per-side cap |
+| 18 Channel + TLQ | `11 - Trendline (B)` | TL break vs TLQ sweep আলাদা; TLQ `liquidity` array-তে ঢোকে আর **একই** `LIQUIDITY_SWEPT` দরজা ব্যবহার করে |
+| 19 CISD | `12 - CISD (B)` | candle run-এর প্রথম open = CISD level; `CISD can replace Displacement` on করলেই কেবল displacement-এর বিকল্প |
+| 20 SMT | `13 - SMT (B)` | correlated symbol, inverse toggle, symbol খালি = নিঃশব্দে skip; শুধু score (v2) |
+| 21 AMD / PO3 | `14 - AMD / PO3 (B)` | Asia range দিনে একবার lock, Judas swing, phase ACCUM/MANIP/DISTRIB |
+| 22 Trap / Turtle Soup | `15 - Trap (B)` | bars-outside গণনা; trap sweep-এর একই দরজায় ঢোকে |
+| 23 S/D + MB + RB | `16 - Supply-Demand (B)` | cluster zone, mitigation block, wick-based rejection block |
+| 24 BPR / Void / CE | `17 - BPR / Void (B)` | opposite FVG overlap = BPR; void = Gap type; `Entry Reference` = Close / Zone Edge / CE / Zone Full |
+| 25 Opening Gaps | `18 - Opening Gaps (B)` | NWOG / NDOG / ORG, per-kind last N, CE line |
+| 26 IRL / ERL / DOL | `19 - IRL / ERL / DOL (B)` | bias-এর দিকের সবচেয়ে কাছের unswept level = DOL, dashboard-এ ATR দূরত্ব সহ |
+| 27 Silver Bullet | `20 - Silver Bullet (B)` | তিনটা window + macro (:50-:10, <1H only); `sbOnly` শুধু **emit** আটকায়, state চলতে থাকে |
+| 28 Unicorn / MMBM | `21 - Market Model (B)` | BB+FVG overlap ≥ ratio = UNICORN zone; MMBM/MMSM model name alert-এ যায় |
+| 29 Daily Bias | `22 - Daily Bias (B)` | weekly/daily open `ta.valuewhen` দিয়ে (request.security নয় = repaint নেই) |
+| 30 Std Dev | `23 - Std Dev Targets (B)` | sweep→MSS unit-এর multiple; TP priority-তে সবার শেষে, `Use as TP` on করলেই |
+| 31 Score v2 | `24 - Score Model (B)` | শ্রেণীভিত্তিক capping (max 14) + penalty; **default `v1`** |
+| 32 Dashboard / Density | `10 - Visuals` | 11 row dashboard, `Visual Density` = Minimal / Normal / Full, dashboard position |
+| 33 Object budget | — | zones 100 · liquidity 50 · gaps 30 · trendline 2×cap · sdev lines cleared per bar; ভারী loop শুধু `barstate.isconfirmed`-এ; `request.security` মোট **4** |
+
+## Plan থেকে ইচ্ছাকৃত দুইটা বিচ্যুতি (কারণসহ)
+
+1. **`Entry Reference` default = `Close`** (plan বলেছিল `CE`)। কারণ: Tier B-র এক নম্বর শর্ত — সব নতুন toggle off রাখলে Tier A-র ফল অপরিবর্তিত থাকতে হবে। CE default দিলে entry price বদলে যেত, তাই Tier A-র আচরণই default; CE হাতে বেছে নেওয়া যায়।
+2. **Score v2 default off** (plan বলেছিল v2 + threshold 8 দিয়ে v1 replace)। একই কারণ। `Score Model = v2` করলেই 14-point শ্রেণীভিত্তিক score + threshold 8 চালু।
+
+## Tier B test matrix (Phase 34)
+
+| # | Test | প্রত্যাশিত |
+|---|---|---|
+| 11 | সব Tier B toggle off | Phase 16-এর ফল অক্ষরে অক্ষরে এক |
+| 12 | Trendline on, reload ×3 | প্রতিটা line একই anchor |
+| 13 | TL break, displacement নেই | trade নেই |
+| 14 | TLQ sweep + disp + MSS + POI | ঠিক ১টা signal |
+| 15 | SMT symbol খালি | error নেই, skip |
+| 16 | SMT ভুল symbol | signal সংখ্যা অপরিবর্তিত (v1-এ score-ও অপরিবর্তিত) |
+| 17 | Asia range + Judas | range lock, Judas চিহ্নিত, amdBias set |
+| 18 | Trap: ১০ bar বাইরে থেকে ফেরত | trap **নয়** (limit 5) |
+| 19 | Unicorn (BB+FVG overlap) | ১টাই UNICORN zone, confluence +2 (v2) |
+| 20 | `sbOnly` on | বাইরের emit বন্ধ, state আটকায় না |
+| 21 | সব module on, 5000 bar | load < 5s, object error নেই |
+| 22 | Weekend gap + NWOG | gap আঁকে, swing ভাঙে না |
+
+**Golden check:** সব on করলে signal সংখ্যা **কমবে**, বাড়বে না। বাড়লে কোনো module signal emit করছে — বাগ।
