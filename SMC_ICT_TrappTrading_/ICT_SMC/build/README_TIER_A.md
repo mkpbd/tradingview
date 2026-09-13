@@ -256,3 +256,19 @@ python build/tests/cases.py
 দাম POI-তে ফেরার **পরের bar**-এ entry হয়। কারণ ফেরার bar-এ state `RETRACE_WAIT`-এ যায়, আর entry যাচাই হয় তার পরের bar-এ। ফলে entry একটু রক্ষণশীল (এক bar দেরি), কিন্তু এতে repaint-এর কোনো সুযোগ থাকে না।
 
 আরেকটা জিনিস simulation-এ স্পষ্ট হলো: **RR gate সত্যিই কামড়ায়**। sweep অনেক নিচে হলে SL দূরে যায়, আর পরের liquidity pool কাছে থাকলে RR 1.5-এর নিচে নেমে যায় — তখন সব শর্ত মিললেও trade হয় না। এটা Phase 12-এর ইচ্ছাকৃত আচরণ, signal কম আসার সবচেয়ে সাধারণ কারণও এটাই।
+
+---
+
+# চার্টে text পড়া যাচ্ছিল না — ঠিক করা হয়েছে
+
+প্রথম compile-এর পর চার্টে দেখা গেল লেখা প্রায় অদৃশ্য: dashboard-এর ঘর স্বচ্ছ ছিল (candle-এর উপর লেখা), zone box-এর caption ধূসর-on-কালো, আর সব label `size.tiny`।
+
+| কী বদলাল | আগে | এখন |
+|---|---|---|
+| Dashboard / Debug / Stats ঘর | background নেই, `size.small` | অস্বচ্ছ `Panel Background`, `size.normal` |
+| Panel-এর লেখা | ধূসর | `Panel Text` input (default `#d1d4dc`) |
+| Zone box caption | `color.gray` 20% | Panel Text রঙ |
+| Swing / BOS / TRAP / liquidity label | `size.tiny` | এক ধাপ বড়, liquidity লেখা পূর্ণ অস্বচ্ছ |
+| Signal label | `size.small` | `Text Size` অনুযায়ী |
+
+তিনটা নতুন input (Visuals group): **Text Size** (Small / Normal / Large), **Panel Background**, **Panel Text**। মনিটর বা theme অনুযায়ী নিজের মতো বদলে নেওয়া যাবে — screenshot-এর জন্য `Large` ভালো।

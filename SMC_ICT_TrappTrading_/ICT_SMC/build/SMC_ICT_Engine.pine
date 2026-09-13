@@ -117,6 +117,9 @@ colOb      = input.color(color.new(#ff9800, 80), "OB",        inline = "c2", too
 colBb      = input.color(color.new(#9c27b0, 80), "BB / IFVG", inline = "c2", tooltip = "Fill colour for Breaker and Inverse FVG boxes.", group = GRP_VIS)
 colLiq     = input.color(#787b86, "Liquidity", inline = "c3", tooltip = "Colour for liquidity lines. Swept levels are drawn faded.", group = GRP_VIS)
 zoneExtend = input.int(20, "Zone Extend (bars)", minval = 0, maxval = 200, tooltip = "How many bars to the right a live zone box is extended.", group = GRP_VIS)
+uiTextSize = input.string("Normal", "Text Size", options = ["Small", "Normal", "Large"], tooltip = "Size of every label, table and zone caption the indicator draws.", group = GRP_VIS)
+uiPanelBg  = input.color(color.new(#131722, 10), "Panel Background", inline = "c6", tooltip = "Background behind the dashboard, debug and stats tables. Keep it opaque so the text stays readable over candles.", group = GRP_VIS)
+uiTextCol  = input.color(#d1d4dc, "Panel Text", inline = "c6", tooltip = "Text colour inside the tables.", group = GRP_VIS)
 showDash   = input.bool(true,  "Show Dashboard", tooltip = "Show the status dashboard (bias, regime, state machine, object counts).", group = GRP_VIS)
 showDebug  = input.bool(false, "Show Debug (state machine)", tooltip = "Show the debug table. Use it when you get no signals - it tells you which state the setup is stuck in.", group = GRP_VIS)
 
@@ -1928,19 +1931,23 @@ if array.size(zones) > 100
 densFull = densityMode == "Full"
 densNorm = densityMode == "Full" or densityMode == "Normal"
 
+// one text size for everything the script draws
+tSize    = uiTextSize == "Large" ? size.large : uiTextSize == "Small" ? size.small : size.normal
+tSizeSub = uiTextSize == "Large" ? size.normal : uiTextSize == "Small" ? size.tiny : size.small
+
 if showSwings and densNorm and not na(ph)
-    label.new(bar_index - swingLenEff, high[swingLenEff], hiLbl, style = label.style_label_down, color = color.new(colBear, 20), textcolor = color.white, size = size.tiny)
+    label.new(bar_index - swingLenEff, high[swingLenEff], hiLbl, style = label.style_label_down, color = color.new(colBear, 20), textcolor = color.white, size = tSizeSub)
 if showSwings and densNorm and not na(pl)
-    label.new(bar_index - swingLenEff, low[swingLenEff], loLbl, style = label.style_label_up, color = color.new(colBull, 20), textcolor = color.white, size = size.tiny)
+    label.new(bar_index - swingLenEff, low[swingLenEff], loLbl, style = label.style_label_up, color = color.new(colBull, 20), textcolor = color.white, size = tSizeSub)
 
 // -- Phase 3 - BOS / CHoCH
 if showBOS and densNorm and (bosUp or chochUp) and not na(lastSwingHigh) and not na(lastSwingHighBar)
     line.new(lastSwingHighBar, lastSwingHigh, bar_index, lastSwingHigh, color = colBull, style = line.style_dashed, width = 1)
-    label.new(bar_index, lastSwingHigh, chochUp ? "CHoCH" : "BOS", style = label.style_label_down, color = color.new(chochUp ? color.orange : colBull, 20), textcolor = color.white, size = size.tiny)
+    label.new(bar_index, lastSwingHigh, chochUp ? "CHoCH" : "BOS", style = label.style_label_down, color = color.new(chochUp ? color.orange : colBull, 20), textcolor = color.white, size = tSizeSub)
 
 if showBOS and densNorm and (bosDn or chochDn) and not na(lastSwingLow) and not na(lastSwingLowBar)
     line.new(lastSwingLowBar, lastSwingLow, bar_index, lastSwingLow, color = colBear, style = line.style_dashed, width = 1)
-    label.new(bar_index, lastSwingLow, chochDn ? "CHoCH" : "BOS", style = label.style_label_up, color = color.new(chochDn ? color.orange : colBear, 20), textcolor = color.white, size = size.tiny)
+    label.new(bar_index, lastSwingLow, chochDn ? "CHoCH" : "BOS", style = label.style_label_up, color = color.new(chochDn ? color.orange : colBear, 20), textcolor = color.white, size = tSizeSub)
 
 // -- Phase 4 - displacement marker
 plotshape(showDisp and isBullDisp, title = "Bull Displacement", style = shape.triangleup, location = location.belowbar, color = colBull, size = size.tiny)
@@ -1953,7 +1960,7 @@ if liqOn and densNorm and array.size(liquidity) > 0
         bool vis = lv.kind == "BSL" or lv.kind == "SSL" ? showBslSsl : lv.kind == "EQH" or lv.kind == "EQL" ? showEq : lv.kind == "PDH" or lv.kind == "PDL" ? showPdhPdl : showPwhPwl
         if vis and na(lv.drawing)
             lv.drawing := line.new(lv.createdBar, lv.price, bar_index, lv.price, color = colLiq, style = line.style_dotted, width = 1)
-            lv.lbl     := label.new(lv.createdBar, lv.price, lv.kind, style = label.style_none, textcolor = colLiq, size = size.tiny)
+            lv.lbl     := label.new(lv.createdBar, lv.price, lv.kind, style = label.style_none, textcolor = color.new(colLiq, 0), size = tSizeSub)
         if not na(lv.drawing)
             if not lv.swept
                 line.set_x2(lv.drawing, bar_index)
@@ -1969,7 +1976,7 @@ if showZones and array.size(zones) > 0
         bool vis = kindOn and (densNorm or isPoiNow)
         color zc = z.kind == "FVG" ? colFvg : z.kind == "OB" ? colOb : z.kind == "SD" ? colSd : (z.kind == "MB" or z.kind == "RB") ? colRb : z.kind == "BPR" ? colBpr : z.kind == "UNICORN" ? colUni : z.kind == "HTF_FVG" ? colHtfPoi : colBb
         if vis and na(z.drawing)
-            z.drawing := box.new(z.createdBar, z.top, z.createdBar + zoneExtend, z.bottom, border_color = color.new(zc, 40), bgcolor = zc, text = f_zoneLabel(z.kind, z.direction), text_size = size.tiny, text_color = color.new(color.gray, 20), text_halign = text.align_left)
+            z.drawing := box.new(z.createdBar, z.top, z.createdBar + zoneExtend, z.bottom, border_color = color.new(zc, 40), bgcolor = zc, text = f_zoneLabel(z.kind, z.direction), text_size = tSizeSub, text_color = uiTextCol, text_halign = text.align_left)
             if showCE
                 z.ceLine := line.new(z.createdBar, z.ce, z.createdBar + zoneExtend, z.ce, color = color.new(zc, 30), style = line.style_dashed, width = 1)
         if not na(z.drawing)
@@ -2008,12 +2015,12 @@ bgcolor(shadeSess and inNy     ? color.new(color.green,  93) : na, title = "New 
 
 // -- Phase 12 / 14 - signal visuals
 if longSignal
-    label.new(bar_index, low, (intrabar and not barstate.isconfirmed ? "LIVE " : "") + "LONG\nE " + str.tostring(activeLong.entryPrice, format.mintick) + "\nSL " + str.tostring(activeLong.slPrice, format.mintick) + "\nTP " + str.tostring(activeLong.tp1, format.mintick) + "\nRR " + str.tostring(activeLong.rr, "#.##") + " | S" + str.tostring(activeLong.score) + (sizeOn ? "\nSize " + str.tostring(activeLong.posSize, "#.##") + f_sizeUnit() : ""), style = label.style_label_up, color = colBull, textcolor = color.white, size = size.small)
+    label.new(bar_index, low, (intrabar and not barstate.isconfirmed ? "LIVE " : "") + "LONG\nE " + str.tostring(activeLong.entryPrice, format.mintick) + "\nSL " + str.tostring(activeLong.slPrice, format.mintick) + "\nTP " + str.tostring(activeLong.tp1, format.mintick) + "\nRR " + str.tostring(activeLong.rr, "#.##") + " | S" + str.tostring(activeLong.score) + (sizeOn ? "\nSize " + str.tostring(activeLong.posSize, "#.##") + f_sizeUnit() : ""), style = label.style_label_up, color = colBull, textcolor = color.white, size = tSize)
     line.new(bar_index, activeLong.slPrice, bar_index + 20, activeLong.slPrice, color = colBear, style = line.style_solid, width = 1)
     line.new(bar_index, activeLong.tp1,     bar_index + 20, activeLong.tp1,     color = colBull, style = line.style_solid, width = 1)
 
 if shortSignal
-    label.new(bar_index, high, (intrabar and not barstate.isconfirmed ? "LIVE " : "") + "SHORT\nE " + str.tostring(activeShort.entryPrice, format.mintick) + "\nSL " + str.tostring(activeShort.slPrice, format.mintick) + "\nTP " + str.tostring(activeShort.tp1, format.mintick) + "\nRR " + str.tostring(activeShort.rr, "#.##") + " | S" + str.tostring(activeShort.score) + (sizeOn ? "\nSize " + str.tostring(activeShort.posSize, "#.##") + f_sizeUnit() : ""), style = label.style_label_down, color = colBear, textcolor = color.white, size = size.small)
+    label.new(bar_index, high, (intrabar and not barstate.isconfirmed ? "LIVE " : "") + "SHORT\nE " + str.tostring(activeShort.entryPrice, format.mintick) + "\nSL " + str.tostring(activeShort.slPrice, format.mintick) + "\nTP " + str.tostring(activeShort.tp1, format.mintick) + "\nRR " + str.tostring(activeShort.rr, "#.##") + " | S" + str.tostring(activeShort.score) + (sizeOn ? "\nSize " + str.tostring(activeShort.posSize, "#.##") + f_sizeUnit() : ""), style = label.style_label_down, color = colBear, textcolor = color.white, size = tSize)
     line.new(bar_index, activeShort.slPrice, bar_index + 20, activeShort.slPrice, color = colBear, style = line.style_solid, width = 1)
     line.new(bar_index, activeShort.tp1,     bar_index + 20, activeShort.tp1,     color = colBull, style = line.style_solid, width = 1)
 
@@ -2068,15 +2075,15 @@ if amdOn and amdShow and barstate.islast and not na(asiaHigh) and not na(asiaLow
         box.set_rightbottom(asiaBox, bar_index, asiaLow)
 
 // -- Phase 22 - trap / turtle soup markers
-plotshape(trapShow and (bullTrap or tsShort), title = "Bull Trap", style = shape.labeldown, location = location.abovebar, color = color.new(colBear, 20), text = "TRAP", textcolor = color.white, size = size.tiny)
-plotshape(trapShow and (bearTrap or tsLong),  title = "Bear Trap", style = shape.labelup,   location = location.belowbar, color = color.new(colBull, 20), text = "TRAP", textcolor = color.white, size = size.tiny)
+plotshape(trapShow and (bullTrap or tsShort), title = "Bull Trap", style = shape.labeldown, location = location.abovebar, color = color.new(colBear, 20), text = "TRAP", textcolor = color.white, size = tSizeSub)
+plotshape(trapShow and (bearTrap or tsLong),  title = "Bear Trap", style = shape.labelup,   location = location.belowbar, color = color.new(colBull, 20), text = "TRAP", textcolor = color.white, size = tSizeSub)
 
 // -- Phase 24 - liquidity void boxes
 if voidOn and array.size(gaps) > 0
     for i = 0 to array.size(gaps) - 1
         Gap g = array.get(gaps, i)
         if na(g.drawing) and not g.filled
-            g.drawing := box.new(g.createdBar - 2, g.top, g.createdBar + zoneExtend, g.bottom, border_color = color.new(colVoid, 60), bgcolor = colVoid, text = g.kind, text_size = size.tiny, text_color = color.new(color.gray, 30))
+            g.drawing := box.new(g.createdBar - 2, g.top, g.createdBar + zoneExtend, g.bottom, border_color = color.new(colVoid, 60), bgcolor = colVoid, text = g.kind, text_size = tSizeSub, text_color = uiTextCol)
             g.ceLine  := line.new(g.createdBar - 2, g.ce, g.createdBar + zoneExtend, g.ce, color = color.new(colVoid, 30), style = line.style_dashed)
         if not na(g.drawing) and not g.filled and bar_index + zoneExtend > box.get_right(g.drawing)
             box.set_right(g.drawing, bar_index + zoneExtend)
@@ -2089,7 +2096,7 @@ if array.size(gaps) > 0
         Gap g = array.get(gaps, i)
         bool gvis = g.kind == "VOID" ? voidOn : g.kind == "NWOG" ? nwogOn : g.kind == "NDOG" ? ndogOn : orgOn
         if gvis and na(g.drawing) and not g.filled and g.kind != "VOID"
-            g.drawing := box.new(g.createdBar, g.top, g.createdBar + zoneExtend, g.bottom, border_color = color.new(colGap, 60), bgcolor = colGap, text = g.kind, text_size = size.tiny, text_color = color.new(color.gray, 30))
+            g.drawing := box.new(g.createdBar, g.top, g.createdBar + zoneExtend, g.bottom, border_color = color.new(colGap, 60), bgcolor = colGap, text = g.kind, text_size = tSizeSub, text_color = uiTextCol)
             g.ceLine  := line.new(g.createdBar, g.ce, g.createdBar + zoneExtend, g.ce, color = color.new(colGap, 30), style = line.style_dashed)
         if gvis and not na(g.drawing) and not g.filled and bar_index + zoneExtend > box.get_right(g.drawing)
             box.set_right(g.drawing, bar_index + zoneExtend)
@@ -2185,43 +2192,43 @@ dashPosition = dashPos == "Top Left" ? position.top_left : dashPos == "Bottom Le
 var table dash = table.new(position.top_right, 2, 11, border_width = 1)
 if showDash and barstate.islast
     table.set_position(dash, dashPosition)
-    table.cell(dash, 0, 0, intrabar ? "SMC-ICT (LIVE)" : "SMC-ICT", text_color = intrabar ? color.yellow : color.white, bgcolor = color.new(color.blue, 20), text_size = size.small)
-    table.cell(dash, 1, 0, timeframe.period + " / " + (htfValid ? htfTF : "HTF<TF!") + " | " + presetUse, text_color = color.white, bgcolor = color.new(color.blue, 20), text_size = size.small)
-    table.cell(dash, 0, 1, "HTF / Daily Bias", text_size = size.small)
-    table.cell(dash, 1, 1, htfBias + " / " + dailyBias, text_color = htfBias == "BULL" ? colBull : htfBias == "BEAR" ? colBear : color.gray, text_size = size.small)
-    table.cell(dash, 0, 2, "AMD / Session", text_size = size.small)
-    table.cell(dash, 1, 2, amdPhase + " / " + (inNy ? "NY" : inLondon ? "LONDON" : inAsia ? "ASIA" : "-") + (inSB ? " +SB" : ""), text_size = size.small)
-    table.cell(dash, 0, 3, "Trend / Model", text_size = size.small)
-    table.cell(dash, 1, 3, trendDir + " / " + marketModel, text_size = size.small)
-    table.cell(dash, 0, 4, "P/D | Regime | ADR", text_size = size.small)
-    table.cell(dash, 1, 4, (rangeOk ? (inDiscount ? "DISC" : "PREM") : "n/a") + " | " + regime + " | " + (na(adrUsed) ? "-" : str.tostring(adrUsed * 100, "#") + "%"), text_color = inChop ? color.gray : adrSpent ? colBear : color.gray, text_size = size.small)
-    table.cell(dash, 0, 5, "LONG state", text_size = size.small)
-    table.cell(dash, 1, 5, activeLong.state + " (" + str.tostring(bar_index - longStateBar) + "b)", text_size = size.small)
-    table.cell(dash, 0, 6, "SHORT state", text_size = size.small)
-    table.cell(dash, 1, 6, activeShort.state + " (" + str.tostring(bar_index - shortStateBar) + "b)", text_size = size.small)
-    table.cell(dash, 0, 7, "Score (" + scoreModel + ")", text_size = size.small)
-    table.cell(dash, 1, 7, str.tostring(activeLong.score) + " L / " + str.tostring(activeShort.score) + " S  [thr " + str.tostring(f_scoreThreshold()) + "]", text_size = size.small)
-    table.cell(dash, 0, 8, "DOL target", text_size = size.small)
-    table.cell(dash, 1, 8, na(dolTarget) ? "-" : str.tostring(dolTarget, format.mintick) + "  (" + str.tostring(math.abs(dolTarget - close) / math.max(atrVal, syminfo.mintick), "#.#") + " ATR)", text_size = size.small)
-    table.cell(dash, 0, 9, "Objects z/l/g/t", text_size = size.small)
-    table.cell(dash, 1, 9, str.tostring(array.size(zones)) + "/" + str.tostring(array.size(liquidity)) + "/" + str.tostring(array.size(gaps)) + "/" + str.tostring(array.size(trendlines)), text_size = size.small)
-    table.cell(dash, 0, 10, "Signals today / all", text_size = size.small)
-    table.cell(dash, 1, 10, str.tostring(todayLong + todayShort) + " / " + str.tostring(totalLong + totalShort), text_size = size.small)
+    table.cell(dash, 0, 0, intrabar ? "SMC-ICT (LIVE)" : "SMC-ICT", text_color = intrabar ? color.yellow : color.white, bgcolor = color.new(color.blue, 0), text_size = tSize)
+    table.cell(dash, 1, 0, timeframe.period + " / " + (htfValid ? htfTF : "HTF<TF!") + " | " + presetUse, text_color = color.white, bgcolor = color.new(color.blue, 0), text_size = tSize)
+    table.cell(dash, 0, 1, "HTF / Daily Bias", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 1, 1, htfBias + " / " + dailyBias, text_color = htfBias == "BULL" ? colBull : htfBias == "BEAR" ? colBear : uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 0, 2, "AMD / Session", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 1, 2, amdPhase + " / " + (inNy ? "NY" : inLondon ? "LONDON" : inAsia ? "ASIA" : "-") + (inSB ? " +SB" : ""), text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 0, 3, "Trend / Model", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 1, 3, trendDir + " / " + marketModel, text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 0, 4, "P/D | Regime | ADR", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 1, 4, (rangeOk ? (inDiscount ? "DISC" : "PREM") : "n/a") + " | " + regime + " | " + (na(adrUsed) ? "-" : str.tostring(adrUsed * 100, "#") + "%"), text_color = inChop ? color.gray : adrSpent ? colBear : color.gray, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 0, 5, "LONG state", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 1, 5, activeLong.state + " (" + str.tostring(bar_index - longStateBar) + "b)", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 0, 6, "SHORT state", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 1, 6, activeShort.state + " (" + str.tostring(bar_index - shortStateBar) + "b)", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 0, 7, "Score (" + scoreModel + ")", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 1, 7, str.tostring(activeLong.score) + " L / " + str.tostring(activeShort.score) + " S  [thr " + str.tostring(f_scoreThreshold()) + "]", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 0, 8, "DOL target", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 1, 8, na(dolTarget) ? "-" : str.tostring(dolTarget, format.mintick) + "  (" + str.tostring(math.abs(dolTarget - close) / math.max(atrVal, syminfo.mintick), "#.#") + " ATR)", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 0, 9, "Objects z/l/g/t", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 1, 9, str.tostring(array.size(zones)) + "/" + str.tostring(array.size(liquidity)) + "/" + str.tostring(array.size(gaps)) + "/" + str.tostring(array.size(trendlines)), text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 0, 10, "Signals today / all", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 1, 10, str.tostring(todayLong + todayShort) + " / " + str.tostring(totalLong + totalShort), text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
 
 var table dbg = table.new(position.bottom_right, 2, 6, border_width = 1)
 if showDebug and barstate.islast
-    table.cell(dbg, 0, 0, "DEBUG", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.tiny)
-    table.cell(dbg, 1, 0, "bar " + str.tostring(bar_index), text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.tiny)
-    table.cell(dbg, 0, 1, "ATR", text_size = size.tiny)
-    table.cell(dbg, 1, 1, str.tostring(atrVal, format.mintick), text_size = size.tiny)
-    table.cell(dbg, 0, 2, "Disp (body/ATR)", text_size = size.tiny)
-    table.cell(dbg, 1, 2, str.tostring(bodyRatio, "#.##") + " / " + str.tostring(bodySize / math.max(atrVal, syminfo.mintick), "#.##"), text_size = size.tiny)
-    table.cell(dbg, 0, 3, "Swept L / S", text_size = size.tiny)
-    table.cell(dbg, 1, 3, str.tostring(activeLong.sweepLevel, format.mintick) + " / " + str.tostring(activeShort.sweepLevel, format.mintick), text_size = size.tiny)
-    table.cell(dbg, 0, 4, "Signals L / S", text_size = size.tiny)
-    table.cell(dbg, 1, 4, str.tostring(totalLong) + " / " + str.tostring(totalShort), text_size = size.tiny)
-    table.cell(dbg, 0, 5, "Int H / L", text_size = size.tiny)
-    table.cell(dbg, 1, 5, str.tostring(intHigh, format.mintick) + " / " + str.tostring(intLow, format.mintick), text_size = size.tiny)
+    table.cell(dbg, 0, 0, "DEBUG", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = tSizeSub)
+    table.cell(dbg, 1, 0, "bar " + str.tostring(bar_index), text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = tSizeSub)
+    table.cell(dbg, 0, 1, "ATR", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(dbg, 1, 1, str.tostring(atrVal, format.mintick), text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(dbg, 0, 2, "Disp (body/ATR)", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(dbg, 1, 2, str.tostring(bodyRatio, "#.##") + " / " + str.tostring(bodySize / math.max(atrVal, syminfo.mintick), "#.##"), text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(dbg, 0, 3, "Swept L / S", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(dbg, 1, 3, str.tostring(activeLong.sweepLevel, format.mintick) + " / " + str.tostring(activeShort.sweepLevel, format.mintick), text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(dbg, 0, 4, "Signals L / S", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(dbg, 1, 4, str.tostring(totalLong) + " / " + str.tostring(totalShort), text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(dbg, 0, 5, "Int H / L", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(dbg, 1, 5, str.tostring(intHigh, format.mintick) + " / " + str.tostring(intLow, format.mintick), text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
 
 f_alertMsg(Setup st, string side) =>
     string m = ""
@@ -2236,22 +2243,22 @@ if statsOn and barstate.islast
     float winRate = nTrades > 0 ? nWins / nTrades * 100.0 : 0.0
     float expect  = nTrades > 0 ? sumR / nTrades : 0.0
     float avgRR   = nTrades > 0 ? sumRR / nTrades : 0.0
-    table.cell(stats, 0, 0, "STATS (approx)", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.tiny)
-    table.cell(stats, 1, 0, str.tostring(nTrades) + " trades", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.tiny)
-    table.cell(stats, 0, 1, "Win rate", text_size = size.tiny)
-    table.cell(stats, 1, 1, str.tostring(winRate, "#.#") + "%", text_size = size.tiny)
-    table.cell(stats, 0, 2, "Total R", text_size = size.tiny)
-    table.cell(stats, 1, 2, str.tostring(sumR, "#.##") + "R", text_color = sumR >= 0 ? colBull : colBear, text_size = size.tiny)
-    table.cell(stats, 0, 3, "Expectancy", text_size = size.tiny)
-    table.cell(stats, 1, 3, str.tostring(expect, "#.##") + "R / trade", text_size = size.tiny)
-    table.cell(stats, 0, 4, "Avg planned RR", text_size = size.tiny)
-    table.cell(stats, 1, 4, str.tostring(avgRR, "#.##"), text_size = size.tiny)
-    table.cell(stats, 0, 5, "Best / Worst", text_size = size.tiny)
-    table.cell(stats, 1, 5, str.tostring(bestR, "#.##") + "R / " + str.tostring(worstR, "#.##") + "R", text_size = size.tiny)
-    table.cell(stats, 0, 6, "Max consec. loss", text_size = size.tiny)
-    table.cell(stats, 1, 6, str.tostring(maxLossRun), text_size = size.tiny)
-    table.cell(stats, 0, 7, "No spread / slippage / commission.", text_size = size.tiny, text_color = color.gray)
-    table.cell(stats, 1, 7, "Same-bar TP+SL counted as SL.", text_size = size.tiny, text_color = color.gray)
+    table.cell(stats, 0, 0, "STATS (approx)", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = tSizeSub)
+    table.cell(stats, 1, 0, str.tostring(nTrades) + " trades", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = tSizeSub)
+    table.cell(stats, 0, 1, "Win rate", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(stats, 1, 1, str.tostring(winRate, "#.#") + "%", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(stats, 0, 2, "Total R", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(stats, 1, 2, str.tostring(sumR, "#.##") + "R", text_color = sumR >= 0 ? colBull : colBear, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(stats, 0, 3, "Expectancy", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(stats, 1, 3, str.tostring(expect, "#.##") + "R / trade", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(stats, 0, 4, "Avg planned RR", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(stats, 1, 4, str.tostring(avgRR, "#.##"), text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(stats, 0, 5, "Best / Worst", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(stats, 1, 5, str.tostring(bestR, "#.##") + "R / " + str.tostring(worstR, "#.##") + "R", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(stats, 0, 6, "Max consec. loss", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(stats, 1, 6, str.tostring(maxLossRun), text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(stats, 0, 7, "No spread / slippage / commission.", text_size = tSizeSub, text_color = color.new(uiTextCol, 30), bgcolor = uiPanelBg)
+    table.cell(stats, 1, 7, "Same-bar TP+SL counted as SL.", text_size = tSizeSub, text_color = color.new(uiTextCol, 30), bgcolor = uiPanelBg)
 
 // === 11 - ALERTS ===========================================================
 if longSignal and barstate.isconfirmed
