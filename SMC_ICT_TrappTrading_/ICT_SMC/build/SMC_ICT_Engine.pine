@@ -31,6 +31,17 @@ var string GRP_MOD  = "21 - Market Model / Unicorn (B)"
 var string GRP_BIAS = "22 - Daily Bias (B)"
 var string GRP_TGT  = "23 - Std Dev Targets (B)"
 var string GRP_SCORE = "24 - Score Model (B)"
+var string GRP_REG  = "25 - Regime Filter (C)"
+var string GRP_ADR  = "26 - ADR (C)"
+var string GRP_OPEN = "27 - Open Lines (C)"
+var string GRP_VI   = "28 - Volume Imbalance (C)"
+var string GRP_HPOI = "29 - HTF POI (C)"
+var string GRP_TM   = "30 - Trade Management (C)"
+var string GRP_SIZE = "31 - Position Size (C)"
+var string GRP_EXIT = "32 - Exits & News (C)"
+var string GRP_PRE  = "33 - Instrument Preset (C)"
+var string GRP_STAT = "34 - Backtest Stats (C)"
+var string GRP_ALRT = "35 - Alert Format (C)"
 
 // -- Phase 1 - Structure --
 swingLen    = input.int(5, "Swing Length", minval = 3, maxval = 20, group = GRP_ST)
@@ -208,6 +219,93 @@ minScoreV2  = input.int(8, "Min Score v2", minval = 0, maxval = 14, group = GRP_
 densityMode = input.string("Normal", "Visual Density", options = ["Minimal", "Normal", "Full"], group = GRP_VIS)
 dashPos     = input.string("Top Right", "Dashboard Position", options = ["Top Right", "Top Left", "Bottom Left"], group = GRP_VIS)
 
+// -- Phase 35 - Range / Chop Regime Filter (TIER C - default off) --
+regimeOn   = input.bool(false, "Enable Regime Filter", group = GRP_REG)
+regimeLen  = input.int(20, "Regime Lookback", minval = 10, maxval = 100, group = GRP_REG)
+effTrend   = input.float(0.35, "Trend Efficiency >", minval = 0.1, maxval = 0.9, step = 0.05, group = GRP_REG)
+effChop    = input.float(0.15, "Chop Efficiency <",  minval = 0.05, maxval = 0.5, step = 0.05, group = GRP_REG)
+chopBlock  = input.bool(true,  "Block signals in CHOP", group = GRP_REG)
+rangeEdge  = input.bool(true,  "In RANGE take edge setups only", group = GRP_REG)
+regimeShade = input.bool(false, "Shade CHOP background", group = GRP_REG)
+
+// -- Phase 36 - ADR / Daily Range Exhaustion (TIER C - default off) --
+adrOn    = input.bool(false, "Enable ADR Filter", group = GRP_ADR)
+adrLen   = input.int(14, "ADR Days", minval = 5, maxval = 30, group = GRP_ADR)
+adrCap   = input.float(1.2, "Exhausted above % of ADR", minval = 0.5, maxval = 2.0, step = 0.05, group = GRP_ADR)
+adrBlockCont = input.bool(false, "Block continuation setups when exhausted", group = GRP_ADR)
+
+// -- Phase 37 - Open Lines (TIER C - default off) --
+moOn   = input.bool(false, "Midnight Open (00:00)", group = GRP_OPEN)
+tdoOn  = input.bool(false, "True Day Open (08:30)", group = GRP_OPEN)
+woOn   = input.bool(false, "Weekly Open", group = GRP_OPEN)
+moSess  = input.session("0000-0100", "Midnight window", group = GRP_OPEN)
+tdoSess = input.session("0830-0930", "True Day Open window", group = GRP_OPEN)
+
+// -- Phase 38 - Volume Imbalance (TIER C - default off) --
+viOn  = input.bool(false, "Volume Imbalance", group = GRP_VI)
+viMin = input.float(0.05, "Min VI Size (ATR x)", minval = 0.01, maxval = 0.5, step = 0.01, group = GRP_VI)
+colVi = input.color(color.new(#ffeb3b, 80), "VI", group = GRP_VI)
+
+// -- Phase 39 - HTF POI projection (TIER C - default off) --
+htfPoiOn  = input.bool(false, "Show HTF POI on LTF", group = GRP_HPOI)
+htfPoiCap = input.int(20, "Max HTF zones", minval = 5, maxval = 40, group = GRP_HPOI)
+colHtfPoi = input.color(color.new(#3f51b5, 70), "HTF POI", group = GRP_HPOI)
+
+// -- Phase 40 - Trade Management (TIER C - default off) --
+tmOn    = input.bool(false, "Enable TP1/TP2/TP3 + BE + Trail", group = GRP_TM)
+tpMode  = input.string("Liquidity", "TP Mode", options = ["Liquidity", "R-based"], group = GRP_TM)
+tp1R    = input.float(1.0, "TP1 at R", minval = 0.5, maxval = 3.0, step = 0.1, group = GRP_TM)
+tp2R    = input.float(2.0, "TP2 at R", minval = 1.0, maxval = 6.0, step = 0.1, group = GRP_TM)
+tp3R    = input.float(3.0, "TP3 at R", minval = 1.5, maxval = 10.0, step = 0.1, group = GRP_TM)
+tp1Pct  = input.int(50, "Close % at TP1", minval = 0, maxval = 100, group = GRP_TM)
+beOnTP1 = input.bool(true,  "Move SL to BE at TP1", group = GRP_TM)
+trailOn = input.bool(false, "Trail by structure (last swing)", group = GRP_TM)
+trailBuf = input.float(0.2, "Trail buffer (ATR x)", minval = 0.0, maxval = 2.0, step = 0.05, group = GRP_TM)
+
+// -- Phase 41 - Position Size (TIER C - default off) --
+sizeOn   = input.bool(false, "Show Position Size", group = GRP_SIZE)
+acctSize = input.float(10000, "Account Size", minval = 100, group = GRP_SIZE)
+riskPct  = input.float(1.0, "Risk % per trade", minval = 0.1, maxval = 5.0, step = 0.1, group = GRP_SIZE)
+
+// -- Phase 42 - Time Exit / EOD / News (TIER C - default off) --
+eodFlat   = input.bool(false, "Close at session end (EOD flat)", group = GRP_EXIT)
+newsOn    = input.bool(false, "News Blackout", group = GRP_EXIT)
+newsTimes = input.string("0830,1000,1400", "Blackout times (no spaces, session tz)", group = GRP_EXIT)
+newsPad   = input.int(15, "Blackout +/- minutes", minval = 5, maxval = 60, group = GRP_EXIT)
+newsShade = input.bool(false, "Shade blackout window", group = GRP_EXIT)
+
+// -- Phase 43 - Instrument Preset (Manual = use the raw inputs above) --
+preset = input.string("Manual", "Instrument Preset", options = ["Manual", "Auto", "Forex", "Gold", "Index", "Crypto"], group = GRP_PRE)
+
+// -- Phase 44 - Backtest stats (approximation, not a backtester) --
+statsOn = input.bool(false, "Show Stats Table", group = GRP_STAT)
+
+// -- Phase 45 - Alert format --
+alertFmt = input.string("Text", "Alert Format", options = ["Text", "JSON"], group = GRP_ALRT)
+
+// -- Phase 46 - Intrabar mode --
+intrabar = input.bool(false, "Intrabar (early) signals - CAN REPAINT", group = GRP_ENT)
+
+// === 01B - PRESETS (Phase 43) - preset only changes effective values, Manual = raw inputs
+presetAuto = syminfo.type == "forex" ? (str.contains(syminfo.ticker, "XAU") ? "Gold" : "Forex") : syminfo.type == "crypto" ? "Crypto" : syminfo.type == "index" or syminfo.type == "futures" ? "Index" : "Forex"
+presetUse  = preset == "Auto" ? presetAuto : preset
+
+swingLenEff = presetUse == "Manual" ? swingLen : presetUse == "Gold" ? 7 : presetUse == "Crypto" ? 8 : 5
+atrMultEff  = presetUse == "Manual" ? atrMult  : presetUse == "Gold" ? 1.5 : presetUse == "Crypto" ? 1.4 : presetUse == "Index" ? 1.3 : 1.2
+eqTolEff    = presetUse == "Manual" ? eqTol    : presetUse == "Gold" ? 0.15 : presetUse == "Crypto" ? 0.12 : 0.10
+minRREff    = presetUse == "Manual" ? minRR    : presetUse == "Gold" or presetUse == "Crypto" ? 2.0 : 1.5
+
+// === 01C - INPUT VALIDATION (Phase 47) ====================================
+if barstate.isfirst
+    if mssTimeout > poiTimeout
+        runtime.error("Sweep->MSS timeout (" + str.tostring(mssTimeout) + ") must not exceed POI->Retrace timeout (" + str.tostring(poiTimeout) + ").")
+    if tp1R >= tp2R or tp2R >= tp3R
+        runtime.error("Trade Management: TP1 < TP2 < TP3 required.")
+    if oteLow >= oteHigh
+        runtime.error("OTE Fib Low must be smaller than OTE Fib High.")
+    if effChop >= effTrend
+        runtime.error("Regime: Chop efficiency must be smaller than Trend efficiency.")
+
 // === 02 - TYPES ============================================================
 type Swing
     int    barIndex   = 0
@@ -253,7 +351,16 @@ type Setup
     int    poiBar        = 0
     float  entryPrice    = 0.0
     float  slPrice       = 0.0
+    float  slInit        = 0.0
     float  tp1           = 0.0
+    float  tp2           = 0.0
+    float  tp3           = 0.0
+    bool   tp1Hit        = false
+    bool   tp2Hit        = false
+    bool   tp3Hit        = false
+    bool   beActive      = false
+    float  posSize       = 0.0
+    string exitReason    = ""
     float  rr            = 0.0
     int    score         = 0
     int    entryBar      = 0
@@ -365,6 +472,22 @@ var int    todayShort     = 0
 var int    drawnLines     = 0
 var int    drawnLabels    = 0
 
+var float todayHigh    = na
+var float todayLow     = na
+var float midnightOpen = na
+var float trueDayOpen  = na
+var line  moLn         = na
+var line  tdoLn        = na
+
+var int   nTrades   = 0
+var int   nWins     = 0
+var float sumR      = 0.0
+var float bestR     = 0.0
+var float worstR    = 0.0
+var int   lossRun   = 0
+var int   maxLossRun = 0
+var float sumRR     = 0.0
+
 // === 04 - HELPERS ==========================================================
 f_nextLiqAbove(float px) =>
     float best = na
@@ -417,12 +540,12 @@ atrVal    = ta.atr(atrLen)
 bodySize  = math.abs(close - open)
 rangeSize = math.max(high - low, syminfo.mintick)
 bodyRatio = bodySize / rangeSize
-eqTolAbs  = atrVal * eqTol
+eqTolAbs  = atrVal * eqTolEff
 clustAbs  = atrVal * clusterTol
 
 // -- Phase 1 - Swing Structure (pivot confirms swingLen bars later = no repaint)
-ph = ta.pivothigh(high, swingLen, swingLen)
-pl = ta.pivotlow(low, swingLen, swingLen)
+ph = ta.pivothigh(high, swingLenEff, swingLenEff)
+pl = ta.pivotlow(low, swingLenEff, swingLenEff)
 
 iph = ta.pivothigh(high, intSwingLen, intSwingLen)
 ipl = ta.pivotlow(low, intSwingLen, intSwingLen)
@@ -433,24 +556,24 @@ string hiLbl = ""
 string loLbl = ""
 
 if not na(ph)
-    float p = high[swingLen]
+    float p = high[swingLenEff]
     hiLbl := na(lastSwingHigh) ? "HH" : (p > lastSwingHigh ? "HH" : "LH")
-    array.push(swings, Swing.new(bar_index - swingLen, p, true, hiLbl, false))
+    array.push(swings, Swing.new(bar_index - swingLenEff, p, true, hiLbl, false))
     prevSwingHigh    := lastSwingHigh
     prevSwingHighBar := lastSwingHighBar
     lastSwingHigh    := p
-    lastSwingHighBar := bar_index - swingLen
+    lastSwingHighBar := bar_index - swingLenEff
     bslConsumed      := false
     newSwingHigh     := true
 
 if not na(pl)
-    float p = low[swingLen]
+    float p = low[swingLenEff]
     loLbl := na(lastSwingLow) ? "LL" : (p < lastSwingLow ? "LL" : "HL")
-    array.push(swings, Swing.new(bar_index - swingLen, p, false, loLbl, false))
+    array.push(swings, Swing.new(bar_index - swingLenEff, p, false, loLbl, false))
     prevSwingLow    := lastSwingLow
     prevSwingLowBar := lastSwingLowBar
     lastSwingLow    := p
-    lastSwingLowBar := bar_index - swingLen
+    lastSwingLowBar := bar_index - swingLenEff
     sslConsumed     := false
     newSwingLow     := true
 
@@ -519,7 +642,21 @@ f_htfBias() =>
     b
 
 htfBiasRaw = request.security(syminfo.tickerid, htfTF, f_htfBias()[1], lookahead = barmerge.lookahead_off)
-htfBias    = htfOn and not na(htfBiasRaw) ? htfBiasRaw : "NEUTRAL"
+htfTfSec   = timeframe.in_seconds(htfTF)
+htfValid   = htfTfSec > tfSec
+htfBias    = htfOn and htfValid and not na(htfBiasRaw) ? htfBiasRaw : "NEUTRAL"
+
+// -- Phase 39 - HTF POI: detect an HTF FVG from CLOSED HTF bars only
+f_htfFvg() =>
+    float a    = ta.atr(atrLen)
+    float body = math.abs(close[2] - open[2])
+    float rng  = math.max(high[2] - low[2], syminfo.mintick)
+    bool  disp = body / rng >= bodyRatioMin and body >= a * atrMult
+    bool  bullF = low[1] > high[3] and disp and close[2] > open[2] and (low[1] - high[3]) >= a * minGapMult
+    bool  bearF = high[1] < low[3] and disp and close[2] < open[2] and (low[3] - high[1]) >= a * minGapMult
+    [bullF, bearF, low[1], high[3], high[1], low[3]]
+
+[hfBull, hfBear, hfBullTop, hfBullBot, hfBearTop, hfBearBot] = request.security(syminfo.tickerid, htfTF, f_htfFvg(), lookahead = barmerge.lookahead_off)
 
 // -- Phase 10 - Sessions / Kill Zones
 inAsia   = sessOn and not na(time(timeframe.period, asiaSess, sessTz))
@@ -604,6 +741,53 @@ if judasBear
     amdBias  := "BEAR"
 if inDist and (amdPhase == "MANIP" or amdPhase == "DISTRIB")
     amdPhase := "DISTRIB"
+
+// -- Phase 35 - Regime (three independent measures, two must agree)
+netMove    = math.abs(close - close[regimeLen])
+pathSum    = math.sum(math.abs(close - close[1]), regimeLen)
+efficiency = netMove / math.max(pathSum, syminfo.mintick)
+rngNow     = ta.highest(high, regimeLen) - ta.lowest(low, regimeLen)
+rngAvg     = ta.sma(rngNow, regimeLen)
+squeeze    = rngNow < rngAvg * 0.7
+
+f_structConsistent() =>
+    int n = array.size(swings)
+    bool ok = false
+    if n >= 4
+        int bull = 0
+        int bear = 0
+        for i = n - 4 to n - 1
+            Swing sw = array.get(swings, i)
+            bull += sw.label == "HH" or sw.label == "HL" ? 1 : 0
+            bear += sw.label == "LL" or sw.label == "LH" ? 1 : 0
+        ok := bull >= 3 or bear >= 3
+    ok
+
+structOk   = f_structConsistent()
+trendVotes = (efficiency > effTrend ? 1 : 0) + (not squeeze ? 1 : 0) + (structOk ? 1 : 0)
+chopVotes  = (efficiency < effChop ? 1 : 0) + (squeeze ? 1 : 0) + (not structOk ? 1 : 0)
+regime     = not regimeOn ? "TREND" : trendVotes >= 2 ? "TREND" : chopVotes >= 2 ? "CHOP" : "RANGE"
+inChop     = regime == "CHOP"
+inRange    = regime == "RANGE"
+
+// -- Phase 36 - ADR + daily range exhaustion
+adrVal = ta.sma(math.max(pdhRaw - pdlRaw, syminfo.mintick), adrLen)
+if newDay
+    todayHigh := high
+    todayLow  := low
+else
+    todayHigh := na(todayHigh) ? high : math.max(todayHigh, high)
+    todayLow  := na(todayLow)  ? low  : math.min(todayLow,  low)
+adrUsed  = not na(adrVal) and not na(todayHigh) and not na(todayLow) ? (todayHigh - todayLow) / math.max(adrVal, syminfo.mintick) : na
+adrSpent = adrOn and not na(adrUsed) and adrUsed > adrCap
+
+// -- Phase 37 - Midnight Open / True Day Open / Weekly Open
+inMoWin  = not na(time(timeframe.period, moSess, sessTz))
+inTdoWin = not na(time(timeframe.period, tdoSess, sessTz))
+if inMoWin and not inMoWin[1]
+    midnightOpen := open
+if inTdoWin and not inTdoWin[1]
+    trueDayOpen := open
 
 // === 05B - TIER B MODULES - TRENDLINE HELPERS (Phase 17 / 18) ==============
 f_tlPriceAt(Trendline t, int bi) =>
@@ -703,10 +887,10 @@ f_tlPrune() =>
     true
 
 // === 06 - LAYER 2 - EVENTS =================================================
-confirmed = barstate.isconfirmed
+confirmed = intrabar ? true : barstate.isconfirmed
 
 // -- Phase 4 - Displacement
-isDisp     = bodyRatio >= bodyRatioMin and bodySize >= atrVal * atrMult
+isDisp     = bodyRatio >= bodyRatioMin and bodySize >= atrVal * atrMultEff
 isBullDisp = isDisp and close > open
 isBearDisp = isDisp and close < open
 
@@ -861,6 +1045,7 @@ bearSMT  = smtReady and (smtInv ? (high >= myHighN and cLow > coLowN) : (high >=
 f_zonePriority(string kind) =>
     int r = switch kind
         "UNICORN" => 7
+        "HTF_FVG" => 6
         "FVG"     => 6
         "OB"      => 5
         "BPR"     => 5
@@ -942,6 +1127,32 @@ if confirmed and obOn and isBearDisp and mssDn
         if fresh and obTop > obBot and not f_zoneExists("OB", "BEAR", obTop, obBot)
             f_pushZone("OB", "BEAR", obTop, obBot)
             newBearZone := true
+
+// -- Phase 39 - project the HTF POI onto this chart (same zones array, isHTF flag)
+if confirmed and htfPoiOn
+    if hfBull and not hfBull[1] and not na(hfBullTop) and hfBullTop > hfBullBot and not f_coveredByBetter("HTF_FVG", hfBullTop, hfBullBot)
+        Zone hz = f_pushZone("HTF_FVG", "BULL", hfBullTop, hfBullBot)
+        hz.isHTF := true
+        newBullZone := true
+    if hfBear and not hfBear[1] and not na(hfBearTop) and hfBearTop > hfBearBot and not f_coveredByBetter("HTF_FVG", hfBearTop, hfBearBot)
+        Zone hz2 = f_pushZone("HTF_FVG", "BEAR", hfBearTop, hfBearBot)
+        hz2.isHTF := true
+        newBearZone := true
+    // HTF zone cap
+    int nHtf = 0
+    if array.size(zones) > 0
+        for i = array.size(zones) - 1 to 0
+            Zone z = array.get(zones, i)
+            if z.isHTF
+                nHtf += 1
+                if nHtf > htfPoiCap
+                    if not na(z.drawing)
+                        box.delete(z.drawing)
+                        z.drawing := na
+                    if not na(z.ceLine)
+                        line.delete(z.ceLine)
+                        z.ceLine := na
+                    array.remove(zones, i)
 
 // -- Phase 22 - Trap + Turtle Soup (TIER B) - feeds the SAME sweep door
 if not na(lastSwingHigh) and close > lastSwingHigh
@@ -1041,6 +1252,21 @@ if confirmed and voidOn and voidRun
             if not na(og.ceLine)
                 line.delete(og.ceLine)
 
+// -- Phase 38 - Volume Imbalance (body gap with wick overlap) - refinement only, never main POI
+bullVI = viOn and open > close[1] and low <= high[1] and (open - close[1]) >= atrVal * viMin
+bearVI = viOn and open < close[1] and high >= low[1] and (close[1] - open) >= atrVal * viMin
+
+if confirmed and bullVI
+    array.push(gaps, Gap.new(kind = "VI", top = open, bottom = close[1], ce = (open + close[1]) / 2, createdBar = bar_index))
+if confirmed and bearVI
+    array.push(gaps, Gap.new(kind = "VI", top = close[1], bottom = open, ce = (open + close[1]) / 2, createdBar = bar_index))
+if array.size(gaps) > 30
+    Gap ogv = array.shift(gaps)
+    if not na(ogv.drawing)
+        box.delete(ogv.drawing)
+    if not na(ogv.ceLine)
+        line.delete(ogv.ceLine)
+
 // -- gap lifecycle (Phase 24 / 25)
 if confirmed and array.size(gaps) > 0
     for i = array.size(gaps) - 1 to 0
@@ -1099,7 +1325,16 @@ f_reset(Setup s) =>
     s.poiBar        := 0
     s.entryPrice    := 0.0
     s.slPrice       := 0.0
+    s.slInit        := 0.0
     s.tp1           := 0.0
+    s.tp2           := 0.0
+    s.tp3           := 0.0
+    s.tp1Hit        := false
+    s.tp2Hit        := false
+    s.tp3Hit        := false
+    s.beActive      := false
+    s.posSize       := 0.0
+    s.exitReason    := ""
     s.rr            := 0.0
     s.score         := 0
     s.entryBar      := 0
@@ -1232,6 +1467,8 @@ f_scoreV2(Setup st, string dir) =>
     pen -= amdOn and amdPhase == "MANIP" and amdBias == (isLong ? "BEAR" : "BULL") ? 2 : 0
     pen -= not na(st.poi) and st.poi.touchCount >= 2 ? 1 : 0
     pen -= (isLong ? inPremium : inDiscount) ? 2 : 0
+    pen -= regimeOn and inChop ? 3 : 0
+    pen -= adrSpent and (isLong ? htfBias == "BULL" : htfBias == "BEAR") ? 2 : 0
     st.scoreCtx  := ctx
     st.scoreLiq  := liq
     st.scoreStr  := stc
@@ -1248,6 +1485,82 @@ f_scoreFinal(Setup st, string dir) =>
 
 f_scoreThreshold() =>
     scoreModel == "v2" ? minScoreV2 : minScore
+
+// -- Phase 35 / 36 - regime + exhaustion gates (block only, never emit)
+f_regimeOk(string dir, float entry) =>
+    bool ok = true
+    if regimeOn
+        if inChop and chopBlock
+            ok := false
+        if inRange and rangeEdge and rangeOk
+            float third = rangeSpan / 3.0
+            ok := dir == "LONG" ? entry <= rangeLow + third : entry >= rangeHigh - third
+    ok
+
+f_adrOk(string dir) =>
+    bool cont = dir == "LONG" ? htfBias == "BULL" : htfBias == "BEAR"
+    not (adrSpent and adrBlockCont and cont)
+
+// -- Phase 41 - position size (approximate - broker maths can differ)
+f_posSize(float entry, float sl) =>
+    float sz = 0.0
+    if sizeOn
+        float riskCash = acctSize * riskPct / 100.0
+        float slDist   = math.abs(entry - sl)
+        float pv       = math.max(syminfo.pointvalue, 0.000001)
+        sz := riskCash / math.max(slDist * pv, 0.000001)
+    sz
+
+f_sizeUnit() =>
+    string u = syminfo.type == "forex" ? " lot" : syminfo.type == "crypto" ? " " + syminfo.basecurrency : " contracts"
+    u
+
+// -- Phase 42 - news blackout (Pine has no news feed - times are typed by hand)
+f_newsBlackout() =>
+    bool b = false
+    if newsOn
+        int nowMin = hour(time, sessTz) * 60 + minute(time, sessTz)
+        array<string> ts = str.split(newsTimes, ",")
+        if array.size(ts) > 0
+            for i = 0 to array.size(ts) - 1
+                float v = str.tonumber(array.get(ts, i))
+                if not na(v)
+                    float hh   = math.floor(v / 100)
+                    float mm   = v - hh * 100
+                    float tMin = hh * 60 + mm
+                    if math.abs(nowMin - tMin) <= newsPad
+                        b := true
+    b
+
+inBlackout = f_newsBlackout()
+sessionEnd = inNy[1] and not inNy
+
+// -- Phase 40 - TP ladder
+f_tpLadder(string dir, float entry, float sl, float tpLiq) =>
+    float risk = math.max(math.abs(entry - sl), syminfo.mintick)
+    float t1 = 0.0
+    float t2 = 0.0
+    float t3 = 0.0
+    if dir == "LONG"
+        t1 := tpMode == "R-based" or na(tpLiq) ? entry + risk * tp1R : tpLiq
+        float n2 = f_nextLiqAbove(t1)
+        t2 := tpMode == "R-based" or na(n2) ? entry + risk * tp2R : n2
+        float n3 = f_nextLiqAbove(t2)
+        t3 := tpMode == "R-based" or na(n3) ? entry + risk * tp3R : n3
+    else
+        t1 := tpMode == "R-based" or na(tpLiq) ? entry - risk * tp1R : tpLiq
+        float n2 = f_nextLiqBelow(t1)
+        t2 := tpMode == "R-based" or na(n2) ? entry - risk * tp2R : n2
+        float n3 = f_nextLiqBelow(t2)
+        t3 := tpMode == "R-based" or na(n3) ? entry - risk * tp3R : n3
+    // TP2 can never sit behind TP1, TP3 never behind TP2
+    if dir == "LONG"
+        t2 := math.max(t2, t1 + risk * 0.25)
+        t3 := math.max(t3, t2 + risk * 0.25)
+    else
+        t2 := math.min(t2, t1 - risk * 0.25)
+        t3 := math.min(t3, t2 - risk * 0.25)
+    [t1, t2, t3]
 
 ctxLongOk  = (not requireHtf or htfBias == "BULL") and (not requirePd or inDiscount)
 ctxShortOk = (not requireHtf or htfBias == "BEAR") and (not requirePd or inPremium)
@@ -1323,10 +1636,16 @@ if engineOn and confirmed
             int   scL     = f_scoreFinal(activeLong, "LONG")
             bool  kzOkL   = not killZoneReq or inKz
             bool  sbOkL   = not sbOnly or inSB
-            if reachL and sbOkL and rrL >= minRR and scL >= f_scoreThreshold() and kzOkL and entryL > slL
+            bool  regOkL  = f_regimeOk("LONG", entryL) and f_adrOk("LONG") and not inBlackout
+            if reachL and sbOkL and regOkL and rrL >= minRREff and scL >= f_scoreThreshold() and kzOkL and entryL > slL
                 activeLong.entryPrice := entryL
                 activeLong.slPrice    := slL
-                activeLong.tp1        := tpL
+                activeLong.slInit     := slL
+                [l1, l2, l3] = f_tpLadder("LONG", entryL, slL, tpLiqL)
+                activeLong.tp1        := tmOn ? l1 : tpL
+                activeLong.tp2        := l2
+                activeLong.tp3        := l3
+                activeLong.posSize    := f_posSize(entryL, slL)
                 activeLong.rr         := rrL
                 activeLong.score      := scL
                 activeLong.state      := "ENTRY_TRIGGERED"
@@ -1334,8 +1653,33 @@ if engineOn and confirmed
                 activeLong.dolTarget  := na(dolTarget) ? 0.0 : dolTarget
                 longTrigger           := true
     else if activeLong.state == "TRADE_ACTIVE"
-        if low <= activeLong.slPrice or high >= activeLong.tp1 or bar_index - activeLong.entryBar > tradeTimeout
-            activeLong.state := "INVALIDATED"
+        if not tmOn
+            if low <= activeLong.slPrice or high >= activeLong.tp1 or bar_index - activeLong.entryBar > tradeTimeout
+                activeLong.exitReason := low <= activeLong.slPrice ? "SL" : high >= activeLong.tp1 ? "TP1" : "TIME"
+                activeLong.state := "INVALIDATED"
+        else
+            // SL first - same bar SL and TP counts as SL (conservative)
+            if low <= activeLong.slPrice
+                activeLong.exitReason := activeLong.beActive ? "BE" : "SL"
+                activeLong.state := "INVALIDATED"
+            else
+                if not activeLong.tp1Hit and high >= activeLong.tp1
+                    activeLong.tp1Hit := true
+                    if beOnTP1
+                        activeLong.slPrice := activeLong.entryPrice
+                        activeLong.beActive := true
+                if not activeLong.tp2Hit and high >= activeLong.tp2
+                    activeLong.tp2Hit := true
+                if not activeLong.tp3Hit and high >= activeLong.tp3
+                    activeLong.tp3Hit := true
+                    activeLong.exitReason := "TP3"
+                    activeLong.state := "INVALIDATED"
+                if trailOn and newSwingLow and not na(lastSwingLow)
+                    float newSl = lastSwingLow - atrVal * trailBuf
+                    activeLong.slPrice := math.max(activeLong.slPrice, newSl)
+                if activeLong.state == "TRADE_ACTIVE" and (bar_index - activeLong.entryBar > tradeTimeout or (eodFlat and sessionEnd))
+                    activeLong.exitReason := eodFlat and sessionEnd ? "EOD" : "TIME"
+                    activeLong.state := "INVALIDATED"
 
 // ---------------- SHORT ----------------
 if engineOn and confirmed
@@ -1392,10 +1736,16 @@ if engineOn and confirmed
             int   scS    = f_scoreFinal(activeShort, "SHORT")
             bool  kzOkS  = not killZoneReq or inKz
             bool  sbOkS  = not sbOnly or inSB
-            if reachS and sbOkS and rrS >= minRR and scS >= f_scoreThreshold() and kzOkS and slS > entryS
+            bool  regOkS = f_regimeOk("SHORT", entryS) and f_adrOk("SHORT") and not inBlackout
+            if reachS and sbOkS and regOkS and rrS >= minRREff and scS >= f_scoreThreshold() and kzOkS and slS > entryS
                 activeShort.entryPrice := entryS
                 activeShort.slPrice    := slS
-                activeShort.tp1        := tpS
+                activeShort.slInit     := slS
+                [s1, s2, s3] = f_tpLadder("SHORT", entryS, slS, tpLiqS)
+                activeShort.tp1        := tmOn ? s1 : tpS
+                activeShort.tp2        := s2
+                activeShort.tp3        := s3
+                activeShort.posSize    := f_posSize(entryS, slS)
                 activeShort.rr         := rrS
                 activeShort.score      := scS
                 activeShort.state      := "ENTRY_TRIGGERED"
@@ -1403,8 +1753,32 @@ if engineOn and confirmed
                 activeShort.dolTarget  := na(dolTarget) ? 0.0 : dolTarget
                 shortTrigger           := true
     else if activeShort.state == "TRADE_ACTIVE"
-        if high >= activeShort.slPrice or low <= activeShort.tp1 or bar_index - activeShort.entryBar > tradeTimeout
-            activeShort.state := "INVALIDATED"
+        if not tmOn
+            if high >= activeShort.slPrice or low <= activeShort.tp1 or bar_index - activeShort.entryBar > tradeTimeout
+                activeShort.exitReason := high >= activeShort.slPrice ? "SL" : low <= activeShort.tp1 ? "TP1" : "TIME"
+                activeShort.state := "INVALIDATED"
+        else
+            if high >= activeShort.slPrice
+                activeShort.exitReason := activeShort.beActive ? "BE" : "SL"
+                activeShort.state := "INVALIDATED"
+            else
+                if not activeShort.tp1Hit and low <= activeShort.tp1
+                    activeShort.tp1Hit := true
+                    if beOnTP1
+                        activeShort.slPrice := activeShort.entryPrice
+                        activeShort.beActive := true
+                if not activeShort.tp2Hit and low <= activeShort.tp2
+                    activeShort.tp2Hit := true
+                if not activeShort.tp3Hit and low <= activeShort.tp3
+                    activeShort.tp3Hit := true
+                    activeShort.exitReason := "TP3"
+                    activeShort.state := "INVALIDATED"
+                if trailOn and newSwingHigh and not na(lastSwingHigh)
+                    float newSl = lastSwingHigh + atrVal * trailBuf
+                    activeShort.slPrice := math.min(activeShort.slPrice, newSl)
+                if activeShort.state == "TRADE_ACTIVE" and (bar_index - activeShort.entryBar > tradeTimeout or (eodFlat and sessionEnd))
+                    activeShort.exitReason := eodFlat and sessionEnd ? "EOD" : "TIME"
+                    activeShort.state := "INVALIDATED"
 
 // -- same bar LONG + SHORT -> reject both
 if longTrigger and shortTrigger
@@ -1445,11 +1819,32 @@ if newDay
     todayLong  := 0
     todayShort := 0
 
+// -- Phase 44 - close a trade and book the result (SL wins ties - conservative)
+f_bookTrade(Setup st) =>
+    if st.state == "INVALIDATED" and st.entryBar > 0 and st.exitReason != ""
+        float exitPx = st.exitReason == "SL" ? st.slPrice : st.exitReason == "BE" ? st.entryPrice : st.exitReason == "TP1" ? st.tp1 : st.exitReason == "TP3" ? st.tp3 : close
+        float den    = math.max(math.abs(st.entryPrice - st.slInit), syminfo.mintick)
+        float r      = (st.direction == "LONG" ? exitPx - st.entryPrice : st.entryPrice - exitPx) / den
+        nTrades += 1
+        sumR    += r
+        sumRR   += st.rr
+        bestR   := nTrades == 1 ? r : math.max(bestR, r)
+        worstR  := nTrades == 1 ? r : math.min(worstR, r)
+        if r > 0
+            nWins   += 1
+            lossRun := 0
+        else
+            lossRun += 1
+            maxLossRun := math.max(maxLossRun, lossRun)
+    true
+
 // === 08 - CLEANUP ==========================================================
 if confirmed
     if activeLong.state == "INVALIDATED"
+        f_bookTrade(activeLong)
         f_reset(activeLong)
     if activeShort.state == "INVALIDATED"
+        f_bookTrade(activeShort)
         f_reset(activeShort)
 
 if confirmed and array.size(zones) > 0
@@ -1485,9 +1880,9 @@ densFull = densityMode == "Full"
 densNorm = densityMode == "Full" or densityMode == "Normal"
 
 if showSwings and densNorm and not na(ph)
-    label.new(bar_index - swingLen, high[swingLen], hiLbl, style = label.style_label_down, color = color.new(colBear, 20), textcolor = color.white, size = size.tiny)
+    label.new(bar_index - swingLenEff, high[swingLenEff], hiLbl, style = label.style_label_down, color = color.new(colBear, 20), textcolor = color.white, size = size.tiny)
 if showSwings and densNorm and not na(pl)
-    label.new(bar_index - swingLen, low[swingLen], loLbl, style = label.style_label_up, color = color.new(colBull, 20), textcolor = color.white, size = size.tiny)
+    label.new(bar_index - swingLenEff, low[swingLenEff], loLbl, style = label.style_label_up, color = color.new(colBull, 20), textcolor = color.white, size = size.tiny)
 
 // -- Phase 3 - BOS / CHoCH
 if showBOS and densNorm and (bosUp or chochUp) and not na(lastSwingHigh) and not na(lastSwingHighBar)
@@ -1521,9 +1916,9 @@ if showZones and array.size(zones) > 0
     for i = 0 to array.size(zones) - 1
         Zone z = array.get(zones, i)
         bool isPoiNow = (not na(activeLong.poi) and z.id == activeLong.poi.id) or (not na(activeShort.poi) and z.id == activeShort.poi.id)
-        bool kindOn = z.kind == "FVG" ? fvgOn : z.kind == "OB" ? obOn : z.kind == "SD" ? sdOn : z.kind == "MB" ? mbOn : z.kind == "RB" ? rbOn : z.kind == "BPR" ? bprOn : z.kind == "UNICORN" ? uniOn : bbOn
+        bool kindOn = z.kind == "FVG" ? fvgOn : z.kind == "OB" ? obOn : z.kind == "SD" ? sdOn : z.kind == "MB" ? mbOn : z.kind == "RB" ? rbOn : z.kind == "BPR" ? bprOn : z.kind == "UNICORN" ? uniOn : z.kind == "HTF_FVG" ? htfPoiOn : bbOn
         bool vis = kindOn and (densNorm or isPoiNow)
-        color zc = z.kind == "FVG" ? colFvg : z.kind == "OB" ? colOb : z.kind == "SD" ? colSd : (z.kind == "MB" or z.kind == "RB") ? colRb : z.kind == "BPR" ? colBpr : z.kind == "UNICORN" ? colUni : colBb
+        color zc = z.kind == "FVG" ? colFvg : z.kind == "OB" ? colOb : z.kind == "SD" ? colSd : (z.kind == "MB" or z.kind == "RB") ? colRb : z.kind == "BPR" ? colBpr : z.kind == "UNICORN" ? colUni : z.kind == "HTF_FVG" ? colHtfPoi : colBb
         if vis and na(z.drawing)
             z.drawing := box.new(z.createdBar, z.top, z.createdBar + zoneExtend, z.bottom, border_color = color.new(zc, 40), bgcolor = zc, text = f_zoneLabel(z.kind, z.direction), text_size = size.tiny, text_color = color.new(color.gray, 20), text_halign = text.align_left)
             if showCE
@@ -1564,12 +1959,12 @@ bgcolor(shadeSess and inNy     ? color.new(color.green,  93) : na, title = "New 
 
 // -- Phase 12 / 14 - signal visuals
 if longSignal
-    label.new(bar_index, low, "LONG\nE " + str.tostring(activeLong.entryPrice, format.mintick) + "\nSL " + str.tostring(activeLong.slPrice, format.mintick) + "\nTP " + str.tostring(activeLong.tp1, format.mintick) + "\nRR " + str.tostring(activeLong.rr, "#.##") + " | S" + str.tostring(activeLong.score), style = label.style_label_up, color = colBull, textcolor = color.white, size = size.small)
+    label.new(bar_index, low, (intrabar and not barstate.isconfirmed ? "LIVE " : "") + "LONG\nE " + str.tostring(activeLong.entryPrice, format.mintick) + "\nSL " + str.tostring(activeLong.slPrice, format.mintick) + "\nTP " + str.tostring(activeLong.tp1, format.mintick) + "\nRR " + str.tostring(activeLong.rr, "#.##") + " | S" + str.tostring(activeLong.score) + (sizeOn ? "\nSize " + str.tostring(activeLong.posSize, "#.##") + f_sizeUnit() : ""), style = label.style_label_up, color = colBull, textcolor = color.white, size = size.small)
     line.new(bar_index, activeLong.slPrice, bar_index + 20, activeLong.slPrice, color = colBear, style = line.style_solid, width = 1)
     line.new(bar_index, activeLong.tp1,     bar_index + 20, activeLong.tp1,     color = colBull, style = line.style_solid, width = 1)
 
 if shortSignal
-    label.new(bar_index, high, "SHORT\nE " + str.tostring(activeShort.entryPrice, format.mintick) + "\nSL " + str.tostring(activeShort.slPrice, format.mintick) + "\nTP " + str.tostring(activeShort.tp1, format.mintick) + "\nRR " + str.tostring(activeShort.rr, "#.##") + " | S" + str.tostring(activeShort.score), style = label.style_label_down, color = colBear, textcolor = color.white, size = size.small)
+    label.new(bar_index, high, (intrabar and not barstate.isconfirmed ? "LIVE " : "") + "SHORT\nE " + str.tostring(activeShort.entryPrice, format.mintick) + "\nSL " + str.tostring(activeShort.slPrice, format.mintick) + "\nTP " + str.tostring(activeShort.tp1, format.mintick) + "\nRR " + str.tostring(activeShort.rr, "#.##") + " | S" + str.tostring(activeShort.score) + (sizeOn ? "\nSize " + str.tostring(activeShort.posSize, "#.##") + f_sizeUnit() : ""), style = label.style_label_down, color = colBear, textcolor = color.white, size = size.small)
     line.new(bar_index, activeShort.slPrice, bar_index + 20, activeShort.slPrice, color = colBear, style = line.style_solid, width = 1)
     line.new(bar_index, activeShort.tp1,     bar_index + 20, activeShort.tp1,     color = colBull, style = line.style_solid, width = 1)
 
@@ -1578,7 +1973,7 @@ if tlOn and tlShow and densNorm and array.size(trendlines) > 0
     for i = 0 to array.size(trendlines) - 1
         Trendline t = array.get(trendlines, i)
         color tc = t.isSupport ? colBull : colBear
-        int   tp = math.max(0, math.min(80, 80 - math.round(t.strength * 0.6)))
+        int   tp = int(math.max(0, math.min(80, 80 - t.strength * 0.6)))
         if na(t.drawing)
             t.drawing := line.new(t.x1, t.y1, bar_index, f_tlPriceAt(t, bar_index), color = color.new(tc, tp), width = 1)
         else
@@ -1695,21 +2090,62 @@ if sdevOn and barstate.islast
                     float lvl = act.direction == "LONG" ? act.sweepLevel + unit * m : act.sweepLevel - unit * m
                     array.push(sdevLines, line.new(bar_index - 5, lvl, bar_index + 12, lvl, color = color.new(color.gray, 40), style = line.style_dotted))
 
+// -- Phase 35 - chop shading
+bgcolor(regimeOn and regimeShade and inChop ? color.new(color.gray, 92) : na, title = "CHOP")
+
+// -- Phase 37 - open lines (stop at the end of their own day / week)
+if barstate.islast
+    if moOn and not na(midnightOpen)
+        if na(moLn)
+            moLn := line.new(bar_index - 40, midnightOpen, bar_index + 8, midnightOpen, color = color.new(color.fuchsia, 20), style = line.style_solid, width = 1)
+        else
+            line.set_xy1(moLn, bar_index - 40, midnightOpen)
+            line.set_xy2(moLn, bar_index + 8, midnightOpen)
+    if tdoOn and not na(trueDayOpen)
+        if na(tdoLn)
+            tdoLn := line.new(bar_index - 40, trueDayOpen, bar_index + 8, trueDayOpen, color = color.new(color.aqua, 20), style = line.style_solid, width = 1)
+        else
+            line.set_xy1(tdoLn, bar_index - 40, trueDayOpen)
+            line.set_xy2(tdoLn, bar_index + 8, trueDayOpen)
+
+// -- Phase 38 - VI boxes (only in Full density, they are tiny and many)
+if viOn and densFull and array.size(gaps) > 0
+    for i = 0 to array.size(gaps) - 1
+        Gap g = array.get(gaps, i)
+        if g.kind == "VI" and na(g.drawing) and not g.filled
+            g.drawing := box.new(g.createdBar, g.top, g.createdBar + 10, g.bottom, border_color = color.new(colVi, 60), bgcolor = colVi)
+
+// -- Phase 42 - news blackout shading
+bgcolor(newsOn and newsShade and inBlackout ? color.new(color.red, 92) : na, title = "News blackout")
+
+// -- Phase 40 - TP ladder lines for the live trade
+if tmOn and barstate.islast
+    Setup lt = na
+    if activeLong.state == "TRADE_ACTIVE"
+        lt := activeLong
+    else if activeShort.state == "TRADE_ACTIVE"
+        lt := activeShort
+    if not na(lt)
+        line.new(lt.entryBar, lt.slPrice, bar_index + 6, lt.slPrice, color = lt.beActive ? colBull : colBear, style = line.style_solid, width = 1)
+        line.new(lt.entryBar, lt.tp1, bar_index + 6, lt.tp1, color = color.new(colBull, lt.tp1Hit ? 70 : 0), style = line.style_dashed)
+        line.new(lt.entryBar, lt.tp2, bar_index + 6, lt.tp2, color = color.new(colBull, lt.tp2Hit ? 70 : 20), style = line.style_dashed)
+        line.new(lt.entryBar, lt.tp3, bar_index + 6, lt.tp3, color = color.new(colBull, lt.tp3Hit ? 70 : 40), style = line.style_dashed)
+
 // === 10 - DASHBOARD ========================================================
 dashPosition = dashPos == "Top Left" ? position.top_left : dashPos == "Bottom Left" ? position.bottom_left : position.top_right
 var table dash = table.new(position.top_right, 2, 11, border_width = 1)
 if showDash and barstate.islast
     table.set_position(dash, dashPosition)
-    table.cell(dash, 0, 0, "SMC-ICT", text_color = color.white, bgcolor = color.new(color.blue, 20), text_size = size.small)
-    table.cell(dash, 1, 0, timeframe.period + " / " + htfTF, text_color = color.white, bgcolor = color.new(color.blue, 20), text_size = size.small)
+    table.cell(dash, 0, 0, intrabar ? "SMC-ICT (LIVE)" : "SMC-ICT", text_color = intrabar ? color.yellow : color.white, bgcolor = color.new(color.blue, 20), text_size = size.small)
+    table.cell(dash, 1, 0, timeframe.period + " / " + (htfValid ? htfTF : "HTF<TF!") + " | " + presetUse, text_color = color.white, bgcolor = color.new(color.blue, 20), text_size = size.small)
     table.cell(dash, 0, 1, "HTF / Daily Bias", text_size = size.small)
     table.cell(dash, 1, 1, htfBias + " / " + dailyBias, text_color = htfBias == "BULL" ? colBull : htfBias == "BEAR" ? colBear : color.gray, text_size = size.small)
     table.cell(dash, 0, 2, "AMD / Session", text_size = size.small)
     table.cell(dash, 1, 2, amdPhase + " / " + (inNy ? "NY" : inLondon ? "LONDON" : inAsia ? "ASIA" : "-") + (inSB ? " +SB" : ""), text_size = size.small)
     table.cell(dash, 0, 3, "Trend / Model", text_size = size.small)
     table.cell(dash, 1, 3, trendDir + " / " + marketModel, text_size = size.small)
-    table.cell(dash, 0, 4, "P / D", text_size = size.small)
-    table.cell(dash, 1, 4, rangeOk ? (inDiscount ? "DISCOUNT" : "PREMIUM") : "n/a", text_size = size.small)
+    table.cell(dash, 0, 4, "P/D | Regime | ADR", text_size = size.small)
+    table.cell(dash, 1, 4, (rangeOk ? (inDiscount ? "DISC" : "PREM") : "n/a") + " | " + regime + " | " + (na(adrUsed) ? "-" : str.tostring(adrUsed * 100, "#") + "%"), text_color = inChop ? color.gray : adrSpent ? colBear : color.gray, text_size = size.small)
     table.cell(dash, 0, 5, "LONG state", text_size = size.small)
     table.cell(dash, 1, 5, activeLong.state + " (" + str.tostring(bar_index - longStateBar) + "b)", text_size = size.small)
     table.cell(dash, 0, 6, "SHORT state", text_size = size.small)
@@ -1738,12 +2174,42 @@ if showDebug and barstate.islast
     table.cell(dbg, 0, 5, "Int H / L", text_size = size.tiny)
     table.cell(dbg, 1, 5, str.tostring(intHigh, format.mintick) + " / " + str.tostring(intLow, format.mintick), text_size = size.tiny)
 
-// === 11 - ALERTS ===========================================================
-if longSignal and confirmed
-    alert("LONG " + syminfo.ticker + " | E:" + str.tostring(activeLong.entryPrice, format.mintick) + " SL:" + str.tostring(activeLong.slPrice, format.mintick) + " TP:" + str.tostring(activeLong.tp1, format.mintick) + " RR:" + str.tostring(activeLong.rr, "#.##") + " Score:" + str.tostring(activeLong.score) + " Model:" + activeLong.modelName, alert.freq_once_per_bar_close)
+f_alertMsg(Setup st, string side) =>
+    string m = ""
+    if alertFmt == "JSON"
+        m := '{"sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","side":"' + side + '","entry":' + str.tostring(st.entryPrice, format.mintick) + ',"sl":' + str.tostring(st.slPrice, format.mintick) + ',"tp1":' + str.tostring(st.tp1, format.mintick) + ',"tp2":' + str.tostring(st.tp2, format.mintick) + ',"tp3":' + str.tostring(st.tp3, format.mintick) + ',"rr":' + str.tostring(st.rr, "#.##") + ',"score":' + str.tostring(st.score) + ',"model":"' + st.modelName + '","size":' + str.tostring(st.posSize, "#.##") + ',"time":' + str.tostring(time) + '}'
+    else
+        m := side + " " + syminfo.ticker + " | E:" + str.tostring(st.entryPrice, format.mintick) + " SL:" + str.tostring(st.slPrice, format.mintick) + " TP:" + str.tostring(st.tp1, format.mintick) + " RR:" + str.tostring(st.rr, "#.##") + " Score:" + str.tostring(st.score) + " Model:" + st.modelName + (sizeOn ? " Size:" + str.tostring(st.posSize, "#.##") + f_sizeUnit() : "")
+    m
 
-if shortSignal and confirmed
-    alert("SHORT " + syminfo.ticker + " | E:" + str.tostring(activeShort.entryPrice, format.mintick) + " SL:" + str.tostring(activeShort.slPrice, format.mintick) + " TP:" + str.tostring(activeShort.tp1, format.mintick) + " RR:" + str.tostring(activeShort.rr, "#.##") + " Score:" + str.tostring(activeShort.score) + " Model:" + activeShort.modelName, alert.freq_once_per_bar_close)
+var table stats = table.new(position.bottom_left, 2, 8, border_width = 1)
+if statsOn and barstate.islast
+    float winRate = nTrades > 0 ? nWins / nTrades * 100.0 : 0.0
+    float expect  = nTrades > 0 ? sumR / nTrades : 0.0
+    float avgRR   = nTrades > 0 ? sumRR / nTrades : 0.0
+    table.cell(stats, 0, 0, "STATS (approx)", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.tiny)
+    table.cell(stats, 1, 0, str.tostring(nTrades) + " trades", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.tiny)
+    table.cell(stats, 0, 1, "Win rate", text_size = size.tiny)
+    table.cell(stats, 1, 1, str.tostring(winRate, "#.#") + "%", text_size = size.tiny)
+    table.cell(stats, 0, 2, "Total R", text_size = size.tiny)
+    table.cell(stats, 1, 2, str.tostring(sumR, "#.##") + "R", text_color = sumR >= 0 ? colBull : colBear, text_size = size.tiny)
+    table.cell(stats, 0, 3, "Expectancy", text_size = size.tiny)
+    table.cell(stats, 1, 3, str.tostring(expect, "#.##") + "R / trade", text_size = size.tiny)
+    table.cell(stats, 0, 4, "Avg planned RR", text_size = size.tiny)
+    table.cell(stats, 1, 4, str.tostring(avgRR, "#.##"), text_size = size.tiny)
+    table.cell(stats, 0, 5, "Best / Worst", text_size = size.tiny)
+    table.cell(stats, 1, 5, str.tostring(bestR, "#.##") + "R / " + str.tostring(worstR, "#.##") + "R", text_size = size.tiny)
+    table.cell(stats, 0, 6, "Max consec. loss", text_size = size.tiny)
+    table.cell(stats, 1, 6, str.tostring(maxLossRun), text_size = size.tiny)
+    table.cell(stats, 0, 7, "No spread / slippage / commission.", text_size = size.tiny, text_color = color.gray)
+    table.cell(stats, 1, 7, "Same-bar TP+SL counted as SL.", text_size = size.tiny, text_color = color.gray)
+
+// === 11 - ALERTS ===========================================================
+if longSignal and barstate.isconfirmed
+    alert(f_alertMsg(activeLong, "LONG"), alert.freq_once_per_bar_close)
+
+if shortSignal and barstate.isconfirmed
+    alert(f_alertMsg(activeShort, "SHORT"), alert.freq_once_per_bar_close)
 
 if confirmed and (bosUp or bosDn)
     alert("BOS " + (bosUp ? "UP" : "DOWN") + " " + syminfo.ticker, alert.freq_once_per_bar_close)

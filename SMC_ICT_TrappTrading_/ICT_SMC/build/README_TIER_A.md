@@ -121,3 +121,56 @@ Tier B-র প্রতিটা module-এর toggle **default `false`** হব
 | 22 | Weekend gap + NWOG | gap আঁকে, swing ভাঙে না |
 
 **Golden check:** সব on করলে signal সংখ্যা **কমবে**, বাড়বে না। বাড়লে কোনো module signal emit করছে — বাগ।
+
+---
+
+# TIER C (Phase 35-48) — added
+
+| Phase | Input group | কী করে |
+|---|---|---|
+| 35 Regime filter | `25 - Regime (C)` | তিনটা স্বাধীন মাপকাঠি (efficiency, range squeeze, structure consistency) — অন্তত **দুইটা** একমত হলে regime। CHOP = score −3 + `chopBlock` on থাকলে emit বন্ধ। RANGE = শুধু range-এর প্রান্তের setup |
+| 36 ADR | `26 - ADR (C)` | ADR = previous-day range-এর SMA (`[1]`+`lookahead_off`)। আজকের ব্যবহৃত % dashboard-এ; exhausted হলে **continuation**-এ −2, reversal-এ কিছু নয় |
+| 37 Open lines | `27 - Open Lines (C)` | Midnight Open / True Day Open (08:30) / Weekly Open — সব `open` capture, `request.security` নয় |
+| 38 Volume Imbalance | `28 - VI (C)` | body gap + wick overlap, `< ATR × 0.05` বাদ। শুধু density `Full`-এ আঁকে (নাহলে চার্ট ভরে যায়) |
+| 39 HTF POI | `29 - HTF POI (C)` | HTF FVG শুধু **বন্ধ** HTF candle থেকে (`[1]`/`[2]`/`[3]`), একই `zones` array-তে `isHTF = true`, আলাদা cap 20 |
+| 40 Trade management | `30 - Trade Mgmt (C)` | TP1/TP2/TP3 (Liquidity বা R-based), TP1-এ BE, structure trail (কখনো পেছনে যায় না), EOD flat |
+| 41 Position size | `31 - Position Size (C)` | account × risk% ÷ (SL দূরত্ব × pointvalue); unit `syminfo.type` অনুযায়ী (lot / contracts / coin) |
+| 42 Time exit / News | `32 - Exits & News (C)` | max hold, EOD flat, news blackout (হাতে লেখা সময় — Pine-এ news feed নেই)। Blackout শুধু **নতুন entry** আটকায়, চলমান trade-এর BE/trail চলে |
+| 43 Instrument preset | `33 - Preset (C)` | Auto (`syminfo.type` + XAU detect) / Forex / Gold / Index / Crypto / **Manual (default)** — preset শুধু effective মান বদলায় |
+| 44 Backtest stats | `34 - Stats (C)` | trades / win% / total R / expectancy / avg RR / best-worst / max consecutive loss। একই bar-এ TP+SL = **SL** ধরা হয় |
+| 45 Webhook JSON | `35 - Alert Format (C)` | `Text` বা `JSON` — JSON সরাসরি string দিয়ে বানানো, `{{...}}` placeholder-এর উপর নির্ভর করে না |
+| 46 Intrabar mode | `8 - Entry Engine` | `intrabar` default off। On করলে label-এ `LIVE` লেখা + dashboard হলুদ; **alert সবসময় bar close-এ** |
+| 47 Defensive coding | `01C` section | `runtime.error` চারটা পরস্পরবিরোধী setting-এ; HTF < chart TF হলে module নিঃশব্দে skip (`HTF<TF!` dashboard-এ); সব division ও array access guarded |
+| 48 Publish checklist | নিচে | — |
+
+## Tier C-তে ইচ্ছাকৃত বিচ্যুতি
+
+- **Preset default = `Manual`** (plan-এ `Auto`)। Auto গোল্ড/ক্রিপ্টোতে swingLen ও ATR mult বদলে দিত, তাতে "সব off = Tier A হুবহু" শর্ত ভাঙত। `Auto` হাতে বেছে নেওয়া যায়।
+- সব Tier C toggle default **off** (stats table, VI, regime, ADR, trade management, size, news — সব)। Default setting = Tier A behavior.
+
+## Phase 48 — Publish checklist
+
+**Code**
+- [x] প্রতিটা section `// === NN - NAME ===` header
+- [x] Section ক্রম: inputs → preset → validation → types → state → helpers → L1 → L2 → L3 → cleanup → drawing → dashboard → alerts
+- [ ] প্রতিটা input-এ `tooltip` — **এখনো বাকি** (publish-এর আগে যোগ করতে হবে)
+- [x] Default setting-এ চার্ট পরিষ্কার (Tier B/C সব off)
+
+**Correctness**
+- [ ] Phase 15 repaint audit ৪টা (TradingView-তে চালাতে হবে)
+- [ ] Test 1–22
+- [ ] ৩ instrument × ৩ timeframe = ৯ combination
+- [ ] সব module on → load < ৫ সেকেন্ড
+
+**Publish**
+- [ ] Description: এটা **indicator, strategy নয়**
+- [ ] সীমাবদ্ধতা: stats approximation (spread/slippage/commission নেই), position size আনুমানিক, intrabar mode repaint করতে পারে, news time হাতে দিতে হয়
+- [ ] কোনো লাভের প্রতিশ্রুতি নেই
+- [ ] পরিষ্কার চার্টের screenshot
+- [ ] ৩ লাইনের quick-start
+
+## Quick start (৩ লাইন)
+
+1. Default-এই চালাও — Tier A engine, ১৫M chart, দিনে ০–২টা signal।
+2. Signal ০ হলে: `Require HTF Alignment` off → `Min Score` 5 → Debug table on।
+3. মান বাড়াতে: `Regime Filter` on + `chopBlock` on, তারপর `Score Model = v2`।
