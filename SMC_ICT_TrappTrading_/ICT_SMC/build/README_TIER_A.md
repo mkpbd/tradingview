@@ -153,7 +153,7 @@ Tier B-র প্রতিটা module-এর toggle **default `false`** হব
 **Code**
 - [x] প্রতিটা section `// === NN - NAME ===` header
 - [x] Section ক্রম: inputs → preset → validation → types → state → helpers → L1 → L2 → L3 → cleanup → drawing → dashboard → alerts
-- [ ] প্রতিটা input-এ `tooltip` — **এখনো বাকি** (publish-এর আগে যোগ করতে হবে)
+- [x] প্রতিটা input-এ `tooltip` (১৬৯টা input, সবগুলোতে আছে)
 - [x] Default setting-এ চার্ট পরিষ্কার (Tier B/C সব off)
 
 **Correctness**

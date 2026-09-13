@@ -44,247 +44,247 @@ var string GRP_STAT = "34 - Backtest Stats (C)"
 var string GRP_ALRT = "35 - Alert Format (C)"
 
 // -- Phase 1 - Structure --
-swingLen    = input.int(5, "Swing Length", minval = 3, maxval = 20, group = GRP_ST)
-intSwingLen = input.int(2, "Internal Swing Length", minval = 1, maxval = 5, group = GRP_ST)
-bosMode     = input.string("Close", "Break Mode", options = ["Close", "Wick"], group = GRP_ST)
-showSwings  = input.bool(true, "Show Swing Labels", group = GRP_ST)
-showBOS     = input.bool(true, "Show BOS / CHoCH", group = GRP_ST)
+swingLen    = input.int(5, "Swing Length", minval = 3, maxval = 20, tooltip = "Pivot length for major swings. A swing confirms this many bars AFTER the candle, which is exactly why the labels never repaint. Higher = fewer, bigger swings.", group = GRP_ST)
+intSwingLen = input.int(2, "Internal Swing Length", minval = 1, maxval = 5, tooltip = "Pivot length for internal (minor) structure. MSS breaks are measured against these, not the major swings.", group = GRP_ST)
+bosMode     = input.string("Close", "Break Mode", options = ["Close", "Wick"], tooltip = "Close = a break needs a candle body close beyond the level (strict, default). Wick = a touch is enough (noisy).", group = GRP_ST)
+showSwings  = input.bool(true, "Show Swing Labels", tooltip = "Draw the HH / HL / LH / LL labels. The last few bars never carry a label - that is correct, not a bug.", group = GRP_ST)
+showBOS     = input.bool(true, "Show BOS / CHoCH", tooltip = "Draw BOS (continuation) and CHoCH (first warning) markers. CHoCH alone never produces a signal.", group = GRP_ST)
 
 // -- Phase 2 - Liquidity --
-liqOn       = input.bool(true,  "Enable Liquidity Mapping", group = GRP_LIQ)
-showBslSsl  = input.bool(true,  "Show BSL / SSL", group = GRP_LIQ)
-showEq      = input.bool(true,  "Show EQH / EQL", group = GRP_LIQ)
-showPdhPdl  = input.bool(true,  "Show PDH / PDL", group = GRP_LIQ)
-showPwhPwl  = input.bool(false, "Show PWH / PWL", group = GRP_LIQ)
-eqTol       = input.float(0.1, "EQH/EQL Tolerance (ATR x)", minval = 0.02, maxval = 0.5, step = 0.01, group = GRP_LIQ)
-clusterTol  = input.float(0.3, "Cluster Tolerance (ATR x)", minval = 0.1, maxval = 1.0, step = 0.05, group = GRP_LIQ)
+liqOn       = input.bool(true,  "Enable Liquidity Mapping", tooltip = "Map where stop orders sit: swing highs / lows, equal highs / lows and previous day / week levels.", group = GRP_LIQ)
+showBslSsl  = input.bool(true,  "Show BSL / SSL", tooltip = "Draw buy-side (above swing highs) and sell-side (below swing lows) liquidity lines.", group = GRP_LIQ)
+showEq      = input.bool(true,  "Show EQH / EQL", tooltip = "Draw equal highs / lows. Two nearly identical extremes = a bigger stop pool than a single swing.", group = GRP_LIQ)
+showPdhPdl  = input.bool(true,  "Show PDH / PDL", tooltip = "Draw previous day high / low. Read from closed daily candles only, so they never move intraday.", group = GRP_LIQ)
+showPwhPwl  = input.bool(false, "Show PWH / PWL", tooltip = "Draw previous week high / low. Useful on 1H and above, clutter on small timeframes.", group = GRP_LIQ)
+eqTol       = input.float(0.1, "EQH/EQL Tolerance (ATR x)", minval = 0.02, maxval = 0.5, step = 0.01, tooltip = "How close two extremes must be to count as equal, measured in ATR. ATR-based so the same value works on EURUSD and XAUUSD.", group = GRP_LIQ)
+clusterTol  = input.float(0.3, "Cluster Tolerance (ATR x)", minval = 0.1, maxval = 1.0, step = 0.05, tooltip = "Distance in ATR within which stacked levels count as one pool. A denser pool is a stronger target.", group = GRP_LIQ)
 
 // -- Phase 4 - Displacement --
-atrLen       = input.int(14,    "ATR Length", minval = 5, maxval = 100, group = GRP_DISP)
-atrMult      = input.float(1.2, "ATR Multiplier", minval = 0.8, maxval = 3.0, step = 0.1, group = GRP_DISP)
-bodyRatioMin = input.float(0.6, "Min Body Ratio", minval = 0.4, maxval = 0.9, step = 0.05, group = GRP_DISP)
-showDisp     = input.bool(false, "Mark Displacement Candles", group = GRP_DISP)
+atrLen       = input.int(14,    "ATR Length", minval = 5, maxval = 100, tooltip = "ATR period used everywhere for normalisation (displacement size, zone size, buffers).", group = GRP_DISP)
+atrMult      = input.float(1.2, "ATR Multiplier", minval = 0.8, maxval = 3.0, step = 0.1, tooltip = "A displacement candle must be at least this many ATR long. Lower = more displacement, looser logic.", group = GRP_DISP)
+bodyRatioMin = input.float(0.6, "Min Body Ratio", minval = 0.4, maxval = 0.9, step = 0.05, tooltip = "Minimum body / range ratio for a displacement. Blocks big two-sided candles: a large doji is a fight, not aggression.", group = GRP_DISP)
+showDisp     = input.bool(false, "Mark Displacement Candles", tooltip = "Mark displacement candles with a small triangle. Useful while tuning the two thresholds above.", group = GRP_DISP)
 
 // -- Phase 6 / 7 - Zones --
-fvgOn       = input.bool(true,  "Enable FVG", group = GRP_ZONE)
-minGapMult  = input.float(0.1, "Min FVG Size (ATR x)", minval = 0.02, maxval = 1.0, step = 0.02, group = GRP_ZONE)
-obOn        = input.bool(true,  "Enable Order Block", group = GRP_ZONE)
-freshObOnly = input.bool(true,  "Fresh OB Only (untouched)", group = GRP_ZONE)
-bbOn        = input.bool(true,  "Enable Breaker / IFVG", group = GRP_ZONE)
-showZones   = input.bool(true,  "Draw Zones", group = GRP_ZONE)
-showCE      = input.bool(true,  "Draw Zone CE line", group = GRP_ZONE)
-hideDead    = input.bool(true,  "Auto-hide FILLED / INVALID zones", group = GRP_ZONE)
+fvgOn       = input.bool(true,  "Enable FVG", tooltip = "Detect Fair Value Gaps. The middle candle must be a displacement, otherwise the gap is just noise.", group = GRP_ZONE)
+minGapMult  = input.float(0.1, "Min FVG Size (ATR x)", minval = 0.02, maxval = 1.0, step = 0.02, tooltip = "Minimum FVG height in ATR. Filters out the tiny gaps that price ignores.", group = GRP_ZONE)
+obOn        = input.bool(true,  "Enable Order Block", tooltip = "Detect Order Blocks: the last opposite candle before a displacement that also broke structure.", group = GRP_ZONE)
+freshObOnly = input.bool(true,  "Fresh OB Only (untouched)", tooltip = "Only keep order blocks price has not returned to yet. The first return is the one that works.", group = GRP_ZONE)
+bbOn        = input.bool(true,  "Enable Breaker / IFVG", tooltip = "When an FVG or OB is fully broken, create the inverse zone (IFVG / Breaker) in the opposite direction.", group = GRP_ZONE)
+showZones   = input.bool(true,  "Draw Zones", tooltip = "Draw zone boxes. Turn off to keep the chart clean while still running the engine.", group = GRP_ZONE)
+showCE      = input.bool(true,  "Draw Zone CE line", tooltip = "Draw the Consequent Encroachment line: the exact midpoint of every zone.", group = GRP_ZONE)
+hideDead    = input.bool(true,  "Auto-hide FILLED / INVALID zones", tooltip = "Delete boxes once a zone is filled or invalid. Keeps the drawing count under the TradingView limit.", group = GRP_ZONE)
 
 // -- Phase 8 - Premium / Discount --
-pdOn        = input.bool(true,  "Enable Premium / Discount", group = GRP_PD)
-showPd      = input.bool(true,  "Draw Range / EQ / OTE", group = GRP_PD)
-oteLow      = input.float(0.618, "OTE Fib Low",  minval = 0.5, maxval = 0.9, step = 0.001, group = GRP_PD)
-oteHigh     = input.float(0.786, "OTE Fib High", minval = 0.5, maxval = 0.95, step = 0.001, group = GRP_PD)
+pdOn        = input.bool(true,  "Enable Premium / Discount", tooltip = "Split the dealing range into premium (upper half) and discount (lower half).", group = GRP_PD)
+showPd      = input.bool(true,  "Draw Range / EQ / OTE", tooltip = "Draw the range midpoint (EQ) and the two OTE bands.", group = GRP_PD)
+oteLow      = input.float(0.618, "OTE Fib Low",  minval = 0.5, maxval = 0.9, step = 0.001, tooltip = "Near edge of the Optimal Trade Entry band, as a fib of the range. Default 0.618.", group = GRP_PD)
+oteHigh     = input.float(0.786, "OTE Fib High", minval = 0.5, maxval = 0.95, step = 0.001, tooltip = "Far edge of the OTE band. Default 0.786. Must be larger than the OTE low.", group = GRP_PD)
 
 // -- Phase 9 - HTF --
-htfOn       = input.bool(true, "Enable HTF Context", group = GRP_HTF)
-htfAuto     = input.bool(true, "Auto-map HTF", group = GRP_HTF)
-htfManual   = input.timeframe("240", "Manual HTF", group = GRP_HTF)
+htfOn       = input.bool(true, "Enable HTF Context", tooltip = "Read the bias from a higher timeframe. Only closed HTF candles are used, so it cannot repaint.", group = GRP_HTF)
+htfAuto     = input.bool(true, "Auto-map HTF", tooltip = "Pick the HTF automatically from the chart timeframe (1m-15m, 5m-1H, 15m-4H, 1H-D).", group = GRP_HTF)
+htfManual   = input.timeframe("240", "Manual HTF", tooltip = "The HTF to read when auto-map is off. Must be higher than the chart timeframe or the module is skipped.", group = GRP_HTF)
 
 // -- Phase 10 - Sessions --
-sessOn      = input.bool(true, "Enable Sessions", group = GRP_SESS)
-sessTz      = input.string("America/New_York", "Session Timezone", group = GRP_SESS)
-asiaSess    = input.session("2000-0000", "Asia",     group = GRP_SESS)
-londonSess  = input.session("0200-0500", "London",   group = GRP_SESS)
-nySess      = input.session("0830-1100", "New York", group = GRP_SESS)
-shadeSess   = input.bool(false, "Shade Sessions", group = GRP_SESS)
-killZoneReq = input.bool(false, "Require Kill Zone for Entry", group = GRP_SESS)
+sessOn      = input.bool(true, "Enable Sessions", tooltip = "Enable session tracking. Sweeps that happen inside London / New York are the reliable ones.", group = GRP_SESS)
+sessTz      = input.string("America/New_York", "Session Timezone", tooltip = "Timezone all session inputs are interpreted in. Keep an exchange timezone - it handles DST for you.", group = GRP_SESS)
+asiaSess    = input.session("2000-0000", "Asia", tooltip = "Asia session window. Typically quiet accumulation.",     group = GRP_SESS)
+londonSess  = input.session("0200-0500", "London", tooltip = "London session window. Often the first sweep of the Asian range.",   group = GRP_SESS)
+nySess      = input.session("0830-1100", "New York", tooltip = "New York session window. Also drives the EOD-flat exit.", group = GRP_SESS)
+shadeSess   = input.bool(false, "Shade Sessions", tooltip = "Colour the chart background during each session.", group = GRP_SESS)
+killZoneReq = input.bool(false, "Require Kill Zone for Entry", tooltip = "Block entries outside London / New York. Fewer signals, higher quality.", group = GRP_SESS)
 
 // -- Phase 11 - Entry Engine --
-engineOn     = input.bool(true, "Enable Entry Engine", group = GRP_ENT)
-mssTimeout   = input.int(10,  "Sweep -> MSS timeout (bars)",   minval = 2, maxval = 50,  group = GRP_ENT)
-mssValidBars = input.int(20,  "MSS -> POI timeout (bars)",     minval = 2, maxval = 80,  group = GRP_ENT)
-poiTimeout   = input.int(50,  "POI -> Retrace timeout (bars)", minval = 5, maxval = 200, group = GRP_ENT)
-tradeTimeout = input.int(200, "Max Trade Duration (bars)",     minval = 10, maxval = 1000, group = GRP_ENT)
-minScore     = input.int(7, "Min Score to Trade", minval = 0, maxval = 12, group = GRP_ENT)
-requireHtf   = input.bool(true, "Require HTF Alignment", group = GRP_ENT)
-requirePd    = input.bool(true, "Require Premium / Discount Alignment", group = GRP_ENT)
+engineOn     = input.bool(true, "Enable Entry Engine", tooltip = "Master switch for the entry state machine. Off = detection and drawing only, no signals at all.", group = GRP_ENT)
+mssTimeout   = input.int(10,  "Sweep -> MSS timeout (bars)",   minval = 2, maxval = 50, tooltip = "Bars allowed between the liquidity sweep and the MSS. Past this the setup is dead - the fuel went stale.",  group = GRP_ENT)
+mssValidBars = input.int(20,  "MSS -> POI timeout (bars)",     minval = 2, maxval = 80, tooltip = "Bars allowed between the MSS and a POI appearing.",  group = GRP_ENT)
+poiTimeout   = input.int(50,  "POI -> Retrace timeout (bars)", minval = 5, maxval = 200, tooltip = "Bars allowed for price to return into the POI before the setup expires.", group = GRP_ENT)
+tradeTimeout = input.int(200, "Max Trade Duration (bars)",     minval = 10, maxval = 1000, tooltip = "Maximum bars a trade stays tracked. After this it is closed as TIME.", group = GRP_ENT)
+minScore     = input.int(7, "Min Score to Trade", minval = 0, maxval = 12, tooltip = "Minimum score v1 (max 12) required to emit. Raise for fewer, stronger signals.", group = GRP_ENT)
+requireHtf   = input.bool(true, "Require HTF Alignment", tooltip = "Only take longs when HTF bias is bullish (and mirror for shorts). Turn off if you get zero signals.", group = GRP_ENT)
+requirePd    = input.bool(true, "Require Premium / Discount Alignment", tooltip = "Only take longs in discount and shorts in premium. Stops you buying at the top of the range.", group = GRP_ENT)
 
 // -- Phase 12 - Risk --
-minRR        = input.float(1.5, "Min Risk:Reward", minval = 0.5, maxval = 10.0, step = 0.1, group = GRP_RISK)
-slBufferMult = input.float(0.2, "SL Buffer (ATR x)", minval = 0.0, maxval = 2.0, step = 0.05, group = GRP_RISK)
+minRR        = input.float(1.5, "Min Risk:Reward", minval = 0.5, maxval = 10.0, step = 0.1, tooltip = "Minimum reward / risk. Below this the setup is discarded rather than taken - never force a trade.", group = GRP_RISK)
+slBufferMult = input.float(0.2, "SL Buffer (ATR x)", minval = 0.0, maxval = 2.0, step = 0.05, tooltip = "Extra room below the sweep low (or above the sweep high) for the stop, in ATR.", group = GRP_RISK)
 
 // -- Phase 13 - Visuals --
-colBull    = input.color(#089981, "Bullish", inline = "c1", group = GRP_VIS)
-colBear    = input.color(#f23645, "Bearish", inline = "c1", group = GRP_VIS)
-colFvg     = input.color(color.new(#2962ff, 82), "FVG",       inline = "c2", group = GRP_VIS)
-colOb      = input.color(color.new(#ff9800, 80), "OB",        inline = "c2", group = GRP_VIS)
-colBb      = input.color(color.new(#9c27b0, 80), "BB / IFVG", inline = "c2", group = GRP_VIS)
-colLiq     = input.color(#787b86, "Liquidity", inline = "c3", group = GRP_VIS)
-zoneExtend = input.int(20, "Zone Extend (bars)", minval = 0, maxval = 200, group = GRP_VIS)
-showDash   = input.bool(true,  "Show Dashboard", group = GRP_VIS)
-showDebug  = input.bool(false, "Show Debug (state machine)", group = GRP_VIS)
+colBull    = input.color(#089981, "Bullish", inline = "c1", tooltip = "Colour for bullish structure, zones and signals.", group = GRP_VIS)
+colBear    = input.color(#f23645, "Bearish", inline = "c1", tooltip = "Colour for bearish structure, zones and signals.", group = GRP_VIS)
+colFvg     = input.color(color.new(#2962ff, 82), "FVG",       inline = "c2", tooltip = "Fill colour for Fair Value Gap boxes.", group = GRP_VIS)
+colOb      = input.color(color.new(#ff9800, 80), "OB",        inline = "c2", tooltip = "Fill colour for Order Block boxes.", group = GRP_VIS)
+colBb      = input.color(color.new(#9c27b0, 80), "BB / IFVG", inline = "c2", tooltip = "Fill colour for Breaker and Inverse FVG boxes.", group = GRP_VIS)
+colLiq     = input.color(#787b86, "Liquidity", inline = "c3", tooltip = "Colour for liquidity lines. Swept levels are drawn faded.", group = GRP_VIS)
+zoneExtend = input.int(20, "Zone Extend (bars)", minval = 0, maxval = 200, tooltip = "How many bars to the right a live zone box is extended.", group = GRP_VIS)
+showDash   = input.bool(true,  "Show Dashboard", tooltip = "Show the status dashboard (bias, regime, state machine, object counts).", group = GRP_VIS)
+showDebug  = input.bool(false, "Show Debug (state machine)", tooltip = "Show the debug table. Use it when you get no signals - it tells you which state the setup is stuck in.", group = GRP_VIS)
 
 // -- Phase 17 / 18 - Dynamic Trendline (TIER B - default off) --
-tlOn        = input.bool(false, "Enable Dynamic Trendline", group = GRP_TL)
-tlMaxAge    = input.int(200, "Max Anchor Age (bars)",    minval = 30, maxval = 1000, group = GRP_TL)
-tlMinBars   = input.int(10,  "Min Bars Between Anchors", minval = 5,  maxval = 100,  group = GRP_TL)
-tlMaxLines  = input.int(4,   "Max Lines Per Side",       minval = 1,  maxval = 10,   group = GRP_TL)
-tlBreakMode = input.string("Close", "TL Break Mode", options = ["Close", "Wick"], group = GRP_TL)
-tlqOn       = input.bool(false, "Treat TL Break as Liquidity (TLQ)", group = GRP_TL)
-tlChanOn    = input.bool(false, "Draw Parallel Channel", group = GRP_TL)
-tlShow      = input.bool(true,  "Draw Trendlines", group = GRP_TL)
+tlOn        = input.bool(false, "Enable Dynamic Trendline", tooltip = "Build trendlines from confirmed swings only. A trendline is a stop address, never a buy or sell reason.", group = GRP_TL)
+tlMaxAge    = input.int(200, "Max Anchor Age (bars)",    minval = 30, maxval = 1000, tooltip = "Ignore anchors older than this. Nobody trades a line drawn from ancient history.", group = GRP_TL)
+tlMinBars   = input.int(10,  "Min Bars Between Anchors", minval = 5,  maxval = 100, tooltip = "Minimum bar distance between the two anchors. Blocks steep, meaningless lines.",  group = GRP_TL)
+tlMaxLines  = input.int(4,   "Max Lines Per Side",       minval = 1,  maxval = 10, tooltip = "Maximum lines kept per side. Keeps the chart and the object budget under control.",   group = GRP_TL)
+tlBreakMode = input.string("Close", "TL Break Mode", options = ["Close", "Wick"], tooltip = "Close = a body close through the line counts as a break. Wick = a touch is enough.", group = GRP_TL)
+tlqOn       = input.bool(false, "Treat TL Break as Liquidity (TLQ)", tooltip = "Treat a trendline sweep as liquidity: it feeds the same LIQUIDITY_SWEPT step as a normal sweep, never a separate signal.", group = GRP_TL)
+tlChanOn    = input.bool(false, "Draw Parallel Channel", tooltip = "Draw a parallel line through the furthest opposite extreme, forming a channel.", group = GRP_TL)
+tlShow      = input.bool(true,  "Draw Trendlines", tooltip = "Draw the trendlines. Opacity reflects strength (touches, age, angle).", group = GRP_TL)
 
 // -- Phase 19 - CISD (TIER B - default off) --
-cisdOn            = input.bool(false, "Enable CISD", group = GRP_CISD)
-cisdMaxRun        = input.int(6, "Max Candle Run", minval = 2, maxval = 12, group = GRP_CISD)
-cisdAsDisplacement = input.bool(false, "CISD can replace Displacement", group = GRP_CISD)
-cisdShow          = input.bool(true, "Draw CISD level", group = GRP_CISD)
+cisdOn            = input.bool(false, "Enable CISD", tooltip = "Detect Change in State of Delivery: price closes back past the open of the candle run that was defending a level.", group = GRP_CISD)
+cisdMaxRun        = input.int(6, "Max Candle Run", minval = 2, maxval = 12, tooltip = "Longest candle run that still counts. Longer runs are trends, not a defended level.", group = GRP_CISD)
+cisdAsDisplacement = input.bool(false, "CISD can replace Displacement", tooltip = "Let a CISD satisfy the displacement step of the sequence. More signals, slightly weaker evidence.", group = GRP_CISD)
+cisdShow          = input.bool(true, "Draw CISD level", tooltip = "Draw the current bullish / bearish CISD levels.", group = GRP_CISD)
 
 // -- Phase 20 - SMT Divergence (TIER B - default off) --
-smtOn   = input.bool(false, "Enable SMT Divergence", group = GRP_SMT)
-smtSym  = input.symbol("", "Correlated Symbol", group = GRP_SMT)
-smtInv  = input.bool(false, "Inverse Correlation (e.g. DXY)", group = GRP_SMT)
-smtLook = input.int(20, "Lookback", minval = 5, maxval = 60, group = GRP_SMT)
-smtShow = input.bool(true, "Mark SMT", group = GRP_SMT)
+smtOn   = input.bool(false, "Enable SMT Divergence", tooltip = "Compare with a correlated symbol. One makes a new extreme, the other does not = someone is being hunted.", group = GRP_SMT)
+smtSym  = input.symbol("", "Correlated Symbol", tooltip = "The correlated symbol (EURUSD-GBPUSD, ES-NQ, BTC-ETH). Leave empty to skip silently.", group = GRP_SMT)
+smtInv  = input.bool(false, "Inverse Correlation (e.g. DXY)", tooltip = "Use for inversely correlated pairs such as EURUSD against DXY.", group = GRP_SMT)
+smtLook = input.int(20, "Lookback", minval = 5, maxval = 60, tooltip = "How many bars back the extreme is measured over.", group = GRP_SMT)
+smtShow = input.bool(true, "Mark SMT", tooltip = "Mark SMT divergences on the chart. SMT only adds score (v2), it never creates a signal.", group = GRP_SMT)
 
 // -- Phase 21 - AMD / Power of 3 (TIER B - default off) --
-amdOn     = input.bool(false, "Enable AMD / PO3", group = GRP_AMD)
-amdAsiaS  = input.session("2000-0000", "Accumulation (Asia)",   group = GRP_AMD)
-amdJudasS = input.session("0200-0500", "Manipulation (London)", group = GRP_AMD)
-amdDistS  = input.session("0700-1100", "Distribution (NY)",     group = GRP_AMD)
-amdShow   = input.bool(true, "Draw Asia Range Box", group = GRP_AMD)
+amdOn     = input.bool(false, "Enable AMD / PO3", tooltip = "Track Accumulation - Manipulation - Distribution, including the London Judas swing.", group = GRP_AMD)
+amdAsiaS  = input.session("2000-0000", "Accumulation (Asia)", tooltip = "Accumulation window. Its high and low are locked once the window closes.",   group = GRP_AMD)
+amdJudasS = input.session("0200-0500", "Manipulation (London)", tooltip = "Manipulation window. A sweep of the Asia range here sets the day bias the opposite way.", group = GRP_AMD)
+amdDistS  = input.session("0700-1100", "Distribution (NY)", tooltip = "Distribution window - where the real move usually happens.",     group = GRP_AMD)
+amdShow   = input.bool(true, "Draw Asia Range Box", tooltip = "Draw the locked Asia range box.", group = GRP_AMD)
 
 // -- Phase 22 - Trap / Turtle Soup (TIER B - default off) --
-trapOn   = input.bool(false, "Enable Trap Detection", group = GRP_TRAP)
-trapBars = input.int(5,  "Max Bars Outside", minval = 1, maxval = 15, group = GRP_TRAP)
-tsOn     = input.bool(false, "Enable Turtle Soup", group = GRP_TRAP)
-tsLook   = input.int(20, "Turtle Soup Lookback", minval = 10, maxval = 60, group = GRP_TRAP)
-trapShow = input.bool(true, "Mark Trap / Turtle Soup", group = GRP_TRAP)
+trapOn   = input.bool(false, "Enable Trap Detection", tooltip = "Detect breakouts that failed within a few bars. Trapped traders must exit, which fuels the reversal.", group = GRP_TRAP)
+trapBars = input.int(5,  "Max Bars Outside", minval = 1, maxval = 15, tooltip = "Maximum bars price may stay beyond the level and still count as a trap. Longer = a real breakout.", group = GRP_TRAP)
+tsOn     = input.bool(false, "Enable Turtle Soup", tooltip = "Detect Turtle Soup: a sweep of the N-bar extreme that closes back inside.", group = GRP_TRAP)
+tsLook   = input.int(20, "Turtle Soup Lookback", minval = 10, maxval = 60, tooltip = "Lookback for the Turtle Soup extreme.", group = GRP_TRAP)
+trapShow = input.bool(true, "Mark Trap / Turtle Soup", tooltip = "Mark traps and turtle soups on the chart.", group = GRP_TRAP)
 
 // -- Phase 23 - Supply/Demand, Mitigation Block, Rejection Block (TIER B - default off) --
-sdOn       = input.bool(false, "Enable Supply / Demand Zones", group = GRP_SD)
-sdBars     = input.int(3, "Cluster Bars", minval = 2, maxval = 6, group = GRP_SD)
-sdTight    = input.float(0.8, "Max Cluster Range (ATR x)", minval = 0.2, maxval = 2.0, step = 0.1, group = GRP_SD)
-mbOn       = input.bool(false, "Enable Mitigation Block", group = GRP_SD)
-rbOn       = input.bool(false, "Enable Rejection Block", group = GRP_SD)
-rbWickMin  = input.float(0.6, "Min Wick Ratio (RB)", minval = 0.4, maxval = 0.9, step = 0.05, group = GRP_SD)
-colSd      = input.color(color.new(#26a69a, 85), "S/D", inline = "c4", group = GRP_SD)
-colRb      = input.color(color.new(#795548, 82), "MB / RB", inline = "c4", group = GRP_SD)
+sdOn       = input.bool(false, "Enable Supply / Demand Zones", tooltip = "Detect supply / demand zones: a tight cluster of candles that a displacement leaves from.", group = GRP_SD)
+sdBars     = input.int(3, "Cluster Bars", minval = 2, maxval = 6, tooltip = "How many candles form the cluster.", group = GRP_SD)
+sdTight    = input.float(0.8, "Max Cluster Range (ATR x)", minval = 0.2, maxval = 2.0, step = 0.1, tooltip = "Maximum cluster height in ATR. Wider than this is not a base, it is a range.", group = GRP_SD)
+mbOn       = input.bool(false, "Enable Mitigation Block", tooltip = "Detect mitigation blocks: a touched order block that never filled and then delivered again.", group = GRP_SD)
+rbOn       = input.bool(false, "Enable Rejection Block", tooltip = "Detect rejection blocks, measured from the wick rather than the body.", group = GRP_SD)
+rbWickMin  = input.float(0.6, "Min Wick Ratio (RB)", minval = 0.4, maxval = 0.9, step = 0.05, tooltip = "Minimum wick / range ratio for a rejection block.", group = GRP_SD)
+colSd      = input.color(color.new(#26a69a, 85), "S/D", inline = "c4", tooltip = "Fill colour for supply / demand zones.", group = GRP_SD)
+colRb      = input.color(color.new(#795548, 82), "MB / RB", inline = "c4", tooltip = "Fill colour for mitigation and rejection blocks.", group = GRP_SD)
 
 // -- Phase 24 - BPR / Liquidity Void / Entry Reference (TIER B - default off) --
-bprOn    = input.bool(false, "Enable BPR", group = GRP_BPR)
-voidOn   = input.bool(false, "Enable Liquidity Void", group = GRP_BPR)
-voidBars = input.int(3, "Min Void Candles", minval = 3, maxval = 6, group = GRP_BPR)
-voidOv   = input.float(0.2, "Max Overlap Ratio", minval = 0.05, maxval = 0.5, step = 0.05, group = GRP_BPR)
-entryRef = input.string("Close", "Entry Reference", options = ["Close", "Zone Edge", "CE", "Zone Full"], group = GRP_BPR)
-colBpr   = input.color(color.new(#e91e63, 80), "BPR", inline = "c5", group = GRP_BPR)
-colVoid  = input.color(color.new(#607d8b, 88), "Void", inline = "c5", group = GRP_BPR)
+bprOn    = input.bool(false, "Enable BPR", tooltip = "Detect Balanced Price Range: a bullish and a bearish FVG overlapping at the same price.", group = GRP_BPR)
+voidOn   = input.bool(false, "Enable Liquidity Void", tooltip = "Detect liquidity voids: several candles running with almost no overlap.", group = GRP_BPR)
+voidBars = input.int(3, "Min Void Candles", minval = 3, maxval = 6, tooltip = "Minimum candles in the run.", group = GRP_BPR)
+voidOv   = input.float(0.2, "Max Overlap Ratio", minval = 0.05, maxval = 0.5, step = 0.05, tooltip = "Maximum overlap ratio between consecutive candles for the run to count as a void.", group = GRP_BPR)
+entryRef = input.string("Close", "Entry Reference", options = ["Close", "Zone Edge", "CE", "Zone Full"], tooltip = "Where the entry price is taken. Close keeps Tier A behaviour; CE uses the zone midpoint, which is where price usually turns.", group = GRP_BPR)
+colBpr   = input.color(color.new(#e91e63, 80), "BPR", inline = "c5", tooltip = "Fill colour for BPR zones.", group = GRP_BPR)
+colVoid  = input.color(color.new(#607d8b, 88), "Void", inline = "c5", tooltip = "Fill colour for liquidity voids.", group = GRP_BPR)
 
 // -- Phase 25 - Opening Gaps (TIER B - default off) --
-nwogOn  = input.bool(false, "New Week Opening Gap (NWOG)", group = GRP_GAP)
-ndogOn  = input.bool(false, "New Day Opening Gap (NDOG)", group = GRP_GAP)
-orgOn   = input.bool(false, "Opening Range Gap (ORG)", group = GRP_GAP)
-gapKeep = input.int(3, "Keep Last N Gaps per kind", minval = 1, maxval = 10, group = GRP_GAP)
-colGap  = input.color(color.new(#00bcd4, 85), "Gap", group = GRP_GAP)
+nwogOn  = input.bool(false, "New Week Opening Gap (NWOG)", tooltip = "Draw the gap between last week's close and this week's open. Price is drawn back to it all week.", group = GRP_GAP)
+ndogOn  = input.bool(false, "New Day Opening Gap (NDOG)", tooltip = "Draw the gap between yesterday's close and today's open.", group = GRP_GAP)
+orgOn   = input.bool(false, "Opening Range Gap (ORG)", tooltip = "Draw the gap at the New York session open.", group = GRP_GAP)
+gapKeep = input.int(3, "Keep Last N Gaps per kind", minval = 1, maxval = 10, tooltip = "How many gaps to keep per kind. Older ones are deleted.", group = GRP_GAP)
+colGap  = input.color(color.new(#00bcd4, 85), "Gap", tooltip = "Fill colour for opening gaps.", group = GRP_GAP)
 
 // -- Phase 26 - IRL / ERL / Draw on Liquidity (TIER B - default off) --
-dolOn   = input.bool(false, "Enable Draw on Liquidity", group = GRP_DOL)
-dolShow = input.bool(true,  "Draw DOL Target Line", group = GRP_DOL)
+dolOn   = input.bool(false, "Enable Draw on Liquidity", tooltip = "Work out the Draw on Liquidity: the nearest unswept pool in the direction of the bias - the magnet price is heading for.", group = GRP_DOL)
+dolShow = input.bool(true,  "Draw DOL Target Line", tooltip = "Draw an arrow at the DOL target.", group = GRP_DOL)
 
 // -- Phase 27 - Silver Bullet / Macro (TIER B - default off) --
-sbOn    = input.bool(false, "Enable Silver Bullet Window", group = GRP_SB)
-sb1     = input.session("1000-1100", "NY AM",  group = GRP_SB)
-sb2     = input.session("1400-1500", "NY PM",  group = GRP_SB)
-sb3     = input.session("0300-0400", "London", group = GRP_SB)
-sbOnly  = input.bool(false, "Signals ONLY inside SB window", group = GRP_SB)
-sbShade = input.bool(false, "Shade SB windows", group = GRP_SB)
-macroOn = input.bool(false, "Macro Windows (:50-:10)", group = GRP_SB)
+sbOn    = input.bool(false, "Enable Silver Bullet Window", tooltip = "Enable the Silver Bullet windows - the hour slots where the move usually happens.", group = GRP_SB)
+sb1     = input.session("1000-1100", "NY AM", tooltip = "New York AM window.",  group = GRP_SB)
+sb2     = input.session("1400-1500", "NY PM", tooltip = "New York PM window.",  group = GRP_SB)
+sb3     = input.session("0300-0400", "London", tooltip = "London window.", group = GRP_SB)
+sbOnly  = input.bool(false, "Signals ONLY inside SB window", tooltip = "Only emit signals inside the windows. The state machine keeps running outside them, it just stays silent.", group = GRP_SB)
+sbShade = input.bool(false, "Shade SB windows", tooltip = "Colour the background during the windows.", group = GRP_SB)
+macroOn = input.bool(false, "Macro Windows (:50-:10)", tooltip = "Macro windows (:50 to :10 of each hour). Disabled automatically on 1H and above, where it is meaningless.", group = GRP_SB)
 
 // -- Phase 28 - Market Model / Unicorn (TIER B - default off) --
-uniOn   = input.bool(false, "Enable Unicorn (BB + FVG overlap)", group = GRP_MOD)
-uniOv   = input.float(0.5, "Min Overlap Ratio", minval = 0.2, maxval = 0.95, step = 0.05, group = GRP_MOD)
-mmOn    = input.bool(false, "Enable MMBM / MMSM tracking", group = GRP_MOD)
-colUni  = input.color(color.new(#ffd600, 75), "Unicorn", group = GRP_MOD)
+uniOn   = input.bool(false, "Enable Unicorn (BB + FVG overlap)", tooltip = "Detect Unicorn setups: a breaker and an FVG overlapping at the same price. Rare and high quality.", group = GRP_MOD)
+uniOv   = input.float(0.5, "Min Overlap Ratio", minval = 0.2, maxval = 0.95, step = 0.05, tooltip = "How much of the smaller zone must overlap for it to count as a Unicorn.", group = GRP_MOD)
+mmOn    = input.bool(false, "Enable MMBM / MMSM tracking", tooltip = "Track the market maker buy / sell model (sweep of a range extreme followed by a reversal).", group = GRP_MOD)
+colUni  = input.color(color.new(#ffd600, 75), "Unicorn", tooltip = "Fill colour for Unicorn zones.", group = GRP_MOD)
 
 // -- Phase 29 - Daily Bias / Weekly Profile (TIER B - default off) --
-dbOn    = input.bool(false, "Enable Daily Bias", group = GRP_BIAS)
-dbShow  = input.bool(true,  "Draw Weekly / Daily Open", group = GRP_BIAS)
+dbOn    = input.bool(false, "Enable Daily Bias", tooltip = "Build a daily bias from HTF bias, which side liquidity was taken, and the weekly open.", group = GRP_BIAS)
+dbShow  = input.bool(true,  "Draw Weekly / Daily Open", tooltip = "Draw the weekly and daily open lines. Both are captured from the live open, never from request.security, so they cannot repaint.", group = GRP_BIAS)
 
 // -- Phase 30 - Std Dev Projections (TIER B - default off) --
-sdevOn   = input.bool(false, "Std Dev Projections", group = GRP_TGT)
-sdevStr  = input.string("2,2.5,4", "Multipliers (comma separated)", group = GRP_TGT)
-sdevAsTp = input.bool(false, "Use as TP when no liquidity target", group = GRP_TGT)
+sdevOn   = input.bool(false, "Std Dev Projections", tooltip = "Project standard deviation targets from the sweep-to-MSS distance.", group = GRP_TGT)
+sdevStr  = input.string("2,2.5,4", "Multipliers (comma separated)", tooltip = "Comma separated multipliers, no spaces. Example: 2,2.5,4", group = GRP_TGT)
+sdevAsTp = input.bool(false, "Use as TP when no liquidity target", tooltip = "Use the first projection as the take profit when no liquidity pool sits ahead. Last resort target.", group = GRP_TGT)
 
 // -- Phase 31 - Score v2 (TIER B - v1 stays default so Tier A results never move) --
-scoreModel  = input.string("v1", "Score Model", options = ["v1", "v2"], group = GRP_SCORE)
-minScoreV2  = input.int(8, "Min Score v2", minval = 0, maxval = 14, group = GRP_SCORE)
+scoreModel  = input.string("v1", "Score Model", options = ["v1", "v2"], tooltip = "v1 = the 12 point Tier A score. v2 = the 14 point class-capped score with penalties (chop, exhausted ADR, wrong side of the range).", group = GRP_SCORE)
+minScoreV2  = input.int(8, "Min Score v2", minval = 0, maxval = 14, tooltip = "Minimum score v2 required to emit. Only used when the score model is v2.", group = GRP_SCORE)
 
 // -- Phase 32 - Visual density --
-densityMode = input.string("Normal", "Visual Density", options = ["Minimal", "Normal", "Full"], group = GRP_VIS)
-dashPos     = input.string("Top Right", "Dashboard Position", options = ["Top Right", "Top Left", "Bottom Left"], group = GRP_VIS)
+densityMode = input.string("Normal", "Visual Density", options = ["Minimal", "Normal", "Full"], tooltip = "Minimal = only the active POI and signals. Normal = plus structure and liquidity. Full = everything including volume imbalances.", group = GRP_VIS)
+dashPos     = input.string("Top Right", "Dashboard Position", options = ["Top Right", "Top Left", "Bottom Left"], tooltip = "Where the dashboard sits on the chart.", group = GRP_VIS)
 
 // -- Phase 35 - Range / Chop Regime Filter (TIER C - default off) --
-regimeOn   = input.bool(false, "Enable Regime Filter", group = GRP_REG)
-regimeLen  = input.int(20, "Regime Lookback", minval = 10, maxval = 100, group = GRP_REG)
-effTrend   = input.float(0.35, "Trend Efficiency >", minval = 0.1, maxval = 0.9, step = 0.05, group = GRP_REG)
-effChop    = input.float(0.15, "Chop Efficiency <",  minval = 0.05, maxval = 0.5, step = 0.05, group = GRP_REG)
-chopBlock  = input.bool(true,  "Block signals in CHOP", group = GRP_REG)
-rangeEdge  = input.bool(true,  "In RANGE take edge setups only", group = GRP_REG)
-regimeShade = input.bool(false, "Shade CHOP background", group = GRP_REG)
+regimeOn   = input.bool(false, "Enable Regime Filter", tooltip = "Detect whether the market is trending, ranging or chopping. Most SMC logic is false in chop.", group = GRP_REG)
+regimeLen  = input.int(20, "Regime Lookback", minval = 10, maxval = 100, tooltip = "Lookback for all three regime measures.", group = GRP_REG)
+effTrend   = input.float(0.35, "Trend Efficiency >", minval = 0.1, maxval = 0.9, step = 0.05, tooltip = "Efficiency above this counts as a trend vote. Efficiency = straight line distance divided by the total path walked.", group = GRP_REG)
+effChop    = input.float(0.15, "Chop Efficiency <",  minval = 0.05, maxval = 0.5, step = 0.05, tooltip = "Efficiency below this counts as a chop vote. Must be lower than the trend threshold.", group = GRP_REG)
+chopBlock  = input.bool(true,  "Block signals in CHOP", tooltip = "Block signals entirely while the regime is CHOP. Usually removes a third of the signals and most of the bad ones.", group = GRP_REG)
+rangeEdge  = input.bool(true,  "In RANGE take edge setups only", tooltip = "While ranging, only take setups from the outer third of the range, never from the middle.", group = GRP_REG)
+regimeShade = input.bool(false, "Shade CHOP background", tooltip = "Grey the background during chop.", group = GRP_REG)
 
 // -- Phase 36 - ADR / Daily Range Exhaustion (TIER C - default off) --
-adrOn    = input.bool(false, "Enable ADR Filter", group = GRP_ADR)
-adrLen   = input.int(14, "ADR Days", minval = 5, maxval = 30, group = GRP_ADR)
-adrCap   = input.float(1.2, "Exhausted above % of ADR", minval = 0.5, maxval = 2.0, step = 0.05, group = GRP_ADR)
-adrBlockCont = input.bool(false, "Block continuation setups when exhausted", group = GRP_ADR)
+adrOn    = input.bool(false, "Enable ADR Filter", tooltip = "Track how much of the average daily range today has already used.", group = GRP_ADR)
+adrLen   = input.int(14, "ADR Days", minval = 5, maxval = 30, tooltip = "How many days the average is taken over.", group = GRP_ADR)
+adrCap   = input.float(1.2, "Exhausted above % of ADR", minval = 0.5, maxval = 2.0, step = 0.05, tooltip = "Above this fraction of the ADR the day counts as exhausted - continuation setups get penalised, reversals do not.", group = GRP_ADR)
+adrBlockCont = input.bool(false, "Block continuation setups when exhausted", tooltip = "Also block (not just penalise) continuation setups once the day is exhausted.", group = GRP_ADR)
 
 // -- Phase 37 - Open Lines (TIER C - default off) --
-moOn   = input.bool(false, "Midnight Open (00:00)", group = GRP_OPEN)
-tdoOn  = input.bool(false, "True Day Open (08:30)", group = GRP_OPEN)
-woOn   = input.bool(false, "Weekly Open", group = GRP_OPEN)
-moSess  = input.session("0000-0100", "Midnight window", group = GRP_OPEN)
-tdoSess = input.session("0830-0930", "True Day Open window", group = GRP_OPEN)
+moOn   = input.bool(false, "Midnight Open (00:00)", tooltip = "Capture and draw the midnight open. Above it = bullish day bias, below = bearish.", group = GRP_OPEN)
+tdoOn  = input.bool(false, "True Day Open (08:30)", tooltip = "Capture and draw the true day open (08:30 in the session timezone).", group = GRP_OPEN)
+woOn   = input.bool(false, "Weekly Open", tooltip = "Include the weekly open in the bias calculation.", group = GRP_OPEN)
+moSess  = input.session("0000-0100", "Midnight window", tooltip = "The one-hour window used to capture the midnight open.", group = GRP_OPEN)
+tdoSess = input.session("0830-0930", "True Day Open window", tooltip = "The window used to capture the true day open.", group = GRP_OPEN)
 
 // -- Phase 38 - Volume Imbalance (TIER C - default off) --
-viOn  = input.bool(false, "Volume Imbalance", group = GRP_VI)
-viMin = input.float(0.05, "Min VI Size (ATR x)", minval = 0.01, maxval = 0.5, step = 0.01, group = GRP_VI)
-colVi = input.color(color.new(#ffeb3b, 80), "VI", group = GRP_VI)
+viOn  = input.bool(false, "Volume Imbalance", tooltip = "Detect volume imbalances: a body gap between one close and the next open where the wicks still overlap.", group = GRP_VI)
+viMin = input.float(0.05, "Min VI Size (ATR x)", minval = 0.01, maxval = 0.5, step = 0.01, tooltip = "Minimum volume imbalance size in ATR. Smaller ones are meaningless.", group = GRP_VI)
+colVi = input.color(color.new(#ffeb3b, 80), "VI", tooltip = "Fill colour for volume imbalances. Only drawn in Full density - there are many and they are tiny.", group = GRP_VI)
 
 // -- Phase 39 - HTF POI projection (TIER C - default off) --
-htfPoiOn  = input.bool(false, "Show HTF POI on LTF", group = GRP_HPOI)
-htfPoiCap = input.int(20, "Max HTF zones", minval = 5, maxval = 40, group = GRP_HPOI)
-colHtfPoi = input.color(color.new(#3f51b5, 70), "HTF POI", group = GRP_HPOI)
+htfPoiOn  = input.bool(false, "Show HTF POI on LTF", tooltip = "Project higher timeframe FVGs onto this chart. Same price, far more traders watching them.", group = GRP_HPOI)
+htfPoiCap = input.int(20, "Max HTF zones", minval = 5, maxval = 40, tooltip = "Maximum HTF zones kept.", group = GRP_HPOI)
+colHtfPoi = input.color(color.new(#3f51b5, 70), "HTF POI", tooltip = "Fill colour for HTF zones.", group = GRP_HPOI)
 
 // -- Phase 40 - Trade Management (TIER C - default off) --
-tmOn    = input.bool(false, "Enable TP1/TP2/TP3 + BE + Trail", group = GRP_TM)
-tpMode  = input.string("Liquidity", "TP Mode", options = ["Liquidity", "R-based"], group = GRP_TM)
-tp1R    = input.float(1.0, "TP1 at R", minval = 0.5, maxval = 3.0, step = 0.1, group = GRP_TM)
-tp2R    = input.float(2.0, "TP2 at R", minval = 1.0, maxval = 6.0, step = 0.1, group = GRP_TM)
-tp3R    = input.float(3.0, "TP3 at R", minval = 1.5, maxval = 10.0, step = 0.1, group = GRP_TM)
-tp1Pct  = input.int(50, "Close % at TP1", minval = 0, maxval = 100, group = GRP_TM)
-beOnTP1 = input.bool(true,  "Move SL to BE at TP1", group = GRP_TM)
-trailOn = input.bool(false, "Trail by structure (last swing)", group = GRP_TM)
-trailBuf = input.float(0.2, "Trail buffer (ATR x)", minval = 0.0, maxval = 2.0, step = 0.05, group = GRP_TM)
+tmOn    = input.bool(false, "Enable TP1/TP2/TP3 + BE + Trail", tooltip = "Manage the trade after entry: three targets, break-even and a structure trail. Off = one target, Tier A behaviour.", group = GRP_TM)
+tpMode  = input.string("Liquidity", "TP Mode", options = ["Liquidity", "R-based"], tooltip = "Liquidity = targets sit on the next stop pools (realistic). R-based = fixed multiples of risk (mechanical).", group = GRP_TM)
+tp1R    = input.float(1.0, "TP1 at R", minval = 0.5, maxval = 3.0, step = 0.1, tooltip = "TP1 distance in R when using R-based targets.", group = GRP_TM)
+tp2R    = input.float(2.0, "TP2 at R", minval = 1.0, maxval = 6.0, step = 0.1, tooltip = "TP2 distance in R. Must be larger than TP1.", group = GRP_TM)
+tp3R    = input.float(3.0, "TP3 at R", minval = 1.5, maxval = 10.0, step = 0.1, tooltip = "TP3 distance in R. Must be larger than TP2.", group = GRP_TM)
+tp1Pct  = input.int(50, "Close % at TP1", minval = 0, maxval = 100, tooltip = "How much of the position you intend to close at TP1. Shown for your own records - this is an indicator, not a strategy.", group = GRP_TM)
+beOnTP1 = input.bool(true,  "Move SL to BE at TP1", tooltip = "Move the stop to entry once TP1 is hit.", group = GRP_TM)
+trailOn = input.bool(false, "Trail by structure (last swing)", tooltip = "Trail the stop behind each new confirmed swing. It can only ever move forward.", group = GRP_TM)
+trailBuf = input.float(0.2, "Trail buffer (ATR x)", minval = 0.0, maxval = 2.0, step = 0.05, tooltip = "How far behind the swing the trailing stop sits, in ATR.", group = GRP_TM)
 
 // -- Phase 41 - Position Size (TIER C - default off) --
-sizeOn   = input.bool(false, "Show Position Size", group = GRP_SIZE)
-acctSize = input.float(10000, "Account Size", minval = 100, group = GRP_SIZE)
-riskPct  = input.float(1.0, "Risk % per trade", minval = 0.1, maxval = 5.0, step = 0.1, group = GRP_SIZE)
+sizeOn   = input.bool(false, "Show Position Size", tooltip = "Show the position size on the signal label and in the alert.", group = GRP_SIZE)
+acctSize = input.float(10000, "Account Size", minval = 100, tooltip = "Account size used for the size calculation.", group = GRP_SIZE)
+riskPct  = input.float(1.0, "Risk % per trade", minval = 0.1, maxval = 5.0, step = 0.1, tooltip = "Percentage of the account risked per trade. Size is approximate - your broker's maths may differ.", group = GRP_SIZE)
 
 // -- Phase 42 - Time Exit / EOD / News (TIER C - default off) --
-eodFlat   = input.bool(false, "Close at session end (EOD flat)", group = GRP_EXIT)
-newsOn    = input.bool(false, "News Blackout", group = GRP_EXIT)
-newsTimes = input.string("0830,1000,1400", "Blackout times (no spaces, session tz)", group = GRP_EXIT)
-newsPad   = input.int(15, "Blackout +/- minutes", minval = 5, maxval = 60, group = GRP_EXIT)
-newsShade = input.bool(false, "Shade blackout window", group = GRP_EXIT)
+eodFlat   = input.bool(false, "Close at session end (EOD flat)", tooltip = "Close tracked trades when the New York session ends instead of holding them overnight.", group = GRP_EXIT)
+newsOn    = input.bool(false, "News Blackout", tooltip = "Block new entries around scheduled news. Pine has no news feed, so the times are typed by hand below.", group = GRP_EXIT)
+newsTimes = input.string("0830,1000,1400", "Blackout times (no spaces, session tz)", tooltip = "Comma separated times in the session timezone, no spaces. Example: 0830,1000,1400", group = GRP_EXIT)
+newsPad   = input.int(15, "Blackout +/- minutes", minval = 5, maxval = 60, tooltip = "How many minutes either side of each time are blocked. Running trades keep being managed.", group = GRP_EXIT)
+newsShade = input.bool(false, "Shade blackout window", tooltip = "Colour the background during the blackout windows.", group = GRP_EXIT)
 
 // -- Phase 43 - Instrument Preset (Manual = use the raw inputs above) --
-preset = input.string("Manual", "Instrument Preset", options = ["Manual", "Auto", "Forex", "Gold", "Index", "Crypto"], group = GRP_PRE)
+preset = input.string("Manual", "Instrument Preset", options = ["Manual", "Auto", "Forex", "Gold", "Index", "Crypto"], tooltip = "Manual uses the inputs above. The other presets override swing length, ATR multiplier, EQ tolerance and min RR for that instrument class. Auto picks one from the symbol.", group = GRP_PRE)
 
 // -- Phase 44 - Backtest stats (approximation, not a backtester) --
-statsOn = input.bool(false, "Show Stats Table", group = GRP_STAT)
+statsOn = input.bool(false, "Show Stats Table", tooltip = "Show the results table. It is an approximation, not a backtester: no spread, slippage or commission, and a same-bar TP plus SL counts as SL.", group = GRP_STAT)
 
 // -- Phase 45 - Alert format --
-alertFmt = input.string("Text", "Alert Format", options = ["Text", "JSON"], group = GRP_ALRT)
+alertFmt = input.string("Text", "Alert Format", options = ["Text", "JSON"], tooltip = "Text for a human, JSON for a bot or webhook. The JSON is built directly, so it does not depend on placeholders.", group = GRP_ALRT)
 
 // -- Phase 46 - Intrabar mode --
-intrabar = input.bool(false, "Intrabar (early) signals - CAN REPAINT", group = GRP_ENT)
+intrabar = input.bool(false, "Intrabar (early) signals - CAN REPAINT", tooltip = "Signals before the candle closes. They CAN change or disappear until the bar closes - alerts still fire only at bar close.", group = GRP_ENT)
 
 // === 01B - PRESETS (Phase 43) - preset only changes effective values, Manual = raw inputs
 presetAuto = syminfo.type == "forex" ? (str.contains(syminfo.ticker, "XAU") ? "Gold" : "Forex") : syminfo.type == "crypto" ? "Crypto" : syminfo.type == "index" or syminfo.type == "futures" ? "Index" : "Forex"
@@ -1536,7 +1536,7 @@ inBlackout = f_newsBlackout()
 sessionEnd = inNy[1] and not inNy
 
 // -- Phase 40 - TP ladder
-f_tpLadder(string dir, float entry, float sl, float tpLiq) =>
+f_tpLadder(string dir, float entry, float sl, float tpLiq, int which) =>
     float risk = math.max(math.abs(entry - sl), syminfo.mintick)
     float t1 = 0.0
     float t2 = 0.0
@@ -1560,7 +1560,7 @@ f_tpLadder(string dir, float entry, float sl, float tpLiq) =>
     else
         t2 := math.min(t2, t1 - risk * 0.25)
         t3 := math.min(t3, t2 - risk * 0.25)
-    [t1, t2, t3]
+    which == 1 ? t1 : which == 2 ? t2 : t3
 
 ctxLongOk  = (not requireHtf or htfBias == "BULL") and (not requirePd or inDiscount)
 ctxShortOk = (not requireHtf or htfBias == "BEAR") and (not requirePd or inPremium)
@@ -1641,10 +1641,10 @@ if engineOn and confirmed
                 activeLong.entryPrice := entryL
                 activeLong.slPrice    := slL
                 activeLong.slInit     := slL
-                [l1, l2, l3] = f_tpLadder("LONG", entryL, slL, tpLiqL)
+                float l1 = f_tpLadder("LONG", entryL, slL, tpLiqL, 1)
                 activeLong.tp1        := tmOn ? l1 : tpL
-                activeLong.tp2        := l2
-                activeLong.tp3        := l3
+                activeLong.tp2        := f_tpLadder("LONG", entryL, slL, tpLiqL, 2)
+                activeLong.tp3        := f_tpLadder("LONG", entryL, slL, tpLiqL, 3)
                 activeLong.posSize    := f_posSize(entryL, slL)
                 activeLong.rr         := rrL
                 activeLong.score      := scL
@@ -1741,10 +1741,10 @@ if engineOn and confirmed
                 activeShort.entryPrice := entryS
                 activeShort.slPrice    := slS
                 activeShort.slInit     := slS
-                [s1, s2, s3] = f_tpLadder("SHORT", entryS, slS, tpLiqS)
+                float s1 = f_tpLadder("SHORT", entryS, slS, tpLiqS, 1)
                 activeShort.tp1        := tmOn ? s1 : tpS
-                activeShort.tp2        := s2
-                activeShort.tp3        := s3
+                activeShort.tp2        := f_tpLadder("SHORT", entryS, slS, tpLiqS, 2)
+                activeShort.tp3        := f_tpLadder("SHORT", entryS, slS, tpLiqS, 3)
                 activeShort.posSize    := f_posSize(entryS, slS)
                 activeShort.rr         := rrS
                 activeShort.score      := scS
