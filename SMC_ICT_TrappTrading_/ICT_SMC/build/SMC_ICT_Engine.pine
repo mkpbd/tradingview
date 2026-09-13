@@ -322,6 +322,7 @@ type LiqLevel
     int    sweptBar   = 0
     int    strength   = 1
     line   drawing    = na
+    label  lbl        = na
 
 type Zone
     string id            = ""
@@ -469,8 +470,6 @@ var int    longStateBar   = 0
 var int    shortStateBar  = 0
 var int    todayLong      = 0
 var int    todayShort     = 0
-var int    drawnLines     = 0
-var int    drawnLabels    = 0
 
 var float todayHigh    = na
 var float todayLow     = na
@@ -529,6 +528,8 @@ f_pushLiq(string kind, float px, float tol) =>
             LiqLevel old = array.shift(liquidity)
             if not na(old.drawing)
                 line.delete(old.drawing)
+            if not na(old.lbl)
+                label.delete(old.lbl)
     dupe
 
 f_zoneLabel(string kind, string dir) =>
@@ -680,7 +681,7 @@ dailyOpen  = ta.valuewhen(newDay, open, 0)
 pdhSwept = not na(pdhRaw) and high > pdhRaw
 pdlSwept = not na(pdlRaw) and low  < pdlRaw
 
-dbScore = (htfBias == "BULL" ? 2 : htfBias == "BEAR" ? -2 : 0) + (pdlSwept ? 1 : 0) + (pdhSwept ? -1 : 0) + (not na(weeklyOpen) and close > weeklyOpen ? 1 : -1)
+dbScore = (htfBias == "BULL" ? 2 : htfBias == "BEAR" ? -2 : 0) + (pdlSwept ? 1 : 0) + (pdhSwept ? -1 : 0) + (woOn and not na(weeklyOpen) ? (close > weeklyOpen ? 1 : -1) : 0) + (moOn and not na(midnightOpen) ? (close > midnightOpen ? 1 : -1) : 0)
 dailyBias = not dbOn ? "NEUTRAL" : dbScore >= 2 ? "BULL" : dbScore <= -2 ? "BEAR" : "NEUTRAL"
 
 // -- Phase 25 - Opening Gaps (NWOG / NDOG / ORG)
@@ -1235,14 +1236,20 @@ if confirmed and bprOn and (bullFvgRaw or bearFvgRaw) and array.size(zones) > 0
                 newBullZone := newDir == "BULL" ? true : newBullZone
                 newBearZone := newDir == "BEAR" ? true : newBearZone
 
-// -- Phase 24 - Liquidity Void: consecutive candles running with almost no overlap
-voidOverlap1 = math.max(0.0, math.min(high, high[1]) - math.max(low, low[1])) / rangeSize
-voidOverlap2 = math.max(0.0, math.min(high[1], high[2]) - math.max(low[1], low[2])) / math.max(high[1] - low[1], syminfo.mintick)
-voidRun      = voidOverlap1 < voidOv and voidOverlap2 < voidOv
+// -- Phase 24 - Liquidity Void: voidBars candles in a row with almost no overlap
+f_voidRun() =>
+    bool ok = true
+    for k = 1 to voidBars - 1
+        float ov = math.max(0.0, math.min(high[k - 1], high[k]) - math.max(low[k - 1], low[k])) / math.max(high[k] - low[k], syminfo.mintick)
+        if ov >= voidOv
+            ok := false
+    ok
+
+voidRun = f_voidRun()
 
 if confirmed and voidOn and voidRun
-    float vTop = math.max(math.max(high, high[1]), high[2])
-    float vBot = math.min(math.min(low, low[1]), low[2])
+    float vTop = ta.highest(high, voidBars)
+    float vBot = ta.lowest(low, voidBars)
     if vTop > vBot
         array.push(gaps, Gap.new(kind = "VOID", top = vTop, bottom = vBot, ce = (vTop + vBot) / 2, createdBar = bar_index))
         if array.size(gaps) > 30
@@ -1880,6 +1887,8 @@ if array.size(liquidity) > 50
     LiqLevel oldL = array.shift(liquidity)
     if not na(oldL.drawing)
         line.delete(oldL.drawing)
+    if not na(oldL.lbl)
+        label.delete(oldL.lbl)
 
 if array.size(zones) > 100
     Zone oldZ = array.shift(zones)
@@ -1918,7 +1927,7 @@ if liqOn and densNorm and array.size(liquidity) > 0
         bool vis = lv.kind == "BSL" or lv.kind == "SSL" ? showBslSsl : lv.kind == "EQH" or lv.kind == "EQL" ? showEq : lv.kind == "PDH" or lv.kind == "PDL" ? showPdhPdl : showPwhPwl
         if vis and na(lv.drawing)
             lv.drawing := line.new(lv.createdBar, lv.price, bar_index, lv.price, color = colLiq, style = line.style_dotted, width = 1)
-            label.new(lv.createdBar, lv.price, lv.kind, style = label.style_none, textcolor = colLiq, size = size.tiny)
+            lv.lbl     := label.new(lv.createdBar, lv.price, lv.kind, style = label.style_none, textcolor = colLiq, size = size.tiny)
         if not na(lv.drawing)
             if not lv.swept
                 line.set_x2(lv.drawing, bar_index)
@@ -2193,7 +2202,7 @@ f_alertMsg(Setup st, string side) =>
     if alertFmt == "JSON"
         m := '{"sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","side":"' + side + '","entry":' + str.tostring(st.entryPrice, format.mintick) + ',"sl":' + str.tostring(st.slPrice, format.mintick) + ',"tp1":' + str.tostring(st.tp1, format.mintick) + ',"tp2":' + str.tostring(st.tp2, format.mintick) + ',"tp3":' + str.tostring(st.tp3, format.mintick) + ',"rr":' + str.tostring(st.rr, "#.##") + ',"score":' + str.tostring(st.score) + ',"model":"' + st.modelName + '","size":' + str.tostring(st.posSize, "#.##") + ',"time":' + str.tostring(time) + '}'
     else
-        m := side + " " + syminfo.ticker + " | E:" + str.tostring(st.entryPrice, format.mintick) + " SL:" + str.tostring(st.slPrice, format.mintick) + " TP:" + str.tostring(st.tp1, format.mintick) + " RR:" + str.tostring(st.rr, "#.##") + " Score:" + str.tostring(st.score) + " Model:" + st.modelName + (sizeOn ? " Size:" + str.tostring(st.posSize, "#.##") + f_sizeUnit() : "")
+        m := side + " " + syminfo.ticker + " | E:" + str.tostring(st.entryPrice, format.mintick) + " SL:" + str.tostring(st.slPrice, format.mintick) + " TP:" + str.tostring(st.tp1, format.mintick) + " RR:" + str.tostring(st.rr, "#.##") + " Score:" + str.tostring(st.score) + " Model:" + st.modelName + (sizeOn ? " Size:" + str.tostring(st.posSize, "#.##") + f_sizeUnit() : "") + (tmOn ? " TP1close:" + str.tostring(tp1Pct) + "%" : "")
     m
 
 var table stats = table.new(position.bottom_left, 2, 8, border_width = 1)
@@ -2236,6 +2245,9 @@ if confirmed and (sslSwept or bslSwept)
 
 if confirmed and (newBullZone or newBearZone)
     alert("New POI zone " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+if confirmed and tlOn and (tlBreakUp or tlBreakDn)
+    alert("Trendline break " + (tlBreakUp ? "UP" : "DOWN") + " " + syminfo.ticker, alert.freq_once_per_bar_close)
 
 alertcondition(longSignal,  title = "LONG signal",  message = "SMC-ICT LONG signal")
 alertcondition(shortSignal, title = "SHORT signal", message = "SMC-ICT SHORT signal")
