@@ -272,3 +272,30 @@ python build/tests/cases.py
 | Signal label | `size.small` | `Text Size` অনুযায়ী |
 
 তিনটা নতুন input (Visuals group): **Text Size** (Small / Normal / Large), **Panel Background**, **Panel Text**। মনিটর বা theme অনুযায়ী নিজের মতো বদলে নেওয়া যাবে — screenshot-এর জন্য `Large` ভালো।
+
+---
+
+# TIER D (Phase 49) — CRT / TBS / TWS
+
+Master plan-এ এটা ছিল না। এসেছে পাশের পুরনো spec থেকে:
+`TradingView_SMC_ICT_CRT_TBS_TWS_Developer_Spec_Bangla.md` — সেটা 05_MASTER_BUILD_PLAN-এ merge হয়নি, তাই concept তিনটা বাদ পড়ে গিয়েছিল।
+
+Input group: `36 - CRT / TBS / TWS (D)` — **সব default off**।
+
+| জিনিস | কীভাবে করা হলো |
+|---|---|
+| **CRT range** | একটা **বন্ধ** HTF candle-ই range: CRH / CRL / 50% সংরক্ষিত। TF auto-map source-এর মতো (CRT 15m→1m entry, 1H→5m, 4H→5m, 1D→15m) |
+| **Validity** | ranging candle-এর body `Max body ratio`-র বেশি হলে reject (ওটা trend candle, range নয়) · `Require a POI / liquidity inside the range` on থাকলে range-এর ভেতরে zone বা unswept level না থাকলে skip |
+| **TWS** | level শুধু **wick** দিয়ে নেওয়া হলো, body কখনো বাইরে close করেনি |
+| **TBS** | level-এর বাইরে **body close** (acceptance), তারপর ভেতরে ফেরত — source-এর preferred confirmation |
+| **First-interaction history** | spec-এর সতর্কতা মানা: আগে wick touch হলে সেটা TWS-ই থাকে, পরে body close হলে তবেই TBS — উল্টোটা ভুল classify হয় না |
+| **Model-1** | TBS/TWS পাওয়ার পর **একটা candle close** লাগে দিকের পক্ষে, তারপরই sweep পাস হয়। প্রতি CRT candle-এ **একবারই** fire করে |
+| **Signal path** | CRT নিজে signal দেয় না — TLQ / Trap-এর মতোই **একই `LIQUIDITY_SWEPT` দরজায়** ঢোকে, তারপর displacement + MSS + POI + RR + score সব লাগেই |
+| **Score v2** | `Penalise a wick-only sweep (TWS)` on থাকলে TWS-only setup **−1**; TBS-এ কোনো penalty নেই |
+
+`request.security` এখন মোট **৬টা** (limit ৮), CRT-রটাও `[1]` + `lookahead_off` — বন্ধ HTF candle।
+
+## যা এখনো spec-এ আছে কিন্তু ইচ্ছাকৃতভাবে বাদ
+
+- **CRT TP1 = 50% line** — 50% আঁকা হয়, কিন্তু TP হিসেবে জোর করা হয়নি। TP আসে Phase 12-র liquidity priority থেকে; দুই জায়গা থেকে TP এলে দ্বন্দ্ব হতো।
+- **একাধিক CRT range একসাথে** — শুধু সর্বশেষ বন্ধ HTF candle রাখা হয়। Object budget আর "চার্ট পরিষ্কার" নিয়মের জন্য।

@@ -42,6 +42,7 @@ var string GRP_EXIT = "32 - Exits & News (C)"
 var string GRP_PRE  = "33 - Instrument Preset (C)"
 var string GRP_STAT = "34 - Backtest Stats (C)"
 var string GRP_ALRT = "35 - Alert Format (C)"
+var string GRP_CRT  = "36 - CRT / TBS / TWS (D)"
 
 // -- Phase 1 - Structure --
 swingLen    = input.int(5, "Swing Length", minval = 3, maxval = 20, tooltip = "Pivot length for major swings. A swing confirms this many bars AFTER the candle, which is exactly why the labels never repaint. Higher = fewer, bigger swings.", group = GRP_ST)
@@ -289,6 +290,18 @@ alertFmt = input.string("Text", "Alert Format", options = ["Text", "JSON"], tool
 // -- Phase 46 - Intrabar mode --
 intrabar = input.bool(false, "Intrabar (early) signals - CAN REPAINT", tooltip = "Signals before the candle closes. They CAN change or disappear until the bar closes - alerts still fire only at bar close.", group = GRP_ENT)
 
+// -- Phase 49 - CRT / TBS / TWS (TIER D - default off) --
+crtOn      = input.bool(false, "Enable CRT (Candle Range Theory)", tooltip = "Treat one closed higher timeframe candle as the range. A sweep of its high or low on this chart is the trade trigger - fed into the SAME liquidity door as every other sweep.", group = GRP_CRT)
+crtAuto    = input.bool(true,  "Auto-map CRT timeframe", tooltip = "Pick the CRT timeframe from the chart timeframe, following the source mapping (CRT 15m drives 1m entries, 1H drives 5m, 4H drives 5m, 1D drives 15m).", group = GRP_CRT)
+crtManual  = input.timeframe("60", "Manual CRT timeframe", tooltip = "CRT timeframe when auto-map is off. Must be higher than the chart timeframe.", group = GRP_CRT)
+crtMaxBody = input.float(0.7, "Max body ratio of the CRT candle", minval = 0.3, maxval = 1.0, step = 0.05, tooltip = "A ranging candle is mostly wick. If the body fills more than this share of the range it is a trend candle, not a range, and the CRT is rejected.", group = GRP_CRT)
+crtValidReq = input.bool(true, "Require a POI / liquidity inside the range", tooltip = "The source treats a CRT as valid only when it interacts with earlier liquidity or a POI. With this on, a CRT range holding no zone and no unswept level is skipped.", group = GRP_CRT)
+crtModel1  = input.bool(true,  "Model-1 confirmation candle", tooltip = "After the sweep, wait for one candle to CLOSE back inside the range in the trade direction before the sweep is passed on. This is the source's Model-1 step.", group = GRP_CRT)
+crtFeed    = input.bool(true,  "Feed CRT sweep into the entry engine", tooltip = "Send the CRT sweep to the same LIQUIDITY_SWEPT step as SSL/BSL, TLQ and Trap. Off = CRT is drawn and alerted but never reaches the state machine.", group = GRP_CRT)
+twsPenalty = input.bool(true,  "Penalise a wick-only sweep (TWS)", tooltip = "TWS = the level was taken by wick only. TBS = a body closed beyond it. The source prefers TBS; with this on a TWS-only setup loses a point in score v2.", group = GRP_CRT)
+crtShow    = input.bool(true,  "Draw CRT range", tooltip = "Draw the CRT high, low and 50% line.", group = GRP_CRT)
+colCrt     = input.color(color.new(#ab47bc, 88), "CRT range", tooltip = "Fill colour for the CRT range box.", group = GRP_CRT)
+
 // === 01B - PRESETS (Phase 43) - preset only changes effective values, Manual = raw inputs
 presetAuto = syminfo.type == "forex" ? (str.contains(syminfo.ticker, "XAU") ? "Gold" : "Forex") : syminfo.type == "crypto" ? "Crypto" : syminfo.type == "index" or syminfo.type == "futures" ? "Index" : "Forex"
 presetUse  = preset == "Auto" ? presetAuto : preset
@@ -377,6 +390,8 @@ type Setup
     bool   trapConfirmed = false
     bool   tlqConfirmed  = false
     bool   poiLeft       = false
+    bool   crtTbs        = false
+    bool   crtTws        = false
     int    scoreCtx      = 0
     int    scoreLiq      = 0
     int    scoreStr      = 0
@@ -491,6 +506,21 @@ var float worstR    = 0.0
 var int   lossRun   = 0
 var int   maxLossRun = 0
 var float sumRR     = 0.0
+
+var float crtHigh    = na
+var float crtLow     = na
+var float crtMid     = na
+var bool  crtOkRange = false
+var bool  crtLoWick  = false
+var bool  crtLoBody  = false
+var bool  crtHiWick  = false
+var bool  crtHiBody  = false
+var bool  crtPendBull = false
+var bool  crtPendBear = false
+var bool  crtFiredBull = false
+var bool  crtFiredBear = false
+var box   crtBox     = na
+var line  crtMidLn   = na
 
 // === 04 - HELPERS ==========================================================
 f_nextLiqAbove(float px) =>
@@ -663,6 +693,48 @@ f_htfFvg() =>
     [bullF, bearF, low[1], high[3], high[1], low[3]]
 
 [hfBull, hfBear, hfBullTop, hfBullBot, hfBearTop, hfBearBot] = request.security(syminfo.tickerid, htfTF, f_htfFvg(), lookahead = barmerge.lookahead_off)
+
+// -- Phase 49 - CRT: one CLOSED higher timeframe candle becomes the range
+crtAutoTF = tfSec <= 60 ? "15" : tfSec <= 300 ? "60" : tfSec <= 900 ? "240" : tfSec <= 3600 ? "D" : "W"
+crtTF     = crtAuto ? crtAutoTF : crtManual
+crtTfSec  = timeframe.in_seconds(crtTF)
+crtValidTf = crtTfSec > tfSec
+
+[crtH, crtL, crtO, crtC] = request.security(syminfo.tickerid, crtTF, [high[1], low[1], open[1], close[1]], lookahead = barmerge.lookahead_off)
+newCrt = ta.change(time(crtTF)) != 0
+
+f_crtHasPoi(float lo, float hi) =>
+    bool found = false
+    if array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            Zone z = array.get(zones, i)
+            if z.state != "INVALID" and z.state != "FILLED" and z.top >= lo and z.bottom <= hi
+                found := true
+    if not found and array.size(liquidity) > 0
+        for i = 0 to array.size(liquidity) - 1
+            LiqLevel lv = array.get(liquidity, i)
+            if lv.price >= lo and lv.price <= hi
+                found := true
+    found
+
+if crtOn and crtValidTf and newCrt and not na(crtH) and not na(crtL) and crtH > crtL
+    float rngC  = math.max(crtH - crtL, syminfo.mintick)
+    float bodyC = math.abs(crtC - crtO)
+    // a ranging candle is mostly wick; a big body is a trend candle, not a range
+    bool bodyOk = bodyC / rngC <= crtMaxBody
+    bool poiOk  = not crtValidReq or f_crtHasPoi(crtL, crtH)
+    crtHigh    := crtH
+    crtLow     := crtL
+    crtMid     := (crtH + crtL) / 2
+    crtOkRange := bodyOk and poiOk
+    crtLoWick  := false
+    crtLoBody  := false
+    crtHiWick  := false
+    crtHiBody  := false
+    crtPendBull := false
+    crtPendBear := false
+    crtFiredBull := false
+    crtFiredBear := false
 
 // -- Phase 10 - Sessions / Kill Zones
 inAsia   = sessOn and not na(time(timeframe.period, asiaSess, sessTz))
@@ -1190,6 +1262,73 @@ if confirmed and (bearTrap or tsLong)
     sweptSslLevel := na(sweptSslLevel) ? math.min(lvl, low) : sweptSslLevel
     array.push(liquidity, LiqLevel.new(kind = "TRAP", price = lvl, createdBar = bar_index, swept = true, sweptBar = bar_index))
 
+// -- Phase 49 - TBS / TWS classification + Model-1, then into the SAME sweep door
+bool crtSweepBull = false
+bool crtSweepBear = false
+bool crtTbsBull   = false
+bool crtTbsBear   = false
+bool crtTwsBull   = false
+bool crtTwsBear   = false
+
+if crtOn and confirmed and crtOkRange and not na(crtHigh) and not na(crtLow)
+    // --- CRT LOW taken -> bullish side
+    if low < crtLow
+        if close >= crtLow
+            // wick only: the level was tapped, the body never accepted below it
+            if not crtLoBody
+                crtLoWick := true
+        else
+            // a body closed beyond the level - this is the acceptance the source wants
+            crtLoBody := true
+    if crtLoBody and close > crtLow
+        crtTbsBull := true          // closed back inside after body acceptance = TBS
+    else if crtLoWick and close > crtLow and low < crtLow
+        crtTwsBull := true          // wick-only sweep = TWS (lower quality)
+
+    // --- CRT HIGH taken -> bearish side
+    if high > crtHigh
+        if close <= crtHigh
+            if not crtHiBody
+                crtHiWick := true
+        else
+            crtHiBody := true
+    if crtHiBody and close < crtHigh
+        crtTbsBear := true
+    else if crtHiWick and close < crtHigh and high > crtHigh
+        crtTwsBear := true
+
+    // Model-1: wait one CLOSED candle in the trade direction before passing it on.
+    // Each CRT candle fires at most once, so the pending flag cannot be re-armed forever.
+    if crtModel1
+        if crtPendBull and not crtFiredBull and close > open and close > crtLow
+            crtSweepBull := true
+            crtFiredBull := true
+            crtPendBull  := false
+        else if not crtFiredBull and (crtTbsBull or crtTwsBull)
+            crtPendBull := true
+        if crtPendBear and not crtFiredBear and close < open and close < crtHigh
+            crtSweepBear := true
+            crtFiredBear := true
+            crtPendBear  := false
+        else if not crtFiredBear and (crtTbsBear or crtTwsBear)
+            crtPendBear := true
+    else
+        if not crtFiredBull and (crtTbsBull or crtTwsBull)
+            crtSweepBull := true
+            crtFiredBull := true
+        if not crtFiredBear and (crtTbsBear or crtTwsBear)
+            crtSweepBear := true
+            crtFiredBear := true
+
+// CRT never opens its own signal path - it feeds LIQUIDITY_SWEPT like every other sweep
+if crtOn and crtFeed and confirmed
+    if crtSweepBull
+        sslSwept      := true
+        sweptSslLevel := na(sweptSslLevel) ? math.min(crtLow, low) : sweptSslLevel
+    if crtSweepBear
+        bslSwept      := true
+        sweptBslLevel := na(sweptBslLevel) ? math.max(crtHigh, high) : sweptBslLevel
+
 // -- Phase 23 - Supply / Demand cluster zones (TIER B)
 sdClustHigh = ta.highest(high[1], sdBars)
 sdClustLow  = ta.lowest(low[1], sdBars)
@@ -1361,6 +1500,8 @@ f_reset(Setup s) =>
     s.trapConfirmed := false
     s.tlqConfirmed  := false
     s.poiLeft       := false
+    s.crtTbs        := false
+    s.crtTws        := false
     s.scoreCtx      := 0
     s.scoreLiq      := 0
     s.scoreStr      := 0
@@ -1485,6 +1626,7 @@ f_scoreV2(Setup st, string dir) =>
     pen -= (isLong ? inPremium : inDiscount) ? 2 : 0
     pen -= regimeOn and inChop ? 3 : 0
     pen -= adrSpent and (isLong ? htfBias == "BULL" : htfBias == "BEAR") ? 2 : 0
+    pen -= twsPenalty and st.crtTws and not st.crtTbs ? 1 : 0
     st.scoreCtx  := ctx
     st.scoreLiq  := liq
     st.scoreStr  := stc
@@ -1596,6 +1738,13 @@ if confirmed
         activeShort.cisdConfirmed := activeShort.cisdConfirmed or bearCISD
         activeShort.trapConfirmed := activeShort.trapConfirmed or bullTrap or tsShort
         activeShort.tlqConfirmed  := activeShort.tlqConfirmed or tlqBear
+
+    if activeLong.state != "IDLE"
+        activeLong.crtTbs := activeLong.crtTbs or crtTbsBull
+        activeLong.crtTws := activeLong.crtTws or (crtTwsBull and not crtTbsBull)
+    if activeShort.state != "IDLE"
+        activeShort.crtTbs := activeShort.crtTbs or crtTbsBear
+        activeShort.crtTws := activeShort.crtTws or (crtTwsBear and not crtTbsBear)
 
 // ---------------- LONG ----------------
 if engineOn and confirmed
@@ -2190,6 +2339,25 @@ if tmOn and barstate.islast
         line.new(lt.entryBar, lt.tp2, bar_index + 6, lt.tp2, color = color.new(colBull, lt.tp2Hit ? 70 : 20), style = line.style_dashed)
         line.new(lt.entryBar, lt.tp3, bar_index + 6, lt.tp3, color = color.new(colBull, lt.tp3Hit ? 70 : 40), style = line.style_dashed)
 
+// -- Phase 49 - CRT range, 50% line
+if crtOn and crtShow and crtOkRange and barstate.islast and not na(crtHigh) and not na(crtLow)
+    if na(crtBox)
+        crtBox := box.new(bar_index - 30, crtHigh, bar_index + 10, crtLow, border_color = color.new(colCrt, 40), bgcolor = colCrt, text = "CRT", text_size = size.small, text_color = uiTextCol)
+        box.set_text_size(crtBox, tSizeSub)
+    else
+        box.set_lefttop(crtBox, bar_index - 30, crtHigh)
+        box.set_rightbottom(crtBox, bar_index + 10, crtLow)
+    if na(crtMidLn)
+        crtMidLn := line.new(bar_index - 30, crtMid, bar_index + 10, crtMid, color = color.new(colCrt, 20), style = line.style_dashed)
+    else
+        line.set_xy1(crtMidLn, bar_index - 30, crtMid)
+        line.set_xy2(crtMidLn, bar_index + 10, crtMid)
+
+plotshape(crtOn and crtShow and crtTbsBull, title = "TBS bull", style = shape.diamond, location = location.belowbar, color = color.new(#ab47bc, 0), size = size.tiny)
+plotshape(crtOn and crtShow and crtTbsBear, title = "TBS bear", style = shape.diamond, location = location.abovebar, color = color.new(#ab47bc, 0), size = size.tiny)
+plotshape(crtOn and crtShow and crtTwsBull and not crtTbsBull, title = "TWS bull", style = shape.circle, location = location.belowbar, color = color.new(#ab47bc, 45), size = size.tiny)
+plotshape(crtOn and crtShow and crtTwsBear and not crtTbsBear, title = "TWS bear", style = shape.circle, location = location.abovebar, color = color.new(#ab47bc, 45), size = size.tiny)
+
 // === 10 - DASHBOARD ========================================================
 dashPosition = dashPos == "Top Left" ? position.top_left : dashPos == "Bottom Left" ? position.bottom_left : position.top_right
 var table dash = table.new(position.top_right, 2, 11, border_width = 1)
@@ -2284,6 +2452,9 @@ if confirmed and (newBullZone or newBearZone)
 
 if confirmed and tlOn and (tlBreakUp or tlBreakDn)
     alert("Trendline break " + (tlBreakUp ? "UP" : "DOWN") + " " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+if confirmed and crtOn and (crtSweepBull or crtSweepBear)
+    alert("CRT " + (crtSweepBull ? "LOW swept (bullish)" : "HIGH swept (bearish)") + " " + (crtTbsBull or crtTbsBear ? "TBS" : "TWS") + " " + syminfo.ticker, alert.freq_once_per_bar_close)
 
 alertcondition(longSignal,  title = "LONG signal",  message = "SMC-ICT LONG signal")
 alertcondition(shortSignal, title = "SHORT signal", message = "SMC-ICT SHORT signal")
