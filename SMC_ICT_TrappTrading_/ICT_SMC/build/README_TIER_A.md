@@ -174,3 +174,44 @@ Tier B-র প্রতিটা module-এর toggle **default `false`** হব
 1. Default-এই চালাও — Tier A engine, ১৫M chart, দিনে ০–২টা signal।
 2. Signal ০ হলে: `Require HTF Alignment` off → `Min Score` 5 → Debug table on।
 3. মান বাড়াতে: `Regime Filter` on + `chopBlock` on, তারপর `Score Model = v2`।
+
+---
+
+# Static audit (ja ami local-e verify korte parlam)
+
+Compile TradingView-তেই করতে হবে, কিন্তু নিচের জিনিসগুলো code থেকেই যাচাই করা:
+
+## Repaint (Phase 15 — static অংশ)
+
+| যাচাই | ফল |
+|---|---|
+| `request.security` মোট ৪টা, সবগুলোতে `lookahead_off` | ✅ |
+| প্রতিটা security expression ≥ `[1]` offset | ✅ (`[1]`, `[2]`, `[3]`) |
+| HTF bias = `f_htfBias()[1]` — বন্ধ HTF candle | ✅ |
+| HTF POI (`f_htfFvg`) — সব দাম বন্ধ bar থেকে | ✅ **এবং ATR-ও এখন `[1]`** — আগে live HTF ATR ছিল, সেটা flag নাড়াতে পারত (fix করা হয়েছে) |
+| Weekly / daily / midnight open | ✅ `ta.valuewhen` / live `open` capture — security নয় |
+| Pivot `swingLen` bar পরে confirm | ✅ |
+| সব state transition `barstate.isconfirmed`-এ (intrabar off অবস্থায়) | ✅ |
+| Trade alert শুধু `barstate.isconfirmed`-এ, intrabar on থাকলেও | ✅ |
+
+**যা static-এ ধরা যায় না:** F5 reload তুলনা, bar replay, realtime→close — চার্টেই করতে হবে।
+
+## Object budget (Phase 33)
+
+| Module | Box | Line | Label | কীভাবে আটকানো |
+|---|---:|---:|---:|---|
+| Zones | ≤100 | ≤100 (CE) | 0 | array cap 100 + FILLED হলে delete |
+| Gaps (NWOG/NDOG/ORG/VOID/VI) | ≤30 | ≤30 | 0 | array cap 30 + per-kind `gapKeep` |
+| Liquidity | 0 | ≤50 | ≤50 | array cap 50 · **line আর label দুইটাই delete হয়** |
+| Trendline + channel | 0 | ≤2×`tlMaxLines`×2 = 16 | 0 | `f_tlPrune()` |
+| Std Dev | 0 | = multiplier সংখ্যা | 0 | প্রতি bar-এ মুছে আবার আঁকা |
+| Asia box / OTE / EQ / open lines / DOL | ≤3 | ≤6 | 0 | `var` object, নতুন করে তৈরি হয় না |
+| Structure (swing / BOS / CHoCH) ও signal | 0 | ঐতিহাসিক | ঐতিহাসিক | TradingView-র 500 limit-এ পুরনোগুলো নিজে থেকে ঝরে যায় |
+
+শেষ সারিটা **ইচ্ছাকৃত**: swing label আর BOS line ইতিহাসজুড়ে জমে, TradingView সবচেয়ে পুরনোগুলো নিঃশব্দে মুছে দেয়। চার্টের ডান দিক সবসময় সঠিক; অনেক পিছনে গেলে label উধাও দেখাবে — এটা limit, bug নয়। কম চাইলে `Visual Density = Minimal`।
+
+Dashboard-এর `Objects z/l/g/t` সারি live সংখ্যা দেখায় — limit-এর কতটা কাছে আছো ওখানেই বোঝা যায়।
+
+## Dead code
+
+`voidBars`, `woOn`, `tp1Pct` আগে কোনো code পড়ত না; `tlBreakUp/tlBreakDn` শুধু লেখা হতো। সবগুলো এখন যুক্ত (void run length, daily bias, alert text, trendline break alert)। `drawnLines/drawnLabels` মুছে ফেলা হয়েছে। এখন dead variable **শূন্য**।
