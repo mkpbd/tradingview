@@ -1,0 +1,852 @@
+//@version=6
+// ===========================================================================
+//  SMC + ICT ENGINE - TIER A (Phase 1..16)
+//  Build plan: 05_MASTER_BUILD_PLAN.md
+//  Layer 1 = facts | Layer 2 = events | Layer 3 = decision (only signal door)
+// ===========================================================================
+indicator("SMC + ICT Engine [Tier A]", shorttitle = "SMC-ICT A", overlay = true, max_bars_back = 5000, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
+
+// === 01 - INPUTS ===========================================================
+var string GRP_ST   = "1 - Structure"
+var string GRP_LIQ  = "2 - Liquidity"
+var string GRP_DISP = "3 - Displacement"
+var string GRP_ZONE = "4 - FVG / OB / Breaker"
+var string GRP_PD   = "5 - Premium / Discount"
+var string GRP_HTF  = "6 - HTF Context"
+var string GRP_SESS = "7 - Sessions"
+var string GRP_ENT  = "8 - Entry Engine"
+var string GRP_RISK = "9 - Risk"
+var string GRP_VIS  = "10 - Visuals"
+
+// -- Phase 1 - Structure --
+swingLen    = input.int(5, "Swing Length", minval = 3, maxval = 20, group = GRP_ST)
+intSwingLen = input.int(2, "Internal Swing Length", minval = 1, maxval = 5, group = GRP_ST)
+bosMode     = input.string("Close", "Break Mode", options = ["Close", "Wick"], group = GRP_ST)
+showSwings  = input.bool(true, "Show Swing Labels", group = GRP_ST)
+showBOS     = input.bool(true, "Show BOS / CHoCH", group = GRP_ST)
+
+// -- Phase 2 - Liquidity --
+liqOn       = input.bool(true,  "Enable Liquidity Mapping", group = GRP_LIQ)
+showBslSsl  = input.bool(true,  "Show BSL / SSL", group = GRP_LIQ)
+showEq      = input.bool(true,  "Show EQH / EQL", group = GRP_LIQ)
+showPdhPdl  = input.bool(true,  "Show PDH / PDL", group = GRP_LIQ)
+showPwhPwl  = input.bool(false, "Show PWH / PWL", group = GRP_LIQ)
+eqTol       = input.float(0.1, "EQH/EQL Tolerance (ATR x)", minval = 0.02, maxval = 0.5, step = 0.01, group = GRP_LIQ)
+clusterTol  = input.float(0.3, "Cluster Tolerance (ATR x)", minval = 0.1, maxval = 1.0, step = 0.05, group = GRP_LIQ)
+
+// -- Phase 4 - Displacement --
+atrLen       = input.int(14,    "ATR Length", minval = 5, maxval = 100, group = GRP_DISP)
+atrMult      = input.float(1.2, "ATR Multiplier", minval = 0.8, maxval = 3.0, step = 0.1, group = GRP_DISP)
+bodyRatioMin = input.float(0.6, "Min Body Ratio", minval = 0.4, maxval = 0.9, step = 0.05, group = GRP_DISP)
+showDisp     = input.bool(false, "Mark Displacement Candles", group = GRP_DISP)
+
+// -- Phase 6 / 7 - Zones --
+fvgOn       = input.bool(true,  "Enable FVG", group = GRP_ZONE)
+minGapMult  = input.float(0.1, "Min FVG Size (ATR x)", minval = 0.02, maxval = 1.0, step = 0.02, group = GRP_ZONE)
+obOn        = input.bool(true,  "Enable Order Block", group = GRP_ZONE)
+freshObOnly = input.bool(true,  "Fresh OB Only (untouched)", group = GRP_ZONE)
+bbOn        = input.bool(true,  "Enable Breaker / IFVG", group = GRP_ZONE)
+showZones   = input.bool(true,  "Draw Zones", group = GRP_ZONE)
+showCE      = input.bool(true,  "Draw Zone CE line", group = GRP_ZONE)
+hideDead    = input.bool(true,  "Auto-hide FILLED / INVALID zones", group = GRP_ZONE)
+
+// -- Phase 8 - Premium / Discount --
+pdOn        = input.bool(true,  "Enable Premium / Discount", group = GRP_PD)
+showPd      = input.bool(true,  "Draw Range / EQ / OTE", group = GRP_PD)
+oteLow      = input.float(0.618, "OTE Fib Low",  minval = 0.5, maxval = 0.9, step = 0.001, group = GRP_PD)
+oteHigh     = input.float(0.786, "OTE Fib High", minval = 0.5, maxval = 0.95, step = 0.001, group = GRP_PD)
+
+// -- Phase 9 - HTF --
+htfOn       = input.bool(true, "Enable HTF Context", group = GRP_HTF)
+htfAuto     = input.bool(true, "Auto-map HTF", group = GRP_HTF)
+htfManual   = input.timeframe("240", "Manual HTF", group = GRP_HTF)
+
+// -- Phase 10 - Sessions --
+sessOn      = input.bool(true, "Enable Sessions", group = GRP_SESS)
+sessTz      = input.string("America/New_York", "Session Timezone", group = GRP_SESS)
+asiaSess    = input.session("2000-0000", "Asia",     group = GRP_SESS)
+londonSess  = input.session("0200-0500", "London",   group = GRP_SESS)
+nySess      = input.session("0830-1100", "New York", group = GRP_SESS)
+shadeSess   = input.bool(false, "Shade Sessions", group = GRP_SESS)
+killZoneReq = input.bool(false, "Require Kill Zone for Entry", group = GRP_SESS)
+
+// -- Phase 11 - Entry Engine --
+engineOn     = input.bool(true, "Enable Entry Engine", group = GRP_ENT)
+mssTimeout   = input.int(10,  "Sweep -> MSS timeout (bars)",   minval = 2, maxval = 50,  group = GRP_ENT)
+mssValidBars = input.int(20,  "MSS -> POI timeout (bars)",     minval = 2, maxval = 80,  group = GRP_ENT)
+poiTimeout   = input.int(50,  "POI -> Retrace timeout (bars)", minval = 5, maxval = 200, group = GRP_ENT)
+tradeTimeout = input.int(200, "Max Trade Duration (bars)",     minval = 10, maxval = 1000, group = GRP_ENT)
+minScore     = input.int(7, "Min Score to Trade", minval = 0, maxval = 12, group = GRP_ENT)
+requireHtf   = input.bool(true, "Require HTF Alignment", group = GRP_ENT)
+requirePd    = input.bool(true, "Require Premium / Discount Alignment", group = GRP_ENT)
+
+// -- Phase 12 - Risk --
+minRR        = input.float(1.5, "Min Risk:Reward", minval = 0.5, maxval = 10.0, step = 0.1, group = GRP_RISK)
+slBufferMult = input.float(0.2, "SL Buffer (ATR x)", minval = 0.0, maxval = 2.0, step = 0.05, group = GRP_RISK)
+
+// -- Phase 13 - Visuals --
+colBull    = input.color(#089981, "Bullish", inline = "c1", group = GRP_VIS)
+colBear    = input.color(#f23645, "Bearish", inline = "c1", group = GRP_VIS)
+colFvg     = input.color(color.new(#2962ff, 82), "FVG",       inline = "c2", group = GRP_VIS)
+colOb      = input.color(color.new(#ff9800, 80), "OB",        inline = "c2", group = GRP_VIS)
+colBb      = input.color(color.new(#9c27b0, 80), "BB / IFVG", inline = "c2", group = GRP_VIS)
+colLiq     = input.color(#787b86, "Liquidity", inline = "c3", group = GRP_VIS)
+zoneExtend = input.int(20, "Zone Extend (bars)", minval = 0, maxval = 200, group = GRP_VIS)
+showDash   = input.bool(true,  "Show Dashboard", group = GRP_VIS)
+showDebug  = input.bool(false, "Show Debug (state machine)", group = GRP_VIS)
+
+// === 02 - TYPES ============================================================
+type Swing
+    int    barIndex   = 0
+    float  price      = 0.0
+    bool   isHigh     = false
+    string label      = "HH"
+    bool   swept      = false
+
+type LiqLevel
+    string kind       = "BSL"
+    float  price      = 0.0
+    int    createdBar = 0
+    bool   swept      = false
+    int    sweptBar   = 0
+    int    strength   = 1
+    line   drawing    = na
+
+type Zone
+    string id            = ""
+    string kind          = "FVG"
+    string direction     = "BULL"
+    float  top           = 0.0
+    float  bottom        = 0.0
+    float  ce            = 0.0
+    int    createdBar    = 0
+    string state         = "NEW"
+    bool   consumed      = false
+    int    touchCount    = 0
+    float  mitigationPct = 0.0
+    bool   isHTF         = false
+    box    drawing       = na
+    line   ceLine        = na
+
+type Setup
+    string id            = ""
+    string direction     = "LONG"
+    string state         = "IDLE"
+    float  sweepLevel    = 0.0
+    int    sweepBar      = 0
+    float  mssLevel      = 0.0
+    int    mssBar        = 0
+    Zone   poi           = na
+    int    poiBar        = 0
+    float  entryPrice    = 0.0
+    float  slPrice       = 0.0
+    float  tp1           = 0.0
+    float  rr            = 0.0
+    int    score         = 0
+    int    entryBar      = 0
+    bool   signalEmitted = false
+
+// === 03 - STATE (var) ======================================================
+var array<Swing>    swings    = array.new<Swing>()
+var array<LiqLevel> liquidity = array.new<LiqLevel>()
+var array<Zone>     zones     = array.new<Zone>()
+
+var Setup activeLong  = Setup.new(id = "L0", direction = "LONG",  state = "IDLE")
+var Setup activeShort = Setup.new(id = "S0", direction = "SHORT", state = "IDLE")
+
+var float lastSwingHigh    = na
+var float lastSwingLow     = na
+var int   lastSwingHighBar = na
+var int   lastSwingLowBar  = na
+var float prevSwingHigh    = na
+var float prevSwingLow     = na
+
+var float intHigh = na
+var float intLow  = na
+
+var string trendDir = "NEUTRAL"
+
+var bool bslConsumed = false
+var bool sslConsumed = false
+
+var int totalLong  = 0
+var int totalShort = 0
+
+// === 04 - HELPERS ==========================================================
+f_nextLiqAbove(float px) =>
+    float best = na
+    if array.size(liquidity) > 0
+        for i = 0 to array.size(liquidity) - 1
+            LiqLevel lv = array.get(liquidity, i)
+            if not lv.swept and lv.price > px
+                best := na(best) or lv.price < best ? lv.price : best
+    best
+
+f_nextLiqBelow(float px) =>
+    float best = na
+    if array.size(liquidity) > 0
+        for i = 0 to array.size(liquidity) - 1
+            LiqLevel lv = array.get(liquidity, i)
+            if not lv.swept and lv.price < px
+                best := na(best) or lv.price > best ? lv.price : best
+    best
+
+f_clusterStrength(float px, float tol) =>
+    int n = 0
+    if array.size(liquidity) > 0
+        for i = 0 to array.size(liquidity) - 1
+            LiqLevel lv = array.get(liquidity, i)
+            if not lv.swept and math.abs(lv.price - px) <= tol
+                n += 1
+    math.max(n, 1)
+
+f_pushLiq(string kind, float px, float tol) =>
+    bool dupe = false
+    if array.size(liquidity) > 0
+        for i = 0 to array.size(liquidity) - 1
+            LiqLevel lv = array.get(liquidity, i)
+            if not lv.swept and lv.kind == kind and math.abs(lv.price - px) <= tol * 0.25
+                dupe := true
+    if not dupe
+        array.push(liquidity, LiqLevel.new(kind = kind, price = px, createdBar = bar_index, strength = f_clusterStrength(px, tol)))
+        if array.size(liquidity) > 50
+            LiqLevel old = array.shift(liquidity)
+            if not na(old.drawing)
+                line.delete(old.drawing)
+    dupe
+
+f_zoneLabel(string kind, string dir) =>
+    string s = kind + (dir == "BULL" ? " +" : " -")
+    s
+
+// === 05 - LAYER 1 - FACTS ==================================================
+atrVal    = ta.atr(atrLen)
+bodySize  = math.abs(close - open)
+rangeSize = math.max(high - low, syminfo.mintick)
+bodyRatio = bodySize / rangeSize
+eqTolAbs  = atrVal * eqTol
+clustAbs  = atrVal * clusterTol
+
+// -- Phase 1 - Swing Structure (pivot confirms swingLen bars later = no repaint)
+ph = ta.pivothigh(high, swingLen, swingLen)
+pl = ta.pivotlow(low, swingLen, swingLen)
+
+iph = ta.pivothigh(high, intSwingLen, intSwingLen)
+ipl = ta.pivotlow(low, intSwingLen, intSwingLen)
+
+newSwingHigh = false
+newSwingLow  = false
+string hiLbl = ""
+string loLbl = ""
+
+if not na(ph)
+    float p = high[swingLen]
+    hiLbl := na(lastSwingHigh) ? "HH" : (p > lastSwingHigh ? "HH" : "LH")
+    array.push(swings, Swing.new(bar_index - swingLen, p, true, hiLbl, false))
+    prevSwingHigh    := lastSwingHigh
+    lastSwingHigh    := p
+    lastSwingHighBar := bar_index - swingLen
+    bslConsumed      := false
+    newSwingHigh     := true
+
+if not na(pl)
+    float p = low[swingLen]
+    loLbl := na(lastSwingLow) ? "LL" : (p < lastSwingLow ? "LL" : "HL")
+    array.push(swings, Swing.new(bar_index - swingLen, p, false, loLbl, false))
+    prevSwingLow    := lastSwingLow
+    lastSwingLow    := p
+    lastSwingLowBar := bar_index - swingLen
+    sslConsumed     := false
+    newSwingLow     := true
+
+if array.size(swings) > 100
+    array.shift(swings)
+
+if not na(iph)
+    intHigh := high[intSwingLen]
+if not na(ipl)
+    intLow := low[intSwingLen]
+
+// -- Phase 2 - Liquidity Mapping
+[pdhRaw, pdlRaw] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_off)
+[pwhRaw, pwlRaw] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_off)
+
+newDay  = ta.change(time("D")) != 0
+newWeek = ta.change(time("W")) != 0
+
+if liqOn
+    if newSwingHigh
+        f_pushLiq("BSL", lastSwingHigh, clustAbs)
+        if not na(prevSwingHigh) and math.abs(lastSwingHigh - prevSwingHigh) <= eqTolAbs
+            f_pushLiq("EQH", math.max(lastSwingHigh, prevSwingHigh), clustAbs)
+    if newSwingLow
+        f_pushLiq("SSL", lastSwingLow, clustAbs)
+        if not na(prevSwingLow) and math.abs(lastSwingLow - prevSwingLow) <= eqTolAbs
+            f_pushLiq("EQL", math.min(lastSwingLow, prevSwingLow), clustAbs)
+    if newDay and not na(pdhRaw) and not na(pdlRaw)
+        f_pushLiq("PDH", pdhRaw, clustAbs)
+        f_pushLiq("PDL", pdlRaw, clustAbs)
+    if newWeek and not na(pwhRaw) and not na(pwlRaw)
+        f_pushLiq("PWH", pwhRaw, clustAbs)
+        f_pushLiq("PWL", pwlRaw, clustAbs)
+
+// -- Phase 8 - Dealing Range / Premium / Discount / OTE
+rangeHigh = lastSwingHigh
+rangeLow  = lastSwingLow
+rangeOk   = not na(rangeHigh) and not na(rangeLow) and rangeHigh > rangeLow
+eqLevel   = rangeOk ? (rangeHigh + rangeLow) / 2 : na
+rangeSpan = rangeOk ? math.max(rangeHigh - rangeLow, syminfo.mintick) : na
+
+inDiscount = pdOn and rangeOk ? close < eqLevel : true
+inPremium  = pdOn and rangeOk ? close > eqLevel : true
+
+oteBullTop = rangeOk ? rangeHigh - rangeSpan * oteLow  : na
+oteBullBot = rangeOk ? rangeHigh - rangeSpan * oteHigh : na
+oteBearBot = rangeOk ? rangeLow + rangeSpan * oteLow  : na
+oteBearTop = rangeOk ? rangeLow + rangeSpan * oteHigh : na
+
+inOteBull = rangeOk and close <= oteBullTop and close >= oteBullBot
+inOteBear = rangeOk and close >= oteBearBot and close <= oteBearTop
+
+// -- Phase 9 - HTF Context (only closed HTF candles)
+tfSec  = timeframe.in_seconds(timeframe.period)
+autoTF = tfSec <= 60 ? "15" : tfSec <= 300 ? "60" : tfSec <= 1800 ? "240" : tfSec <= 3600 ? "D" : tfSec <= 14400 ? "D" : "W"
+htfTF  = htfAuto ? autoTF : htfManual
+
+f_htfBias() =>
+    float hi = ta.highest(high, 10)[1]
+    float lo = ta.lowest(low, 10)[1]
+    var string b = "NEUTRAL"
+    if not na(hi) and close > hi
+        b := "BULL"
+    else if not na(lo) and close < lo
+        b := "BEAR"
+    b
+
+htfBiasRaw = request.security(syminfo.tickerid, htfTF, f_htfBias()[1], lookahead = barmerge.lookahead_off)
+htfBias    = htfOn and not na(htfBiasRaw) ? htfBiasRaw : "NEUTRAL"
+
+// -- Phase 10 - Sessions / Kill Zones
+inAsia   = sessOn and not na(time(timeframe.period, asiaSess, sessTz))
+inLondon = sessOn and not na(time(timeframe.period, londonSess, sessTz))
+inNy     = sessOn and not na(time(timeframe.period, nySess, sessTz))
+inKz     = inLondon or inNy
+
+// === 06 - LAYER 2 - EVENTS =================================================
+confirmed = barstate.isconfirmed
+
+// -- Phase 4 - Displacement
+isDisp     = bodyRatio >= bodyRatioMin and bodySize >= atrVal * atrMult
+isBullDisp = isDisp and close > open
+isBearDisp = isDisp and close < open
+
+// -- Phase 3 - BOS / CHoCH
+bosUp   = false
+bosDn   = false
+chochUp = false
+chochDn = false
+
+brokeUp = not na(lastSwingHigh) and not bslConsumed and (bosMode == "Close" ? close > lastSwingHigh : high > lastSwingHigh)
+brokeDn = not na(lastSwingLow) and not sslConsumed and (bosMode == "Close" ? close < lastSwingLow : low < lastSwingLow)
+
+if confirmed and brokeUp
+    bslConsumed := true
+    if trendDir == "BEAR"
+        chochUp := true
+    else
+        bosUp := true
+    trendDir := "BULL"
+
+if confirmed and brokeDn
+    sslConsumed := true
+    if trendDir == "BULL"
+        chochDn := true
+    else
+        bosDn := true
+    trendDir := "BEAR"
+
+// -- Phase 5 - Sweep (penetrate + close back + rejection wick)
+rejUp = (close - low) / rangeSize > 0.5
+rejDn = (high - close) / rangeSize > 0.5
+
+bool  sslSwept      = false
+bool  bslSwept      = false
+float sweptSslLevel = na
+float sweptBslLevel = na
+
+if confirmed and liqOn and array.size(liquidity) > 0
+    for i = 0 to array.size(liquidity) - 1
+        LiqLevel lv = array.get(liquidity, i)
+        if not lv.swept
+            if lv.price < close and low < lv.price and rejUp
+                lv.swept      := true
+                lv.sweptBar   := bar_index
+                sslSwept      := true
+                sweptSslLevel := na(sweptSslLevel) or lv.price > sweptSslLevel ? lv.price : sweptSslLevel
+            else if lv.price > close and high > lv.price and rejDn
+                lv.swept      := true
+                lv.sweptBar   := bar_index
+                bslSwept      := true
+                sweptBslLevel := na(sweptBslLevel) or lv.price < sweptBslLevel ? lv.price : sweptBslLevel
+
+// -- Phase 5 - MSS (sweep -> displacement -> structure break; handled in Layer 3)
+mssUp = isBullDisp and not na(intHigh) and close > intHigh
+mssDn = isBearDisp and not na(intLow) and close < intLow
+
+// -- Phase 6 - FVG detection
+f_zoneExists(string kind, string dir, float top, float bot) =>
+    bool found = false
+    if array.size(zones) > 0
+        for i = 0 to array.size(zones) - 1
+            Zone z = array.get(zones, i)
+            if z.kind == kind and z.direction == dir and z.state != "INVALID" and z.state != "FILLED"
+                if top <= z.top and bot >= z.bottom
+                    found := true
+    found
+
+f_pushZone(string kind, string dir, float top, float bot) =>
+    string zid = kind + "_" + str.tostring(bar_index)
+    Zone z = Zone.new(id = zid, kind = kind, direction = dir, top = top, bottom = bot, ce = (top + bot) / 2, createdBar = bar_index, state = "NEW")
+    array.push(zones, z)
+    z
+
+bullFvgRaw = fvgOn and low > high[2] and isBullDisp[1] and (low - high[2]) >= atrVal * minGapMult
+bearFvgRaw = fvgOn and high < low[2] and isBearDisp[1] and (low[2] - high) >= atrVal * minGapMult
+
+newBullZone = false
+newBearZone = false
+
+if confirmed and bullFvgRaw and not f_zoneExists("FVG", "BULL", low, high[2])
+    f_pushZone("FVG", "BULL", low, high[2])
+    newBullZone := true
+
+if confirmed and bearFvgRaw and not f_zoneExists("FVG", "BEAR", low[2], high)
+    f_pushZone("FVG", "BEAR", low[2], high)
+    newBearZone := true
+
+// -- Phase 7 - Order Block (only validated: displacement + structure break)
+if confirmed and obOn and isBullDisp and mssUp
+    int idx = -1
+    for k = 1 to 10
+        if close[k] < open[k]
+            idx := k
+            break
+    if idx > 0
+        float obTop = high[idx]
+        float obBot = low[idx]
+        bool fresh  = not freshObOnly or low > obTop
+        if fresh and obTop > obBot and not f_zoneExists("OB", "BULL", obTop, obBot)
+            f_pushZone("OB", "BULL", obTop, obBot)
+            newBullZone := true
+
+if confirmed and obOn and isBearDisp and mssDn
+    int idx = -1
+    for k = 1 to 10
+        if close[k] > open[k]
+            idx := k
+            break
+    if idx > 0
+        float obTop = high[idx]
+        float obBot = low[idx]
+        bool fresh  = not freshObOnly or high < obBot
+        if fresh and obTop > obBot and not f_zoneExists("OB", "BEAR", obTop, obBot)
+            f_pushZone("OB", "BEAR", obTop, obBot)
+            newBearZone := true
+
+// -- Phase 6 / 7 - Zone lifecycle: NEW -> ACTIVE -> TOUCHED -> MITIGATED -> FILLED
+if confirmed and array.size(zones) > 0
+    for i = array.size(zones) - 1 to 0
+        Zone z = array.get(zones, i)
+        if z.state == "NEW" and bar_index > z.createdBar
+            z.state := "ACTIVE"
+        if z.state == "ACTIVE" or z.state == "TOUCHED" or z.state == "MITIGATED"
+            float zh = math.max(z.top - z.bottom, syminfo.mintick)
+            bool touching = low <= z.top and high >= z.bottom
+            if touching
+                z.touchCount += 1
+                float pen = z.direction == "BULL" ? (z.top - math.max(math.min(low, z.top), z.bottom)) / zh : (math.min(math.max(high, z.bottom), z.top) - z.bottom) / zh
+                z.mitigationPct := math.max(z.mitigationPct, pen)
+                z.state := z.mitigationPct >= 0.5 ? "MITIGATED" : "TOUCHED"
+            bool killed = z.direction == "BULL" ? close < z.bottom : close > z.top
+            if killed
+                z.state := "FILLED"
+                if bbOn
+                    string invKind = z.kind == "FVG" ? "IFVG" : (z.kind == "OB" ? "BB" : "")
+                    if invKind != ""
+                        f_pushZone(invKind, z.direction == "BULL" ? "BEAR" : "BULL", z.top, z.bottom)
+
+// === 07 - LAYER 3 - DECISION (the only door a signal comes out of) =========
+f_latestZone(string dir) =>
+    Zone found = na
+    if array.size(zones) > 0
+        for i = array.size(zones) - 1 to 0
+            Zone z = array.get(zones, i)
+            if na(found) and z.direction == dir and not z.consumed and (z.state == "NEW" or z.state == "ACTIVE" or z.state == "TOUCHED")
+                found := z
+    found
+
+f_reset(Setup s) =>
+    s.state         := "IDLE"
+    s.sweepLevel    := 0.0
+    s.sweepBar      := 0
+    s.mssLevel      := 0.0
+    s.mssBar        := 0
+    s.poi           := na
+    s.poiBar        := 0
+    s.entryPrice    := 0.0
+    s.slPrice       := 0.0
+    s.tp1           := 0.0
+    s.rr            := 0.0
+    s.score         := 0
+    s.entryBar      := 0
+    s.signalEmitted := false
+    true
+
+f_score(string dir, Zone poi) =>
+    int sc = 0
+    sc += htfBias == (dir == "LONG" ? "BULL" : "BEAR") ? 2 : 0
+    sc += 6
+    if not na(poi)
+        sc += (poi.kind == "FVG" or poi.kind == "IFVG") ? 1 : 0
+        sc += (poi.kind == "OB" or poi.kind == "BB") ? 1 : 0
+    sc += (dir == "LONG" ? inDiscount : inPremium) ? 1 : 0
+    sc += inKz ? 1 : 0
+    sc -= htfBias == (dir == "LONG" ? "BEAR" : "BULL") ? 3 : 0
+    math.max(sc, 0)
+
+ctxLongOk  = (not requireHtf or htfBias == "BULL") and (not requirePd or inDiscount)
+ctxShortOk = (not requireHtf or htfBias == "BEAR") and (not requirePd or inPremium)
+
+bool longTrigger  = false
+bool shortTrigger = false
+
+// ---------------- LONG ----------------
+if engineOn and confirmed
+    if activeLong.state == "IDLE"
+        if ctxLongOk
+            activeLong.state := "CONTEXT_FOUND"
+    else if activeLong.state == "CONTEXT_FOUND"
+        if not ctxLongOk
+            activeLong.state := "IDLE"
+        else if sslSwept and not na(sweptSslLevel)
+            activeLong.state      := "LIQUIDITY_SWEPT"
+            activeLong.sweepLevel := math.min(sweptSslLevel, low)
+            activeLong.sweepBar   := bar_index
+    else if activeLong.state == "LIQUIDITY_SWEPT"
+        if bar_index - activeLong.sweepBar > mssTimeout
+            activeLong.state := "INVALIDATED"
+        else if isBullDisp and bar_index > activeLong.sweepBar
+            activeLong.state := "DISPLACEMENT_CONFIRMED"
+    else if activeLong.state == "DISPLACEMENT_CONFIRMED"
+        if bar_index - activeLong.sweepBar > mssTimeout
+            activeLong.state := "INVALIDATED"
+        else if mssUp
+            activeLong.state    := "MSS_CONFIRMED"
+            activeLong.mssLevel := intHigh
+            activeLong.mssBar   := bar_index
+    else if activeLong.state == "MSS_CONFIRMED"
+        if bar_index - activeLong.mssBar > mssValidBars
+            activeLong.state := "INVALIDATED"
+        else
+            Zone cand = f_latestZone("BULL")
+            if not na(cand) and cand.createdBar >= activeLong.sweepBar
+                activeLong.state  := "POI_CREATED"
+                activeLong.poi    := cand
+                activeLong.poiBar := bar_index
+    else if activeLong.state == "POI_CREATED"
+        if na(activeLong.poi) or bar_index - activeLong.poiBar > poiTimeout
+            activeLong.state := "INVALIDATED"
+        else if activeLong.poi.state == "FILLED" or activeLong.poi.state == "INVALID"
+            activeLong.state := "INVALIDATED"
+        else if low <= activeLong.poi.top and high >= activeLong.poi.bottom
+            activeLong.state := "RETRACE_WAIT"
+    else if activeLong.state == "RETRACE_WAIT"
+        if na(activeLong.poi) or activeLong.poi.state == "FILLED" or activeLong.poi.state == "INVALID" or bar_index - activeLong.poiBar > poiTimeout
+            activeLong.state := "INVALIDATED"
+        else
+            float entryL  = close
+            float slL     = activeLong.sweepLevel - atrVal * slBufferMult
+            float riskL   = math.max(entryL - slL, syminfo.mintick)
+            float tpLiqL  = f_nextLiqAbove(entryL)
+            float tpL     = na(tpLiqL) ? entryL + riskL * 2.0 : tpLiqL
+            float rrL     = (tpL - entryL) / riskL
+            int   scL     = f_score("LONG", activeLong.poi)
+            bool  kzOkL   = not killZoneReq or inKz
+            if rrL >= minRR and scL >= minScore and kzOkL and entryL > slL
+                activeLong.entryPrice := entryL
+                activeLong.slPrice    := slL
+                activeLong.tp1        := tpL
+                activeLong.rr         := rrL
+                activeLong.score      := scL
+                activeLong.state      := "ENTRY_TRIGGERED"
+                longTrigger           := true
+    else if activeLong.state == "TRADE_ACTIVE"
+        if low <= activeLong.slPrice or high >= activeLong.tp1 or bar_index - activeLong.entryBar > tradeTimeout
+            activeLong.state := "INVALIDATED"
+
+// ---------------- SHORT ----------------
+if engineOn and confirmed
+    if activeShort.state == "IDLE"
+        if ctxShortOk
+            activeShort.state := "CONTEXT_FOUND"
+    else if activeShort.state == "CONTEXT_FOUND"
+        if not ctxShortOk
+            activeShort.state := "IDLE"
+        else if bslSwept and not na(sweptBslLevel)
+            activeShort.state      := "LIQUIDITY_SWEPT"
+            activeShort.sweepLevel := math.max(sweptBslLevel, high)
+            activeShort.sweepBar   := bar_index
+    else if activeShort.state == "LIQUIDITY_SWEPT"
+        if bar_index - activeShort.sweepBar > mssTimeout
+            activeShort.state := "INVALIDATED"
+        else if isBearDisp and bar_index > activeShort.sweepBar
+            activeShort.state := "DISPLACEMENT_CONFIRMED"
+    else if activeShort.state == "DISPLACEMENT_CONFIRMED"
+        if bar_index - activeShort.sweepBar > mssTimeout
+            activeShort.state := "INVALIDATED"
+        else if mssDn
+            activeShort.state    := "MSS_CONFIRMED"
+            activeShort.mssLevel := intLow
+            activeShort.mssBar   := bar_index
+    else if activeShort.state == "MSS_CONFIRMED"
+        if bar_index - activeShort.mssBar > mssValidBars
+            activeShort.state := "INVALIDATED"
+        else
+            Zone candS = f_latestZone("BEAR")
+            if not na(candS) and candS.createdBar >= activeShort.sweepBar
+                activeShort.state  := "POI_CREATED"
+                activeShort.poi    := candS
+                activeShort.poiBar := bar_index
+    else if activeShort.state == "POI_CREATED"
+        if na(activeShort.poi) or bar_index - activeShort.poiBar > poiTimeout
+            activeShort.state := "INVALIDATED"
+        else if activeShort.poi.state == "FILLED" or activeShort.poi.state == "INVALID"
+            activeShort.state := "INVALIDATED"
+        else if low <= activeShort.poi.top and high >= activeShort.poi.bottom
+            activeShort.state := "RETRACE_WAIT"
+    else if activeShort.state == "RETRACE_WAIT"
+        if na(activeShort.poi) or activeShort.poi.state == "FILLED" or activeShort.poi.state == "INVALID" or bar_index - activeShort.poiBar > poiTimeout
+            activeShort.state := "INVALIDATED"
+        else
+            float entryS = close
+            float slS    = activeShort.sweepLevel + atrVal * slBufferMult
+            float riskS  = math.max(slS - entryS, syminfo.mintick)
+            float tpLiqS = f_nextLiqBelow(entryS)
+            float tpS    = na(tpLiqS) ? entryS - riskS * 2.0 : tpLiqS
+            float rrS    = (entryS - tpS) / riskS
+            int   scS    = f_score("SHORT", activeShort.poi)
+            bool  kzOkS  = not killZoneReq or inKz
+            if rrS >= minRR and scS >= minScore and kzOkS and slS > entryS
+                activeShort.entryPrice := entryS
+                activeShort.slPrice    := slS
+                activeShort.tp1        := tpS
+                activeShort.rr         := rrS
+                activeShort.score      := scS
+                activeShort.state      := "ENTRY_TRIGGERED"
+                shortTrigger           := true
+    else if activeShort.state == "TRADE_ACTIVE"
+        if high >= activeShort.slPrice or low <= activeShort.tp1 or bar_index - activeShort.entryBar > tradeTimeout
+            activeShort.state := "INVALIDATED"
+
+// -- same bar LONG + SHORT -> reject both
+if longTrigger and shortTrigger
+    activeLong.state  := "INVALIDATED"
+    activeShort.state := "INVALIDATED"
+    longTrigger       := false
+    shortTrigger      := false
+
+longSignal  = longTrigger  and not activeLong.signalEmitted
+shortSignal = shortTrigger and not activeShort.signalEmitted
+
+if longSignal
+    activeLong.signalEmitted := true
+    activeLong.entryBar      := bar_index
+    activeLong.state         := "TRADE_ACTIVE"
+    totalLong                += 1
+    if not na(activeLong.poi)
+        activeLong.poi.consumed := true
+
+if shortSignal
+    activeShort.signalEmitted := true
+    activeShort.entryBar      := bar_index
+    activeShort.state         := "TRADE_ACTIVE"
+    totalShort                += 1
+    if not na(activeShort.poi)
+        activeShort.poi.consumed := true
+
+// === 08 - CLEANUP ==========================================================
+if confirmed
+    if activeLong.state == "INVALIDATED"
+        f_reset(activeLong)
+    if activeShort.state == "INVALIDATED"
+        f_reset(activeShort)
+
+if confirmed and array.size(zones) > 0
+    for i = array.size(zones) - 1 to 0
+        Zone z = array.get(zones, i)
+        bool dead = (z.state == "FILLED" or z.state == "INVALID") and hideDead
+        bool aged = bar_index - z.createdBar > 500
+        if dead or aged
+            if not na(z.drawing)
+                box.delete(z.drawing)
+                z.drawing := na
+            if not na(z.ceLine)
+                line.delete(z.ceLine)
+                z.ceLine := na
+            array.remove(zones, i)
+
+if array.size(zones) > 100
+    Zone oldZ = array.shift(zones)
+    if not na(oldZ.drawing)
+        box.delete(oldZ.drawing)
+    if not na(oldZ.ceLine)
+        line.delete(oldZ.ceLine)
+
+// === 09 - DRAWING ==========================================================
+// -- Phase 1 - swing labels
+if showSwings and not na(ph)
+    label.new(bar_index - swingLen, high[swingLen], hiLbl, style = label.style_label_down, color = color.new(colBear, 20), textcolor = color.white, size = size.tiny)
+if showSwings and not na(pl)
+    label.new(bar_index - swingLen, low[swingLen], loLbl, style = label.style_label_up, color = color.new(colBull, 20), textcolor = color.white, size = size.tiny)
+
+// -- Phase 3 - BOS / CHoCH
+if showBOS and (bosUp or chochUp) and not na(lastSwingHigh) and not na(lastSwingHighBar)
+    line.new(lastSwingHighBar, lastSwingHigh, bar_index, lastSwingHigh, color = colBull, style = line.style_dashed, width = 1)
+    label.new(bar_index, lastSwingHigh, chochUp ? "CHoCH" : "BOS", style = label.style_label_down, color = color.new(chochUp ? color.orange : colBull, 20), textcolor = color.white, size = size.tiny)
+
+if showBOS and (bosDn or chochDn) and not na(lastSwingLow) and not na(lastSwingLowBar)
+    line.new(lastSwingLowBar, lastSwingLow, bar_index, lastSwingLow, color = colBear, style = line.style_dashed, width = 1)
+    label.new(bar_index, lastSwingLow, chochDn ? "CHoCH" : "BOS", style = label.style_label_up, color = color.new(chochDn ? color.orange : colBear, 20), textcolor = color.white, size = size.tiny)
+
+// -- Phase 4 - displacement marker
+plotshape(showDisp and isBullDisp, title = "Bull Displacement", style = shape.triangleup, location = location.belowbar, color = colBull, size = size.tiny)
+plotshape(showDisp and isBearDisp, title = "Bear Displacement", style = shape.triangledown, location = location.abovebar, color = colBear, size = size.tiny)
+
+// -- Phase 2 - liquidity lines
+if liqOn and array.size(liquidity) > 0
+    for i = 0 to array.size(liquidity) - 1
+        LiqLevel lv = array.get(liquidity, i)
+        bool vis = lv.kind == "BSL" or lv.kind == "SSL" ? showBslSsl : lv.kind == "EQH" or lv.kind == "EQL" ? showEq : lv.kind == "PDH" or lv.kind == "PDL" ? showPdhPdl : showPwhPwl
+        if vis and na(lv.drawing)
+            lv.drawing := line.new(lv.createdBar, lv.price, bar_index, lv.price, color = colLiq, style = line.style_dotted, width = 1)
+            label.new(lv.createdBar, lv.price, lv.kind, style = label.style_none, textcolor = colLiq, size = size.tiny)
+        if not na(lv.drawing)
+            if not lv.swept
+                line.set_x2(lv.drawing, bar_index)
+            else
+                line.set_color(lv.drawing, color.new(colLiq, 70))
+
+// -- Phase 6 / 7 - zone boxes
+if showZones and array.size(zones) > 0
+    for i = 0 to array.size(zones) - 1
+        Zone z = array.get(zones, i)
+        bool vis = z.kind == "FVG" ? fvgOn : z.kind == "OB" ? obOn : bbOn
+        color zc = z.kind == "FVG" ? colFvg : z.kind == "OB" ? colOb : colBb
+        if vis and na(z.drawing)
+            z.drawing := box.new(z.createdBar, z.top, z.createdBar + zoneExtend, z.bottom, border_color = color.new(zc, 40), bgcolor = zc, text = f_zoneLabel(z.kind, z.direction), text_size = size.tiny, text_color = color.new(color.gray, 20), text_halign = text.align_left)
+            if showCE
+                z.ceLine := line.new(z.createdBar, z.ce, z.createdBar + zoneExtend, z.ce, color = color.new(zc, 30), style = line.style_dashed, width = 1)
+        if not na(z.drawing)
+            bool alive = z.state == "NEW" or z.state == "ACTIVE" or z.state == "TOUCHED" or z.state == "MITIGATED"
+            if alive and bar_index + zoneExtend > box.get_right(z.drawing)
+                box.set_right(z.drawing, bar_index + zoneExtend)
+                if not na(z.ceLine)
+                    line.set_x2(z.ceLine, bar_index + zoneExtend)
+
+// -- Phase 8 - dealing range / EQ / OTE
+var line  eqLn   = na
+var box   oteBxL = na
+var box   oteBxS = na
+if pdOn and showPd and rangeOk and barstate.islast and not na(lastSwingHighBar) and not na(lastSwingLowBar)
+    int xLeft = math.min(lastSwingHighBar, lastSwingLowBar)
+    if na(eqLn)
+        eqLn := line.new(xLeft, eqLevel, bar_index + 10, eqLevel, color = color.new(color.gray, 20), style = line.style_dotted)
+    else
+        line.set_xy1(eqLn, xLeft, eqLevel)
+        line.set_xy2(eqLn, bar_index + 10, eqLevel)
+    if na(oteBxL)
+        oteBxL := box.new(xLeft, oteBullTop, bar_index + 10, oteBullBot, border_color = color.new(colBull, 100), bgcolor = color.new(colBull, 90))
+    else
+        box.set_lefttop(oteBxL, xLeft, oteBullTop)
+        box.set_rightbottom(oteBxL, bar_index + 10, oteBullBot)
+    if na(oteBxS)
+        oteBxS := box.new(xLeft, oteBearTop, bar_index + 10, oteBearBot, border_color = color.new(colBear, 100), bgcolor = color.new(colBear, 90))
+    else
+        box.set_lefttop(oteBxS, xLeft, oteBearTop)
+        box.set_rightbottom(oteBxS, bar_index + 10, oteBearBot)
+
+// -- Phase 10 - session shading
+bgcolor(shadeSess and inAsia   ? color.new(color.blue,   93) : na, title = "Asia")
+bgcolor(shadeSess and inLondon ? color.new(color.orange, 93) : na, title = "London")
+bgcolor(shadeSess and inNy     ? color.new(color.green,  93) : na, title = "New York")
+
+// -- Phase 12 / 14 - signal visuals
+if longSignal
+    label.new(bar_index, low, "LONG\nE " + str.tostring(activeLong.entryPrice, format.mintick) + "\nSL " + str.tostring(activeLong.slPrice, format.mintick) + "\nTP " + str.tostring(activeLong.tp1, format.mintick) + "\nRR " + str.tostring(activeLong.rr, "#.##") + " | S" + str.tostring(activeLong.score), style = label.style_label_up, color = colBull, textcolor = color.white, size = size.small)
+    line.new(bar_index, activeLong.slPrice, bar_index + 20, activeLong.slPrice, color = colBear, style = line.style_solid, width = 1)
+    line.new(bar_index, activeLong.tp1,     bar_index + 20, activeLong.tp1,     color = colBull, style = line.style_solid, width = 1)
+
+if shortSignal
+    label.new(bar_index, high, "SHORT\nE " + str.tostring(activeShort.entryPrice, format.mintick) + "\nSL " + str.tostring(activeShort.slPrice, format.mintick) + "\nTP " + str.tostring(activeShort.tp1, format.mintick) + "\nRR " + str.tostring(activeShort.rr, "#.##") + " | S" + str.tostring(activeShort.score), style = label.style_label_down, color = colBear, textcolor = color.white, size = size.small)
+    line.new(bar_index, activeShort.slPrice, bar_index + 20, activeShort.slPrice, color = colBear, style = line.style_solid, width = 1)
+    line.new(bar_index, activeShort.tp1,     bar_index + 20, activeShort.tp1,     color = colBull, style = line.style_solid, width = 1)
+
+// === 10 - DASHBOARD ========================================================
+var table dash = table.new(position.top_right, 2, 8, border_width = 1)
+if showDash and barstate.islast
+    table.cell(dash, 0, 0, "SMC-ICT", text_color = color.white, bgcolor = color.new(color.blue, 20), text_size = size.small)
+    table.cell(dash, 1, 0, timeframe.period + " / " + htfTF, text_color = color.white, bgcolor = color.new(color.blue, 20), text_size = size.small)
+    table.cell(dash, 0, 1, "HTF Bias", text_size = size.small)
+    table.cell(dash, 1, 1, htfBias, text_color = htfBias == "BULL" ? colBull : htfBias == "BEAR" ? colBear : color.gray, text_size = size.small)
+    table.cell(dash, 0, 2, "Trend (LTF)", text_size = size.small)
+    table.cell(dash, 1, 2, trendDir, text_color = trendDir == "BULL" ? colBull : trendDir == "BEAR" ? colBear : color.gray, text_size = size.small)
+    table.cell(dash, 0, 3, "P / D", text_size = size.small)
+    table.cell(dash, 1, 3, rangeOk ? (inDiscount ? "DISCOUNT" : "PREMIUM") : "n/a", text_size = size.small)
+    table.cell(dash, 0, 4, "Session", text_size = size.small)
+    table.cell(dash, 1, 4, inNy ? "NY" : inLondon ? "LONDON" : inAsia ? "ASIA" : "-", text_size = size.small)
+    table.cell(dash, 0, 5, "Zones / Liq", text_size = size.small)
+    table.cell(dash, 1, 5, str.tostring(array.size(zones)) + " / " + str.tostring(array.size(liquidity)), text_size = size.small)
+    table.cell(dash, 0, 6, "LONG state", text_size = size.small)
+    table.cell(dash, 1, 6, activeLong.state, text_size = size.small)
+    table.cell(dash, 0, 7, "SHORT state", text_size = size.small)
+    table.cell(dash, 1, 7, activeShort.state, text_size = size.small)
+
+var table dbg = table.new(position.bottom_right, 2, 6, border_width = 1)
+if showDebug and barstate.islast
+    table.cell(dbg, 0, 0, "DEBUG", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.tiny)
+    table.cell(dbg, 1, 0, "bar " + str.tostring(bar_index), text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.tiny)
+    table.cell(dbg, 0, 1, "ATR", text_size = size.tiny)
+    table.cell(dbg, 1, 1, str.tostring(atrVal, format.mintick), text_size = size.tiny)
+    table.cell(dbg, 0, 2, "Disp (body/ATR)", text_size = size.tiny)
+    table.cell(dbg, 1, 2, str.tostring(bodyRatio, "#.##") + " / " + str.tostring(bodySize / math.max(atrVal, syminfo.mintick), "#.##"), text_size = size.tiny)
+    table.cell(dbg, 0, 3, "Swept L / S", text_size = size.tiny)
+    table.cell(dbg, 1, 3, str.tostring(activeLong.sweepLevel, format.mintick) + " / " + str.tostring(activeShort.sweepLevel, format.mintick), text_size = size.tiny)
+    table.cell(dbg, 0, 4, "Signals L / S", text_size = size.tiny)
+    table.cell(dbg, 1, 4, str.tostring(totalLong) + " / " + str.tostring(totalShort), text_size = size.tiny)
+    table.cell(dbg, 0, 5, "Int H / L", text_size = size.tiny)
+    table.cell(dbg, 1, 5, str.tostring(intHigh, format.mintick) + " / " + str.tostring(intLow, format.mintick), text_size = size.tiny)
+
+// === 11 - ALERTS ===========================================================
+if longSignal and confirmed
+    alert("LONG " + syminfo.ticker + " | E:" + str.tostring(activeLong.entryPrice, format.mintick) + " SL:" + str.tostring(activeLong.slPrice, format.mintick) + " TP:" + str.tostring(activeLong.tp1, format.mintick) + " RR:" + str.tostring(activeLong.rr, "#.##") + " Score:" + str.tostring(activeLong.score), alert.freq_once_per_bar_close)
+
+if shortSignal and confirmed
+    alert("SHORT " + syminfo.ticker + " | E:" + str.tostring(activeShort.entryPrice, format.mintick) + " SL:" + str.tostring(activeShort.slPrice, format.mintick) + " TP:" + str.tostring(activeShort.tp1, format.mintick) + " RR:" + str.tostring(activeShort.rr, "#.##") + " Score:" + str.tostring(activeShort.score), alert.freq_once_per_bar_close)
+
+if confirmed and (bosUp or bosDn)
+    alert("BOS " + (bosUp ? "UP" : "DOWN") + " " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+if confirmed and (chochUp or chochDn)
+    alert("CHoCH " + (chochUp ? "UP" : "DOWN") + " " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+if confirmed and (sslSwept or bslSwept)
+    alert("Liquidity sweep " + (sslSwept ? "SSL" : "BSL") + " " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+if confirmed and (newBullZone or newBearZone)
+    alert("New POI zone " + syminfo.ticker, alert.freq_once_per_bar_close)
+
+alertcondition(longSignal,  title = "LONG signal",  message = "SMC-ICT LONG signal")
+alertcondition(shortSignal, title = "SHORT signal", message = "SMC-ICT SHORT signal")
+alertcondition(bosUp or bosDn,     title = "BOS",   message = "SMC-ICT BOS")
+alertcondition(chochUp or chochDn, title = "CHoCH", message = "SMC-ICT CHoCH")
+alertcondition(sslSwept or bslSwept, title = "Liquidity Sweep", message = "SMC-ICT liquidity sweep")
