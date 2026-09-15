@@ -17,7 +17,7 @@ File: `SMC_ICT_Engine.pine` — Pine Script **v6**, single `indicator()`.
 | 9 HTF Context | `05 LAYER 1` | `request.security(... [1], lookahead_off)` + auto TF map |
 | 10 Session / Kill Zone | `05 LAYER 1` | timezone input, Asia/London/NY |
 | 11 Entry State Machine | `07 LAYER 3` | IDLE→CONTEXT→SWEPT→DISP→MSS→POI→RETRACE→ENTRY→TRADE, প্রতি step-এ timeout |
-| 12 Score + SL/TP/RR | `07 LAYER 3` | score v1 (max 12, contradiction −3), SL = sweep ± ATR buffer, TP = next liquidity, `rr < minRR` → no trade |
+| 12 Score + SL/TP/RR | `07 LAYER 3` | score v1 (max 12, contradiction −3) — **প্রতিটা point অর্জন করতে হয়, কোনো baseline নেই**; SL = sweep ± ATR buffer, TP = next liquidity, `rr < minRR` → no trade। `tmOn` থাকলে RR মাপা হয় **আসল TP1**-এর বিপরীতে |
 | 13 Visuals + Settings | `09 DRAWING` | ১০টা input group, প্রতি module আলাদা toggle |
 | 14 Alerts | `11 ALERTS` | trade / BOS / CHoCH / sweep / zone, `freq_once_per_bar_close` |
 | 15 Repaint audit | পুরো ফাইল | নিচে checklist |
@@ -62,7 +62,7 @@ File: `SMC_ICT_Engine.pine` — Pine Script **v6**, single `indicator()`.
 ## Tuning যদি signal ০ হয়
 
 1. `Require HTF Alignment` off করো — HTF bias `NEUTRAL` হলে সব block হয়।
-2. `Min Score to Trade` 7 → 5।
+2. `Min Score to Trade` 6 → 4।
 3. `Min RR` 1.5 → 1.2।
 4. `Sweep -> MSS timeout` 10 → 15।
 5. Debug table-এ LONG/SHORT state দেখো — কোন step-এ আটকে আছে।
@@ -94,14 +94,14 @@ Tier B-র প্রতিটা module-এর toggle **default `false`** হব
 | 28 Unicorn / MMBM | `21 - Market Model (B)` | BB+FVG overlap ≥ ratio = UNICORN zone; MMBM/MMSM model name alert-এ যায় |
 | 29 Daily Bias | `22 - Daily Bias (B)` | weekly/daily open `ta.valuewhen` দিয়ে (request.security নয় = repaint নেই) |
 | 30 Std Dev | `23 - Std Dev Targets (B)` | sweep→MSS unit-এর multiple; TP priority-তে সবার শেষে, `Use as TP` on করলেই |
-| 31 Score v2 | `24 - Score Model (B)` | শ্রেণীভিত্তিক capping (max 14) + penalty; **default `v1`** |
+| 31 Score v2 | `24 - Score Model (B)` | শ্রেণীভিত্তিক score (max 17) + penalty; প্রতিটা class শূন্য থেকে শুরু; **default `v1`** |
 | 32 Dashboard / Density | `10 - Visuals` | 11 row dashboard, `Visual Density` = Minimal / Normal / Full, dashboard position |
 | 33 Object budget | — | zones 100 · liquidity 50 · gaps 30 · trendline 2×cap · sdev lines cleared per bar; ভারী loop শুধু `barstate.isconfirmed`-এ; `request.security` মোট **4** |
 
 ## Plan থেকে ইচ্ছাকৃত দুইটা বিচ্যুতি (কারণসহ)
 
 1. **`Entry Reference` default = `Close`** (plan বলেছিল `CE`)। কারণ: Tier B-র এক নম্বর শর্ত — সব নতুন toggle off রাখলে Tier A-র ফল অপরিবর্তিত থাকতে হবে। CE default দিলে entry price বদলে যেত, তাই Tier A-র আচরণই default; CE হাতে বেছে নেওয়া যায়।
-2. **Score v2 default off** (plan বলেছিল v2 + threshold 8 দিয়ে v1 replace)। একই কারণ। `Score Model = v2` করলেই 14-point শ্রেণীভিত্তিক score + threshold 8 চালু।
+2. **Score v2 default off** (plan বলেছিল v2 দিয়ে v1 replace)। একই কারণ। `Score Model = v2` করলেই 17-point শ্রেণীভিত্তিক score + threshold 9 চালু।
 
 ## Tier B test matrix (Phase 34)
 
@@ -172,7 +172,7 @@ Tier B-র প্রতিটা module-এর toggle **default `false`** হব
 ## Quick start (৩ লাইন)
 
 1. Default-এই চালাও — Tier A engine, ১৫M chart, দিনে ০–২টা signal।
-2. Signal ০ হলে: `Require HTF Alignment` off → `Min Score` 5 → Debug table on।
+2. Signal ০ হলে: `Require HTF Alignment` off → `Min Score` 4 → Debug table on। (`Require HTF Alignment` on রেখে `Enable HTF Context` off করলে এখন script সরাসরি error দেয় — আগে নিঃশব্দে ০ signal দিত।)
 3. মান বাড়াতে: `Regime Filter` on + `chopBlock` on, তারপর `Score Model = v2`।
 
 ---

@@ -16,10 +16,19 @@ class Zone:
         self.lastTouchBar = -10
         self.mitigationPct = 0.0
 
+BUY_SIDE_KINDS   = ("BSL", "EQH", "PDH", "PWH")
+NAMED_POOL_KINDS = ("EQH", "EQL", "PDH", "PDL", "PWH", "PWL")
+
+ZONE_PRIORITY = {"UNICORN": 7, "HTF_FVG": 6, "FVG": 6, "OB": 5, "BPR": 5,
+                 "BB": 4, "IFVG": 4, "MB": 3, "RB": 2, "SD": 1}
+
 class Liq:
-    def __init__(self, kind, price, created):
+    def __init__(self, kind, price, created, strength=1, isBuySide=None):
         self.kind, self.price, self.createdBar = kind, price, created
         self.swept, self.sweptBar = False, 0
+        self.strength = strength
+        # Phase 52 - a level knows which side of the book it belongs to
+        self.isBuySide = (kind in BUY_SIDE_KINDS) if isBuySide is None else isBuySide
 
 class Setup:
     def __init__(self, direction):
@@ -36,13 +45,17 @@ class Setup:
         self.score = 0; self.entryBar = 0
         self.signalEmitted = False
         self.exitReason = ""
+        # Phase 50 - evidence captured when it happens, graded later
+        self.sweepKind = ""; self.sweepStrength = 1; self.sweepInKz = False
+        self.dispMult = 0.0; self.mssConfirmed = False
 
 class Engine:
     # defaults copied from the Pine inputs
     def __init__(self, htfBias="BULL", swingLen=2, intSwingLen=1, atr=1.0, atrMult=1.2,
                  bodyRatioMin=0.6, minGapMult=0.1, mssTimeout=10, mssValidBars=20,
-                 poiTimeout=50, minRR=1.5, minScore=7, slBuf=0.2, requirePd=False,
-                 requireHtf=True, inKz=True):
+                 poiTimeout=50, minRR=1.5, minScore=6, slBuf=0.2, requirePd=False,
+                 requireHtf=True, inKz=True, inDiscount=True, tmOn=False,
+                 tpMode="Liquidity", tp1R=1.0):
         self.p = dict(locals()); self.p.pop("self")
         self.bars = []
         self.swings = []; self.liq = []; self.zones = []
@@ -89,18 +102,27 @@ class Engine:
         rejDn = (b["h"] - b["c"]) / rng > 0.5
         sslSwept = bslSwept = False
         sweptSsl = sweptBsl = None
+        sweptSslKind = sweptBslKind = ""
+        sweptSslStr = sweptBslStr = 1
+        # Phase 52 - only a sell-side level feeds a long, only a buy-side level a short
         for lv in self.liq:
             if lv.swept:
                 continue
-            if lv.price < b["c"] and b["l"] < lv.price and rejUp:
+            if (not lv.isBuySide) and lv.price < b["c"] and b["l"] < lv.price and rejUp:
                 lv.swept, lv.sweptBar, sslSwept = True, i, True
-                sweptSsl = lv.price if sweptSsl is None else max(sweptSsl, lv.price)
-            elif lv.price > b["c"] and b["h"] > lv.price and rejDn:
+                if sweptSsl is None or lv.price > sweptSsl:
+                    sweptSsl, sweptSslKind, sweptSslStr = lv.price, lv.kind, lv.strength
+            elif lv.isBuySide and lv.price > b["c"] and b["h"] > lv.price and rejDn:
                 lv.swept, lv.sweptBar, bslSwept = True, i, True
-                sweptBsl = lv.price if sweptBsl is None else min(sweptBsl, lv.price)
+                if sweptBsl is None or lv.price < sweptBsl:
+                    sweptBsl, sweptBslKind, sweptBslStr = lv.price, lv.kind, lv.strength
 
         mssUp = bullDisp and self.intHigh is not None and b["c"] > self.intHigh
         mssDn = bearDisp and self.intLow is not None and b["c"] < self.intLow
+        # Phase 54 - the pivot is retired in Layer 3 at the moment a setup confirms
+        # its MSS against it, not here: it has to survive the DISPLACEMENT_CONFIRMED
+        # bar that sits between the sweep and the MSS.
+        dispMult = body / max(self.p["atr"], 1e-9)
 
         # FVG (middle candle must be the displacement)
         if i >= 2:
@@ -129,7 +151,10 @@ class Engine:
                 if killed:
                     z.state = "FILLED"
         return dict(bullDisp=bullDisp, bearDisp=bearDisp, sslSwept=sslSwept, bslSwept=bslSwept,
-                    sweptSsl=sweptSsl, sweptBsl=sweptBsl, mssUp=mssUp, mssDn=mssDn)
+                    sweptSsl=sweptSsl, sweptBsl=sweptBsl, mssUp=mssUp, mssDn=mssDn,
+                    sweptSslKind=sweptSslKind, sweptBslKind=sweptBslKind,
+                    sweptSslStr=sweptSslStr, sweptBslStr=sweptBslStr,
+                    dispMult=dispMult)
 
     def _isDisp(self, i):
         b = self.bars[i]
@@ -141,11 +166,51 @@ class Engine:
         c = [lv.price for lv in self.liq if not lv.swept and lv.price > px]
         return min(c) if c else None
 
-    def _latestZone(self, direction):
+    def _latestZone(self, direction, px):
+        """Phase 54 - a long retraces DOWN into its POI, so the zone must sit at or
+        below price. Taking simply the newest zone handed longs zones sitting ABOVE
+        price, which price can never retrace into: the setup then sat in POI_CREATED
+        until poiTimeout killed it, losing the signal with nothing shown on screen.
+        Among the reachable zones, prefer the better kind, then the nearer one."""
+        best, bestRank, bestDist = None, -1, None
         for z in reversed(self.zones):
-            if z.direction == direction and not z.consumed and z.state in ("NEW", "ACTIVE", "TOUCHED"):
-                return z
-        return None
+            if z.direction != direction or z.consumed or z.state not in ("NEW", "ACTIVE", "TOUCHED"):
+                continue
+            reachable = z.top <= px if direction == "BULL" else z.bottom >= px
+            if not reachable:
+                continue
+            rank = ZONE_PRIORITY.get(z.kind, 0)
+            dist = (px - z.top) if direction == "BULL" else (z.bottom - px)
+            if rank > bestRank or (rank == bestRank and dist < bestDist):
+                best, bestRank, bestDist = z, rank, dist
+        return best
+
+    def _scoreV1(self, st, direction):
+        """Phase 50 - every point is earned. The old model added a flat 6 of 12,
+        so the minimum-score input could not separate a good setup from a bad one."""
+        isLong = direction == "LONG"
+        sc = 0
+        sc += 2 if self.p["htfBias"] == ("BULL" if isLong else "BEAR") else 0
+        sc += 2 if st.mssConfirmed else 0
+        sc += 1 if st.dispMult >= self.p["atrMult"] else 0
+        sc += 1 if st.dispMult >= self.p["atrMult"] * 1.8 else 0
+        sc += 1 if st.sweepStrength >= 2 else 0
+        sc += 1 if st.sweepKind in NAMED_POOL_KINDS else 0
+        if st.poi is not None:
+            sc += 1
+            sc += 1 if st.poi.kind in ("FVG", "IFVG", "OB", "BB", "UNICORN") else 0
+        sc += 1 if (self.p["inDiscount"] if isLong else not self.p["inDiscount"]) else 0
+        sc += 1 if self.p["inKz"] else 0
+        sc -= 3 if self.p["htfBias"] == ("BEAR" if isLong else "BULL") else 0
+        return max(sc, 0)
+
+    def _tp1Long(self, entry, risk, tpLiq):
+        """mirrors f_tpLadder rung 1: R-based mode ignores the liquidity pool"""
+        if not self.p["tmOn"]:
+            return tpLiq if tpLiq is not None else entry + risk * 2.0
+        if self.p["tpMode"] == "R-based" or tpLiq is None:
+            return entry + risk * self.p["tp1R"]
+        return tpLiq
 
     # ---------- Layer 3 ----------
     def _machine(self, i, ev):
@@ -162,21 +227,25 @@ class Engine:
             elif ev["sslSwept"] and ev["sweptSsl"] is not None:
                 L.state = "LIQUIDITY_SWEPT"
                 L.sweepLevel = min(ev["sweptSsl"], b["l"]); L.sweepBar = i
+                L.sweepKind = ev["sweptSslKind"]; L.sweepStrength = ev["sweptSslStr"]
+                L.sweepInKz = self.p["inKz"]
         elif L.state == "LIQUIDITY_SWEPT":
             if i - L.sweepBar > self.p["mssTimeout"]:
                 L.state = "INVALIDATED"
             elif ev["bullDisp"] and i > L.sweepBar:
-                L.state = "DISPLACEMENT_CONFIRMED"
+                L.state = "DISPLACEMENT_CONFIRMED"; L.dispMult = ev["dispMult"]
         elif L.state == "DISPLACEMENT_CONFIRMED":
             if i - L.sweepBar > self.p["mssTimeout"]:
                 L.state = "INVALIDATED"
             elif ev["mssUp"]:
                 L.state = "MSS_CONFIRMED"; L.mssLevel = self.intHigh; L.mssBar = i
+                L.mssConfirmed = True
+                self.intHigh = None      # spent: the next MSS needs a fresh pivot
         elif L.state == "MSS_CONFIRMED":
             if i - L.mssBar > self.p["mssValidBars"]:
                 L.state = "INVALIDATED"
             else:
-                cand = self._latestZone("BULL")
+                cand = self._latestZone("BULL", b["c"])
                 if cand is not None and cand.createdBar >= L.sweepBar:
                     L.state = "POI_CREATED"; L.poi = cand; L.poiBar = i
         elif L.state == "POI_CREATED":
@@ -196,9 +265,11 @@ class Engine:
                 sl = L.sweepLevel - self.p["atr"] * self.p["slBuf"]
                 risk = max(entry - sl, 1e-9)
                 tpl = self._nextLiqAbove(entry)
-                tp = tpl if tpl is not None else entry + risk * 2.0
+                # Phase 51 - RR must grade the target the trade actually takes, not a
+                # liquidity pool the R-based ladder is going to ignore
+                tp = self._tp1Long(entry, risk, tpl)
                 rr = (tp - entry) / risk
-                sc = 6 + (2 if self.p["htfBias"] == "BULL" else 0) + 1 + (1 if self.p["inKz"] else 0)
+                sc = self._scoreV1(L, "LONG")
                 if rr >= self.p["minRR"] and sc >= self.p["minScore"] and entry > sl:
                     L.entryPrice, L.slPrice, L.slInit = entry, sl, sl
                     L.tp1, L.rr, L.score = tp, rr, sc

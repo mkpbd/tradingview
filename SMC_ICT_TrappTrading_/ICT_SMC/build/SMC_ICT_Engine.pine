@@ -102,9 +102,12 @@ mssTimeout   = input.int(10,  "Sweep -> MSS timeout (bars)",   minval = 2, maxva
 mssValidBars = input.int(20,  "MSS -> POI timeout (bars)",     minval = 2, maxval = 80, tooltip = "Bars allowed between the MSS and a POI appearing.",  group = GRP_ENT)
 poiTimeout   = input.int(50,  "POI -> Retrace timeout (bars)", minval = 5, maxval = 200, tooltip = "Bars allowed for price to return into the POI before the setup expires.", group = GRP_ENT)
 tradeTimeout = input.int(200, "Max Trade Duration (bars)",     minval = 10, maxval = 1000, tooltip = "Maximum bars a trade stays tracked. After this it is closed as TIME.", group = GRP_ENT)
-minScore     = input.int(7, "Min Score to Trade", minval = 0, maxval = 12, tooltip = "Minimum score v1 (max 12) required to emit. Raise for fewer, stronger signals.", group = GRP_ENT)
+minScore     = input.int(6, "Min Score to Trade", minval = 0, maxval = 12, tooltip = "Minimum score v1 (max 12) required to emit. Every point is earned - a setup with no HTF alignment, a minimum displacement and a lone swing sweep scores around 4. Raise for fewer, stronger signals.", group = GRP_ENT)
 requireHtf   = input.bool(true, "Require HTF Alignment", tooltip = "Only take longs when HTF bias is bullish (and mirror for shorts). Turn off if you get zero signals.", group = GRP_ENT)
 requirePd    = input.bool(true, "Require Premium / Discount Alignment", tooltip = "Only take longs in discount and shorts in premium. Stops you buying at the top of the range.", group = GRP_ENT)
+// Phase 56 - this sets the entry price for EVERY setup, Tier A included, so it
+// belongs with the entry engine rather than buried in the Tier B BPR group.
+entryRef     = input.string("Close", "Entry Reference", options = ["Close", "Zone Edge", "CE", "Zone Full"], tooltip = "Where the entry price is taken. Close keeps Tier A behaviour; CE uses the zone midpoint, which is where price usually turns.", group = GRP_ENT)
 
 // -- Phase 12 - Risk --
 minRR        = input.float(1.5, "Min Risk:Reward", minval = 0.5, maxval = 10.0, step = 0.1, tooltip = "Minimum reward / risk. Below this the setup is discarded rather than taken - never force a trade.", group = GRP_RISK)
@@ -176,7 +179,6 @@ bprOn    = input.bool(false, "Enable BPR", tooltip = "Detect Balanced Price Rang
 voidOn   = input.bool(false, "Enable Liquidity Void", tooltip = "Detect liquidity voids: several candles running with almost no overlap.", group = GRP_BPR)
 voidBars = input.int(3, "Min Void Candles", minval = 3, maxval = 6, tooltip = "Minimum candles in the run.", group = GRP_BPR)
 voidOv   = input.float(0.2, "Max Overlap Ratio", minval = 0.05, maxval = 0.5, step = 0.05, tooltip = "Maximum overlap ratio between consecutive candles for the run to count as a void.", group = GRP_BPR)
-entryRef = input.string("Close", "Entry Reference", options = ["Close", "Zone Edge", "CE", "Zone Full"], tooltip = "Where the entry price is taken. Close keeps Tier A behaviour; CE uses the zone midpoint, which is where price usually turns.", group = GRP_BPR)
 colBpr   = input.color(color.new(#e91e63, 80), "BPR", inline = "c5", tooltip = "Fill colour for BPR zones.", group = GRP_BPR)
 colVoid  = input.color(color.new(#607d8b, 88), "Void", inline = "c5", tooltip = "Fill colour for liquidity voids.", group = GRP_BPR)
 
@@ -216,12 +218,12 @@ sdevStr  = input.string("2,2.5,4", "Multipliers (comma separated)", tooltip = "C
 sdevAsTp = input.bool(false, "Use as TP when no liquidity target", tooltip = "Use the first projection as the take profit when no liquidity pool sits ahead. Last resort target.", group = GRP_TGT)
 
 // -- Phase 31 - Score v2 (TIER B - v1 stays default so Tier A results never move) --
-scoreModel  = input.string("v1", "Score Model", options = ["v1", "v2"], tooltip = "v1 = the 12 point Tier A score. v2 = the 14 point class-capped score with penalties (chop, exhausted ADR, wrong side of the range).", group = GRP_SCORE)
-minScoreV2  = input.int(8, "Min Score v2", minval = 0, maxval = 14, tooltip = "Minimum score v2 required to emit. Only used when the score model is v2.", group = GRP_SCORE)
+scoreModel  = input.string("v1", "Score Model", options = ["v1", "v2"], tooltip = "v1 = the 12 point Tier A score. v2 = the 17 point class-based score with penalties (chop, exhausted ADR, wrong side of the range). Every point in both models has to be earned - neither hands out a baseline.", group = GRP_SCORE)
+minScoreV2  = input.int(9, "Min Score v2", minval = 0, maxval = 17, tooltip = "Minimum score v2 (max 17) required to emit. Only used when the score model is v2. A clean setup with HTF alignment, an MSS, a real displacement and a pooled sweep in the kill zone scores around 11-12.", group = GRP_SCORE)
 
 // -- Phase 32 - Visual density --
 densityMode = input.string("Normal", "Visual Density", options = ["Minimal", "Normal", "Full"], tooltip = "Minimal = only the active POI and signals. Normal = plus structure and liquidity. Full = everything including volume imbalances.", group = GRP_VIS)
-dashPos     = input.string("Top Right", "Dashboard Position", options = ["Top Right", "Top Left", "Bottom Left"], tooltip = "Where the dashboard sits on the chart.", group = GRP_VIS)
+dashPos     = input.string("Top Right", "Dashboard Position", options = ["Top Right", "Top Left", "Bottom Left", "Bottom Right"], tooltip = "Where the dashboard sits on the chart. Stats sit bottom-left and debug bottom-right, so pick a free corner.", group = GRP_VIS)
 
 // -- Phase 35 - Range / Chop Regime Filter (TIER C - default off) --
 regimeOn   = input.bool(false, "Enable Regime Filter", tooltip = "Detect whether the market is trending, ranging or chopping. Most SMC logic is false in chop.", group = GRP_REG)
@@ -321,6 +323,18 @@ if barstate.isfirst
         runtime.error("OTE Fib Low must be smaller than OTE Fib High.")
     if effChop >= effTrend
         runtime.error("Regime: Chop efficiency must be smaller than Trend efficiency.")
+    // Phase 51 - combinations that leave the engine alive but permanently silent.
+    // Each of these produces zero signals forever, with nothing on screen to say why.
+    if requireHtf and not htfOn
+        runtime.error("'Require HTF Alignment' is on but 'Enable HTF Context' is off: the bias stays NEUTRAL, so no setup can ever leave IDLE. Enable HTF Context or turn the requirement off.")
+    if killZoneReq and not sessOn
+        runtime.error("'Require Kill Zone for Entry' is on but 'Enable Sessions' is off: no bar is ever inside a kill zone, so every entry is blocked. Enable Sessions or turn the requirement off.")
+    if sbOnly and not sbOn
+        runtime.error("'Signals ONLY inside SB window' is on but 'Enable Silver Bullet Window' is off: no bar is ever inside a window, so every entry is blocked.")
+    if eodFlat and not sessOn
+        runtime.error("'Close at session end' is on but 'Enable Sessions' is off: the New York session never ends, so the EOD exit can never fire.")
+    if tmOn and tpMode == "R-based" and tp1R < minRR
+        runtime.error("Trade Management: TP1 at " + str.tostring(tp1R) + "R is below Min Risk:Reward " + str.tostring(minRR) + ". The RR filter would pass a setup you then close at a worse target.")
 
 // === 02 - TYPES ============================================================
 type Swing
@@ -337,6 +351,9 @@ type LiqLevel
     bool   swept      = false
     int    sweptBar   = 0
     int    strength   = 1
+    // Phase 52 - a level is buy-side or sell-side. Only a sell-side level can be
+    // swept into a LONG setup, only a buy-side level into a SHORT one.
+    bool   isBuySide  = false
     line   drawing    = na
     label  lbl        = na
 
@@ -392,15 +409,16 @@ type Setup
     bool   poiLeft       = false
     bool   crtTbs        = false
     bool   crtTws        = false
-    int    scoreCtx      = 0
-    int    scoreLiq      = 0
-    int    scoreStr      = 0
-    int    scoreMom      = 0
-    int    scorePoi      = 0
-    int    scoreLoc      = 0
-    int    scoreTime     = 0
-    int    scoreCorr     = 0
-    int    scorePen      = 0
+    // Phase 50 - evidence captured when it happens, so the score can grade it later
+    string sweepKind     = ""
+    int    sweepStrength = 1
+    bool   sweepInKz     = false
+    float  dispMult      = 0.0
+    bool   mssConfirmed  = false
+    // Phase 50 - the nine per-class ints were written by the scoring function and
+    // never read anywhere, which also made scoring a side-effecting call on every
+    // RETRACE_WAIT bar. One string, written once at the trigger, is readable instead.
+    string scoreBreak    = ""
 
 type Trendline
     string id           = ""
@@ -457,7 +475,11 @@ var int totalLong  = 0
 var int totalShort = 0
 
 var array<Trendline> trendlines = array.new<Trendline>()
+// Phase 55 - opening gaps (NWOG / NDOG / ORG) and micro gaps (VOID / VI) are kept
+// apart. Sharing one array let VI churn evict a week-old NWOG and let each kind's
+// draw loop pick up the other kind's boxes.
 var array<Gap>       gaps       = array.new<Gap>()
+var array<Gap>       microGaps  = array.new<Gap>()
 
 var int   prevSwingHighBar = na
 var int   prevSwingLowBar  = na
@@ -550,22 +572,36 @@ f_clusterStrength(float px, float tol) =>
                 n += 1
     math.max(n, 1)
 
-f_pushLiq(string kind, float px, float tol) =>
+// Phase 52 - which side of the book a level represents. Buy-side liquidity sits
+// above price (stops of shorts), sell-side below it (stops of longs).
+f_isBuySideKind(string kind) =>
+    kind == "BSL" or kind == "EQH" or kind == "PDH" or kind == "PWH"
+
+// Phase 56 - every level goes through here, so dedupe and the hard cap apply to
+// TLQ / TRAP / CRT pushes too. A `while` drains the overflow instead of one per bar.
+f_pushLiqEx(string kind, float px, float tol, bool buySide, bool sweptNow) =>
     bool dupe = false
-    if array.size(liquidity) > 0
+    if not sweptNow and array.size(liquidity) > 0
         for i = 0 to array.size(liquidity) - 1
             LiqLevel lv = array.get(liquidity, i)
             if not lv.swept and lv.kind == kind and math.abs(lv.price - px) <= tol * 0.25
                 dupe := true
     if not dupe
-        array.push(liquidity, LiqLevel.new(kind = kind, price = px, createdBar = bar_index, strength = f_clusterStrength(px, tol)))
-        if array.size(liquidity) > 50
+        array.push(liquidity, LiqLevel.new(kind = kind, price = px, createdBar = bar_index, swept = sweptNow, sweptBar = sweptNow ? bar_index : 0, strength = f_clusterStrength(px, tol), isBuySide = buySide))
+        while array.size(liquidity) > 50
             LiqLevel old = array.shift(liquidity)
             if not na(old.drawing)
                 line.delete(old.drawing)
             if not na(old.lbl)
                 label.delete(old.lbl)
     dupe
+
+// a "named" pool is one traders can point at on a chart, not just the last swing
+f_isNamedPool(string kind) =>
+    kind == "EQH" or kind == "EQL" or kind == "PDH" or kind == "PDL" or kind == "PWH" or kind == "PWL"
+
+f_pushLiq(string kind, float px, float tol) =>
+    f_pushLiqEx(kind, px, tol, f_isBuySideKind(kind), false)
 
 f_zoneLabel(string kind, string dir) =>
     string s = kind + (dir == "BULL" ? " +" : " -")
@@ -613,7 +649,7 @@ if not na(pl)
     sslConsumed     := false
     newSwingLow     := true
 
-if array.size(swings) > 100
+while array.size(swings) > 100
     array.shift(swings)
 
 if not na(iph)
@@ -664,20 +700,23 @@ inOteBear = rangeOk and close >= oteBearBot and close <= oteBearTop
 
 // -- Phase 9 - HTF Context (only closed HTF candles)
 tfSec  = timeframe.in_seconds(timeframe.period)
-autoTF = tfSec <= 60 ? "15" : tfSec <= 300 ? "60" : tfSec <= 1800 ? "240" : tfSec <= 3600 ? "D" : tfSec <= 14400 ? "D" : "W"
+autoTF = tfSec <= 60 ? "15" : tfSec <= 300 ? "60" : tfSec <= 1800 ? "240" : tfSec <= 14400 ? "D" : "W"
 htfTF  = htfAuto ? autoTF : htfManual
 
+// The bias is sticky on purpose: it holds until the opposite extreme is broken.
+// Everything here reads [1] or older, so it is decided by CLOSED HTF bars only and
+// request.security adds no further lag - the bias is one HTF candle old, not two.
 f_htfBias() =>
-    float hi = ta.highest(high, 10)[1]
-    float lo = ta.lowest(low, 10)[1]
+    float hi = ta.highest(high, 10)[2]
+    float lo = ta.lowest(low, 10)[2]
     var string b = "NEUTRAL"
-    if not na(hi) and close > hi
+    if not na(hi) and close[1] > hi
         b := "BULL"
-    else if not na(lo) and close < lo
+    else if not na(lo) and close[1] < lo
         b := "BEAR"
     b
 
-htfBiasRaw = request.security(syminfo.tickerid, htfTF, f_htfBias()[1], lookahead = barmerge.lookahead_off)
+htfBiasRaw = request.security(syminfo.tickerid, htfTF, f_htfBias(), lookahead = barmerge.lookahead_off)
 htfTfSec   = timeframe.in_seconds(htfTF)
 htfValid   = htfTfSec > tfSec
 htfBias    = htfOn and htfValid and not na(htfBiasRaw) ? htfBiasRaw : "NEUTRAL"
@@ -755,8 +794,15 @@ inMacro = macroOk and (minNow >= 50 or minNow <= 10)
 weeklyOpen = ta.valuewhen(newWeek, open, 0)
 dailyOpen  = ta.valuewhen(newDay, open, 0)
 
-pdhSwept = not na(pdhRaw) and high > pdhRaw
-pdlSwept = not na(pdlRaw) and low  < pdlRaw
+// Phase 53 - "PDH was taken today" is a day-level fact, so it latches and resets
+// with the day. Reading it bar-by-bar made the daily bias flicker on and off.
+var bool pdhSwept = false
+var bool pdlSwept = false
+if newDay
+    pdhSwept := false
+    pdlSwept := false
+pdhSwept := pdhSwept or (not na(pdhRaw) and high > pdhRaw)
+pdlSwept := pdlSwept or (not na(pdlRaw) and low  < pdlRaw)
 
 dbScore = (htfBias == "BULL" ? 2 : htfBias == "BEAR" ? -2 : 0) + (pdlSwept ? 1 : 0) + (pdhSwept ? -1 : 0) + (woOn and not na(weeklyOpen) ? (close > weeklyOpen ? 1 : -1) : 0) + (moOn and not na(midnightOpen) ? (close > midnightOpen ? 1 : -1) : 0)
 dailyBias = not dbOn ? "NEUTRAL" : dbScore >= 2 ? "BULL" : dbScore <= -2 ? "BEAR" : "NEUTRAL"
@@ -841,7 +887,9 @@ f_structConsistent() =>
         ok := bull >= 3 or bear >= 3
     ok
 
-structOk   = f_structConsistent()
+// Phase 56 - the swings scan is the only part worth skipping; the ta.* series above
+// have to stay unconditional or their history breaks when the filter is toggled.
+structOk   = regimeOn and f_structConsistent()
 trendVotes = (efficiency > effTrend ? 1 : 0) + (not squeeze ? 1 : 0) + (structOk ? 1 : 0)
 chopVotes  = (efficiency < effChop ? 1 : 0) + (squeeze ? 1 : 0) + (not structOk ? 1 : 0)
 regime     = not regimeOn ? "TREND" : trendVotes >= 2 ? "TREND" : chopVotes >= 2 ? "CHOP" : "RANGE"
@@ -849,7 +897,9 @@ inChop     = regime == "CHOP"
 inRange    = regime == "RANGE"
 
 // -- Phase 36 - ADR + daily range exhaustion
-adrVal = ta.sma(math.max(pdhRaw - pdlRaw, syminfo.mintick), adrLen)
+// Phase 53 - the average must be taken over DAILY bars. Averaging the repeated
+// previous-day range over chart bars gave `adrLen` minutes of history, not days.
+adrVal = request.security(syminfo.tickerid, "D", ta.sma(math.max(high[1] - low[1], syminfo.mintick), adrLen), lookahead = barmerge.lookahead_off)
 if newDay
     todayHigh := high
     todayLow  := low
@@ -907,6 +957,8 @@ f_tlDupe(float slope, float yNow, bool isSup) =>
 f_tlBuild(int x1, float y1, int x2, float y2, bool isSup) =>
     bool ok = false
     if x2 - x1 >= tlMinBars and bar_index - x1 <= tlMaxAge
+        // by design: a support line must rise and a resistance line must fall.
+        // Flat and counter-slope anchors are rejected - they are ranges, not trendlines.
         bool dirOk = isSup ? y2 > y1 : y2 < y1
         if dirOk
             float sl   = (y2 - y1) / (x2 - x1)
@@ -968,6 +1020,7 @@ f_tlPrune() =>
 confirmed = intrabar ? true : barstate.isconfirmed
 
 // -- Phase 4 - Displacement
+dispMultNow = bodySize / math.max(atrVal, syminfo.mintick)   // size in ATR, for scoring
 isDisp     = bodyRatio >= bodyRatioMin and bodySize >= atrVal * atrMultEff
 isBullDisp = isDisp and close > open
 isBearDisp = isDisp and close < open
@@ -1001,27 +1054,45 @@ if confirmed and brokeDn
 rejUp = (close - low) / rangeSize > 0.5
 rejDn = (high - close) / rangeSize > 0.5
 
-bool  sslSwept      = false
-bool  bslSwept      = false
-float sweptSslLevel = na
-float sweptBslLevel = na
+bool   sslSwept      = false
+bool   bslSwept      = false
+float  sweptSslLevel = na
+float  sweptBslLevel = na
+string sweptSslKind  = ""
+string sweptBslKind  = ""
+int    sweptSslStr   = 1
+int    sweptBslStr   = 1
 
+// Phase 52 - only a SELL-side level can be swept into a long setup and only a
+// BUY-side level into a short one. Without the side test a PDH sitting below price
+// was consumed as sell-side liquidity, which is the opposite of what it is.
 if confirmed and liqOn and array.size(liquidity) > 0
     for i = 0 to array.size(liquidity) - 1
         LiqLevel lv = array.get(liquidity, i)
         if not lv.swept
-            if lv.price < close and low < lv.price and rejUp
+            if not lv.isBuySide and lv.price < close and low < lv.price and rejUp
                 lv.swept      := true
                 lv.sweptBar   := bar_index
                 sslSwept      := true
-                sweptSslLevel := na(sweptSslLevel) or lv.price > sweptSslLevel ? lv.price : sweptSslLevel
-            else if lv.price > close and high > lv.price and rejDn
+                if na(sweptSslLevel) or lv.price > sweptSslLevel
+                    sweptSslLevel := lv.price
+                    sweptSslKind  := lv.kind
+                    sweptSslStr   := lv.strength
+            else if lv.isBuySide and lv.price > close and high > lv.price and rejDn
                 lv.swept      := true
                 lv.sweptBar   := bar_index
                 bslSwept      := true
-                sweptBslLevel := na(sweptBslLevel) or lv.price < sweptBslLevel ? lv.price : sweptBslLevel
+                if na(sweptBslLevel) or lv.price < sweptBslLevel
+                    sweptBslLevel := lv.price
+                    sweptBslKind  := lv.kind
+                    sweptBslStr   := lv.strength
 
 // -- Phase 5 - MSS (sweep -> displacement -> structure break; handled in Layer 3)
+// Phase 54 - an internal pivot is SPENT once a setup confirms its MSS against it.
+// Leaving it in place meant every later bull displacement re-satisfied "close > intHigh"
+// against a level long since taken out, which reduced MSS to "a displacement happened".
+// The retirement happens in Layer 3 at the moment of use (not here), because the level
+// has to survive the DISPLACEMENT_CONFIRMED bar that sits between sweep and MSS.
 mssUp = isBullDisp and not na(intHigh) and close > intHigh
 mssDn = isBearDisp and not na(intLow) and close < intLow
 
@@ -1056,11 +1127,11 @@ if tlOn and confirmed and array.size(trendlines) > 0
             if sweepSup
                 tlqBull := true
                 if tlqOn
-                    array.push(liquidity, LiqLevel.new(kind = "TLQ", price = lineY, createdBar = bar_index, swept = true, sweptBar = bar_index))
+                    f_pushLiqEx("TLQ", lineY, clustAbs, false, true)
             else if sweepRes
                 tlqBear := true
                 if tlqOn
-                    array.push(liquidity, LiqLevel.new(kind = "TLQ", price = lineY, createdBar = bar_index, swept = true, sweptBar = bar_index))
+                    f_pushLiqEx("TLQ", lineY, clustAbs, true, true)
             else if brokeSup or brokeRes
                 t.broken    := true
                 t.brokenBar := bar_index
@@ -1080,9 +1151,11 @@ if tlOn and tlqOn and confirmed
     if tlqBull
         sslSwept      := true
         sweptSslLevel := na(sweptSslLevel) ? low : math.max(sweptSslLevel, low)
+        sweptSslKind  := sweptSslKind == "" ? "TLQ" : sweptSslKind
     if tlqBear
         bslSwept      := true
         sweptBslLevel := na(sweptBslLevel) ? high : math.min(sweptBslLevel, high)
+        sweptBslKind  := sweptBslKind == "" ? "TLQ" : sweptBslKind
 
 // -- Phase 19 - CISD (Change in State of Delivery)
 if close < open
@@ -1109,7 +1182,10 @@ dispBearOk = isBearDisp or (cisdOn and cisdAsDisplacement and bearCISD)
 // -- Phase 20 - SMT Divergence (score only, never a signal)
 smtSymOk  = str.length(smtSym) > 0
 smtSymUse = smtOn and smtSymOk ? smtSym : syminfo.tickerid
-[cHigh, cLow] = request.security(smtSymUse, timeframe.period, [high[1], low[1]], lookahead = barmerge.lookahead_off)
+// Phase 52 - both series must be read at the SAME offset. Pulling [high[1], low[1]]
+// from the correlated symbol while comparing against this bar's own low measured the
+// divergence across a one-bar skew, which invented divergences that were not there.
+[cHigh, cLow] = request.security(smtSymUse, timeframe.period, [high, low], lookahead = barmerge.lookahead_off)
 
 myLowN  = ta.lowest(low, smtLook)
 myHighN = ta.highest(high, smtLook)
@@ -1254,13 +1330,15 @@ if confirmed and (bullTrap or tsShort)
     bslSwept      := true
     float lvl     = bullTrap ? lastSwingHigh : tsHiLevel
     sweptBslLevel := na(sweptBslLevel) ? math.max(lvl, high) : sweptBslLevel
-    array.push(liquidity, LiqLevel.new(kind = "TRAP", price = lvl, createdBar = bar_index, swept = true, sweptBar = bar_index))
+    sweptBslKind  := sweptBslKind == "" ? "TRAP" : sweptBslKind
+    f_pushLiqEx("TRAP", lvl, clustAbs, true, true)
 
 if confirmed and (bearTrap or tsLong)
     sslSwept      := true
     float lvl     = bearTrap ? lastSwingLow : tsLoLevel
     sweptSslLevel := na(sweptSslLevel) ? math.min(lvl, low) : sweptSslLevel
-    array.push(liquidity, LiqLevel.new(kind = "TRAP", price = lvl, createdBar = bar_index, swept = true, sweptBar = bar_index))
+    sweptSslKind  := sweptSslKind == "" ? "TRAP" : sweptSslKind
+    f_pushLiqEx("TRAP", lvl, clustAbs, false, true)
 
 // -- Phase 49 - TBS / TWS classification + Model-1, then into the SAME sweep door
 bool crtSweepBull = false
@@ -1325,9 +1403,11 @@ if crtOn and crtFeed and confirmed
     if crtSweepBull
         sslSwept      := true
         sweptSslLevel := na(sweptSslLevel) ? math.min(crtLow, low) : sweptSslLevel
+        sweptSslKind  := sweptSslKind == "" ? "CRT" : sweptSslKind
     if crtSweepBear
         bslSwept      := true
         sweptBslLevel := na(sweptBslLevel) ? math.max(crtHigh, high) : sweptBslLevel
+        sweptBslKind  := sweptBslKind == "" ? "CRT" : sweptBslKind
 
 // -- Phase 23 - Supply / Demand cluster zones (TIER B)
 sdClustHigh = ta.highest(high[1], sdBars)
@@ -1346,11 +1426,18 @@ if confirmed and sdOn and sdTightOk and isBearDisp and not f_coveredByBetter("SD
 rbUpWick   = high - math.max(open, close)
 rbDownWick = math.min(open, close) - low
 
-if confirmed and rbOn and rbDownWick / rangeSize >= rbWickMin and not f_coveredByBetter("RB", math.min(open, close), low)
+// Phase 56 - a rejection block must actually reject SOMETHING. The wick ratio alone
+// fired on any long-tailed bar and turned RB into a noise generator, unlike every
+// other zone kind. It now also has to take out the prior bar's extreme, close in the
+// right direction, and clear the same minimum size the other zones must clear.
+rbBullOk = rbOn and rbDownWick / rangeSize >= rbWickMin and low < low[1] and close > open and rbDownWick >= atrVal * minGapMult
+rbBearOk = rbOn and rbUpWick   / rangeSize >= rbWickMin and high > high[1] and close < open and rbUpWick   >= atrVal * minGapMult
+
+if confirmed and rbBullOk and not f_coveredByBetter("RB", math.min(open, close), low)
     f_pushZone("RB", "BULL", math.min(open, close), low)
     newBullZone := true
 
-if confirmed and rbOn and rbUpWick / rangeSize >= rbWickMin and not f_coveredByBetter("RB", high, math.max(open, close))
+if confirmed and rbBearOk and not f_coveredByBetter("RB", high, math.max(open, close))
     f_pushZone("RB", "BEAR", high, math.max(open, close))
     newBearZone := true
 
@@ -1389,50 +1476,54 @@ f_voidRun() =>
             ok := false
     ok
 
-voidRun = f_voidRun()
+voidRun = voidOn and f_voidRun()
+
+f_pushMicroGap(string kind, float top, float bot) =>
+    array.push(microGaps, Gap.new(kind = kind, top = top, bottom = bot, ce = (top + bot) / 2, createdBar = bar_index))
+    while array.size(microGaps) > 40
+        Gap og = array.shift(microGaps)
+        if not na(og.drawing)
+            box.delete(og.drawing)
+        if not na(og.ceLine)
+            line.delete(og.ceLine)
+    true
 
 if confirmed and voidOn and voidRun
     float vTop = ta.highest(high, voidBars)
     float vBot = ta.lowest(low, voidBars)
     if vTop > vBot
-        array.push(gaps, Gap.new(kind = "VOID", top = vTop, bottom = vBot, ce = (vTop + vBot) / 2, createdBar = bar_index))
-        if array.size(gaps) > 30
-            Gap og = array.shift(gaps)
-            if not na(og.drawing)
-                box.delete(og.drawing)
-            if not na(og.ceLine)
-                line.delete(og.ceLine)
+        f_pushMicroGap("VOID", vTop, vBot)
 
 // -- Phase 38 - Volume Imbalance (body gap with wick overlap) - refinement only, never main POI
 bullVI = viOn and open > close[1] and low <= high[1] and (open - close[1]) >= atrVal * viMin
 bearVI = viOn and open < close[1] and high >= low[1] and (close[1] - open) >= atrVal * viMin
 
 if confirmed and bullVI
-    array.push(gaps, Gap.new(kind = "VI", top = open, bottom = close[1], ce = (open + close[1]) / 2, createdBar = bar_index))
+    f_pushMicroGap("VI", open, close[1])
 if confirmed and bearVI
-    array.push(gaps, Gap.new(kind = "VI", top = close[1], bottom = open, ce = (open + close[1]) / 2, createdBar = bar_index))
-if array.size(gaps) > 30
-    Gap ogv = array.shift(gaps)
-    if not na(ogv.drawing)
-        box.delete(ogv.drawing)
-    if not na(ogv.ceLine)
-        line.delete(ogv.ceLine)
+    f_pushMicroGap("VI", close[1], open)
 
-// -- gap lifecycle (Phase 24 / 25)
-if confirmed and array.size(gaps) > 0
-    for i = array.size(gaps) - 1 to 0
-        Gap g = array.get(gaps, i)
-        if not g.filled and low <= g.ce and high >= g.ce
-            g.filled := true
-        if g.filled or bar_index - g.createdBar > 500
-            if not na(g.drawing)
-                box.delete(g.drawing)
-                g.drawing := na
-            if not na(g.ceLine)
-                line.delete(g.ceLine)
-                g.ceLine := na
-            if bar_index - g.createdBar > 500
-                array.remove(gaps, i)
+// -- gap lifecycle (Phase 24 / 25) - same rules for both arrays
+f_gapLifecycle(array<Gap> arr) =>
+    if array.size(arr) > 0
+        for i = array.size(arr) - 1 to 0
+            Gap g = array.get(arr, i)
+            if not g.filled and low <= g.ce and high >= g.ce
+                g.filled := true
+            if g.filled or bar_index - g.createdBar > 500
+                if not na(g.drawing)
+                    box.delete(g.drawing)
+                    g.drawing := na
+                if not na(g.ceLine)
+                    line.delete(g.ceLine)
+                    g.ceLine := na
+                if bar_index - g.createdBar > 500
+                    array.remove(arr, i)
+    true
+
+if confirmed
+    f_gapLifecycle(gaps)
+    f_gapLifecycle(microGaps)
 
 // -- Phase 6 / 7 - Zone lifecycle: NEW -> ACTIVE -> TOUCHED -> MITIGATED -> FILLED
 if confirmed and array.size(zones) > 0
@@ -1460,13 +1551,28 @@ if confirmed and array.size(zones) > 0
                         f_pushZone(invKind, z.direction == "BULL" ? "BEAR" : "BULL", z.top, z.bottom)
 
 // === 07 - LAYER 3 - DECISION (the only door a signal comes out of) =========
+// Phase 54 - pick a POI price can actually retrace INTO.
+// A long retraces DOWN into its zone, so the zone must sit at or below price; a short
+// retraces UP into its zone. Taking simply the newest zone regularly handed a long a
+// bull zone sitting above price: unreachable by definition, so the setup sat in
+// POI_CREATED until poiTimeout killed it - a silent signal loss with nothing on screen.
+// Among the reachable ones, prefer the higher-priority kind, then the nearest.
 f_latestZone(string dir) =>
     Zone found = na
+    float bestDist = na
+    int   bestRank = -1
     if array.size(zones) > 0
         for i = array.size(zones) - 1 to 0
             Zone z = array.get(zones, i)
-            if na(found) and z.direction == dir and not z.consumed and (z.state == "NEW" or z.state == "ACTIVE" or z.state == "TOUCHED")
-                found := z
+            if z.direction == dir and not z.consumed and (z.state == "NEW" or z.state == "ACTIVE" or z.state == "TOUCHED")
+                bool reachable = dir == "BULL" ? z.top <= close : z.bottom >= close
+                if reachable
+                    int   rank = f_zonePriority(z.kind)
+                    float dist = dir == "BULL" ? close - z.top : z.bottom - close
+                    if rank > bestRank or (rank == bestRank and dist < bestDist)
+                        found    := z
+                        bestRank := rank
+                        bestDist := dist
     found
 
 f_reset(Setup s) =>
@@ -1502,27 +1608,41 @@ f_reset(Setup s) =>
     s.poiLeft       := false
     s.crtTbs        := false
     s.crtTws        := false
-    s.scoreCtx      := 0
-    s.scoreLiq      := 0
-    s.scoreStr      := 0
-    s.scoreMom      := 0
-    s.scorePoi      := 0
-    s.scoreLoc      := 0
-    s.scoreTime     := 0
-    s.scoreCorr     := 0
-    s.scorePen      := 0
+    s.sweepKind     := ""
+    s.sweepStrength := 1
+    s.sweepInKz     := false
+    s.dispMult      := 0.0
+    s.mssConfirmed  := false
+    s.scoreBreak    := ""
     true
 
-f_score(string dir, Zone poi) =>
+// Phase 50 - score v1, same 0..12 scale, but the six points that used to be handed
+// out unconditionally (`sc += 6`) now have to be earned. Before this, every setup that
+// reached RETRACE_WAIT started at 6 of 12 and the "minimum score" input was decoration.
+f_score(Setup st, string dir) =>
+    bool isLong = dir == "LONG"
     int sc = 0
-    sc += htfBias == (dir == "LONG" ? "BULL" : "BEAR") ? 2 : 0
-    sc += 6
-    if not na(poi)
-        sc += (poi.kind == "FVG" or poi.kind == "IFVG") ? 1 : 0
-        sc += (poi.kind == "OB" or poi.kind == "BB") ? 1 : 0
-    sc += (dir == "LONG" ? inDiscount : inPremium) ? 1 : 0
+    // context (2)
+    sc += htfBias == (isLong ? "BULL" : "BEAR") ? 2 : 0
+    // structure (2) - the MSS is the reason the setup exists, so it carries weight
+    sc += st.mssConfirmed ? 2 : 0
+    // momentum (2) - a bare-minimum displacement is not the same as a violent one
+    sc += st.dispMult >= atrMultEff ? 1 : 0
+    sc += st.dispMult >= atrMultEff * 1.8 ? 1 : 0
+    // liquidity (2) - how deep the pool was, and whether it was a named pool.
+    // The kill zone is NOT scored here: it is already the time point below, and
+    // counting it twice would let one fact buy two points.
+    sc += st.sweepStrength >= 2 ? 1 : 0
+    sc += f_isNamedPool(st.sweepKind) ? 1 : 0
+    // POI quality (2)
+    if not na(st.poi)
+        sc += 1
+        sc += (st.poi.kind == "FVG" or st.poi.kind == "IFVG" or st.poi.kind == "OB" or st.poi.kind == "BB" or st.poi.kind == "UNICORN") ? 1 : 0
+    // location (1) + time (1)
+    sc += (isLong ? inDiscount : inPremium) ? 1 : 0
     sc += inKz ? 1 : 0
-    sc -= htfBias == (dir == "LONG" ? "BEAR" : "BULL") ? 3 : 0
+    // penalty
+    sc -= htfBias == (isLong ? "BEAR" : "BULL") ? 3 : 0
     math.max(sc, 0)
 
 f_entryLevel(string dir, Zone poi) =>
@@ -1544,15 +1664,24 @@ dolBias   = htfBias != "NEUTRAL" ? htfBias : trendDir
 dolTarget := not dolOn ? na : dolBias == "BULL" ? f_nextLiqAbove(close) : dolBias == "BEAR" ? f_nextLiqBelow(close) : na
 
 // -- Phase 28 - Unicorn: Breaker + FVG overlap on the same price (runs only on new zone bars)
+// Phase 56 - only the zone(s) born on THIS bar can create a new overlap, so the outer
+// loop stops as soon as it reaches an older one. This was a full zones x zones scan
+// (up to 10,000 iterations) on every new-zone bar. It also now catches the pairing in
+// both directions: previously only a new FVG could find an existing BB, never the reverse.
 if confirmed and uniOn and (newBullZone or newBearZone) and array.size(zones) > 1
     for i = array.size(zones) - 1 to 0
         Zone za = array.get(zones, i)
+        if za.createdBar != bar_index
+            break
         bool aliveA = za.state != "INVALID" and za.state != "FILLED"
-        if aliveA and za.kind == "FVG"
+        bool isFvgA = za.kind == "FVG"
+        bool isBbA  = za.kind == "BB"
+        if aliveA and (isFvgA or isBbA)
+            string wantKind = isFvgA ? "BB" : "FVG"
             for j = array.size(zones) - 1 to 0
                 Zone zb = array.get(zones, j)
                 bool aliveB = zb.state != "INVALID" and zb.state != "FILLED"
-                if aliveB and zb.kind == "BB" and zb.direction == za.direction
+                if aliveB and zb.kind == wantKind and zb.direction == za.direction
                     float ovTop = math.min(za.top, zb.top)
                     float ovBot = math.max(za.bottom, zb.bottom)
                     float hMin  = math.max(math.min(za.top - za.bottom, zb.top - zb.bottom), syminfo.mintick)
@@ -1580,41 +1709,57 @@ f_sdevTarget(string dir, float sweepLvl, float mssLvl) =>
     lvl
 
 // -- Phase 31 - Score v2: class based, one point per class, hard caps
-f_scoreV2(Setup st, string dir) =>
+// Phase 50 - score v2, rebuilt. The old version handed out liq=2, mom=2 and stc=2 as
+// constants (6 guaranteed points of 14) and then capped four classes so tightly that
+// CISD, OTE, Silver Bullet, macro, daily bias and AMD bias could never add anything:
+// they were computed and discarded. Every class below starts at zero and every branch
+// can reach the cap, so two setups of different quality now get different scores.
+// Max = 3 ctx + 2 liq + 2 str + 2 mom + 1 poi + 2 conf + 2 loc + 2 time + 1 corr = 17.
+f_scoreV2Parts(Setup st, string dir) =>
     bool isLong = dir == "LONG"
-    // Context (max 2)
+    // Context (max 3)
     int ctx = 0
     ctx += htfBias == (isLong ? "BULL" : "BEAR") ? 2 : 0
     ctx += dbOn and dailyBias == (isLong ? "BULL" : "BEAR") ? 1 : 0
     ctx += amdOn and amdBias == (isLong ? "BULL" : "BEAR") ? 1 : 0
-    ctx := math.min(ctx, 2)
-    // Liquidity (max 2)
-    int liq = 2
+    ctx := math.min(ctx, 3)
+    // Liquidity (max 2) - a stacked pool beats a lone swing, and a named pool (equal
+    // highs/lows, previous day/week) beats an anonymous one. Kill zone is scored under
+    // Time only, so a single fact cannot earn points in two classes.
+    int liq = 0
+    liq += st.sweepStrength >= 2 ? 1 : 0
+    liq += f_isNamedPool(st.sweepKind) ? 1 : 0
+    liq := math.min(liq, 2)
     // Structure (max 2)
-    int stc = 2
+    int stc = 0
+    stc += st.mssConfirmed ? 1 : 0
     stc += st.cisdConfirmed ? 1 : 0
+    stc += st.crtTbs ? 1 : 0
     stc := math.min(stc, 2)
     // Momentum (max 2)
-    int mom = 2
+    int mom = 0
+    mom += st.dispMult >= atrMultEff ? 1 : 0
+    mom += st.dispMult >= atrMultEff * 1.8 ? 1 : 0
+    mom := math.min(mom, 2)
     // POI (max 1) + confluence (max 2)
     int poiS = na(st.poi) ? 0 : 1
     int conf = 0
     if not na(st.poi)
         conf += st.poi.kind == "UNICORN" ? 2 : 0
         conf += st.poi.kind == "BPR" ? 1 : 0
+        conf += st.poi.isHTF ? 1 : 0
+        conf += st.trapConfirmed or st.tlqConfirmed ? 1 : 0
     conf := math.min(conf, 2)
-    // Location (max 1)
+    // Location (max 2) - OTE is a tighter statement than "in the right half"
     int loc = 0
     loc += (isLong ? inDiscount : inPremium) ? 1 : 0
     loc += (isLong ? inOteBull : inOteBear) ? 1 : 0
-    loc := math.min(loc, 1)
-    // Time (max 1)
+    loc := math.min(loc, 2)
+    // Time (max 2) - kill zone is the coarse window, SB / macro / distribution the fine one
     int tim = 0
     tim += inKz ? 1 : 0
-    tim += inSB ? 1 : 0
-    tim += inMacro ? 1 : 0
-    tim += amdOn and amdPhase == "DISTRIB" ? 1 : 0
-    tim := math.min(tim, 1)
+    tim += inSB or inMacro or (amdOn and amdPhase == "DISTRIB") ? 1 : 0
+    tim := math.min(tim, 2)
     // Correlation (max 1)
     int cor = st.smtPresent ? 1 : 0
     // Penalties
@@ -1627,19 +1772,22 @@ f_scoreV2(Setup st, string dir) =>
     pen -= regimeOn and inChop ? 3 : 0
     pen -= adrSpent and (isLong ? htfBias == "BULL" : htfBias == "BEAR") ? 2 : 0
     pen -= twsPenalty and st.crtTws and not st.crtTbs ? 1 : 0
-    st.scoreCtx  := ctx
-    st.scoreLiq  := liq
-    st.scoreStr  := stc
-    st.scoreMom  := mom
-    st.scorePoi  := poiS
-    st.scoreLoc  := loc
-    st.scoreTime := tim
-    st.scoreCorr := cor
-    st.scorePen  := pen
-    math.max(ctx + liq + stc + mom + poiS + conf + loc + tim + cor + pen, 0)
+    int total = math.max(ctx + liq + stc + mom + poiS + conf + loc + tim + cor + pen, 0)
+    string brk = "ctx" + str.tostring(ctx) + " liq" + str.tostring(liq) + " str" + str.tostring(stc) + " mom" + str.tostring(mom) + " poi" + str.tostring(poiS + conf) + " loc" + str.tostring(loc) + " tim" + str.tostring(tim) + " cor" + str.tostring(cor) + " pen" + str.tostring(pen) + " = " + str.tostring(total)
+    [total, brk]
+
+// pure: returns the number only, writes nothing back onto the Setup
+f_scoreV2(Setup st, string dir) =>
+    [total, brk] = f_scoreV2Parts(st, dir)
+    total
+
+// the human-readable breakdown, built once when a setup actually triggers
+f_scoreBreak(Setup st, string dir) =>
+    [total, brk] = f_scoreV2Parts(st, dir)
+    scoreModel == "v2" ? brk : "v1 = " + str.tostring(f_score(st, dir))
 
 f_scoreFinal(Setup st, string dir) =>
-    scoreModel == "v2" ? f_scoreV2(st, dir) : f_score(dir, st.poi)
+    scoreModel == "v2" ? f_scoreV2(st, dir) : f_score(st, dir)
 
 f_scoreThreshold() =>
     scoreModel == "v2" ? minScoreV2 : minScore
@@ -1755,21 +1903,27 @@ if engineOn and confirmed
         if not ctxLongOk
             activeLong.state := "IDLE"
         else if sslSwept and not na(sweptSslLevel)
-            activeLong.state      := "LIQUIDITY_SWEPT"
-            activeLong.sweepLevel := math.min(sweptSslLevel, low)
-            activeLong.sweepBar   := bar_index
+            activeLong.state         := "LIQUIDITY_SWEPT"
+            activeLong.sweepLevel    := math.min(sweptSslLevel, low)
+            activeLong.sweepBar      := bar_index
+            activeLong.sweepKind     := sweptSslKind
+            activeLong.sweepStrength := sweptSslStr
+            activeLong.sweepInKz     := inKz
     else if activeLong.state == "LIQUIDITY_SWEPT"
         if bar_index - activeLong.sweepBar > mssTimeout
             activeLong.state := "INVALIDATED"
         else if dispBullOk and bar_index > activeLong.sweepBar
-            activeLong.state := "DISPLACEMENT_CONFIRMED"
+            activeLong.state    := "DISPLACEMENT_CONFIRMED"
+            activeLong.dispMult := dispMultNow
     else if activeLong.state == "DISPLACEMENT_CONFIRMED"
         if bar_index - activeLong.sweepBar > mssTimeout
             activeLong.state := "INVALIDATED"
         else if mssUp
-            activeLong.state    := "MSS_CONFIRMED"
-            activeLong.mssLevel := intHigh
-            activeLong.mssBar   := bar_index
+            activeLong.state        := "MSS_CONFIRMED"
+            activeLong.mssLevel     := intHigh
+            activeLong.mssBar       := bar_index
+            activeLong.mssConfirmed := true
+            intHigh                 := na   // spent: the next MSS needs a fresh pivot
     else if activeLong.state == "MSS_CONFIRMED"
         if bar_index - activeLong.mssBar > mssValidBars
             activeLong.state := "INVALIDATED"
@@ -1802,7 +1956,11 @@ if engineOn and confirmed
             float tpLiqL  = f_nextLiqAbove(entryL)
             float tpSdL   = f_sdevTarget("LONG", activeLong.sweepLevel, activeLong.mssLevel)
             float tpL     = not na(tpLiqL) ? tpLiqL : (sdevOn and sdevAsTp and not na(tpSdL) ? tpSdL : entryL + riskL * 2.0)
-            float rrL     = (tpL - entryL) / riskL
+            // Phase 51 - with trade management on, TP1 is the ladder rung, not tpL.
+            // Measuring RR against tpL let an R-based TP1 of 1.0R pass a 1.5R filter:
+            // the gate graded a target the trade was never going to use.
+            float tp1L    = tmOn ? f_tpLadder("LONG", entryL, slL, tpLiqL, 1) : tpL
+            float rrL     = (tp1L - entryL) / riskL
             int   scL     = f_scoreFinal(activeLong, "LONG")
             bool  kzOkL   = not killZoneReq or inKz
             bool  sbOkL   = not sbOnly or inSB
@@ -1811,13 +1969,13 @@ if engineOn and confirmed
                 activeLong.entryPrice := entryL
                 activeLong.slPrice    := slL
                 activeLong.slInit     := slL
-                float l1 = f_tpLadder("LONG", entryL, slL, tpLiqL, 1)
-                activeLong.tp1        := tmOn ? l1 : tpL
+                activeLong.tp1        := tp1L
                 activeLong.tp2        := f_tpLadder("LONG", entryL, slL, tpLiqL, 2)
                 activeLong.tp3        := f_tpLadder("LONG", entryL, slL, tpLiqL, 3)
                 activeLong.posSize    := f_posSize(entryL, slL)
                 activeLong.rr         := rrL
                 activeLong.score      := scL
+                activeLong.scoreBreak := f_scoreBreak(activeLong, "LONG")
                 activeLong.state      := "ENTRY_TRIGGERED"
                 activeLong.modelName  := not na(activeLong.poi) and activeLong.poi.kind == "UNICORN" ? "UNICORN" : inSB ? "SILVER_BULLET" : marketModel == "MMBM" ? "MMBM" : "STANDARD"
                 activeLong.dolTarget  := na(dolTarget) ? 0.0 : dolTarget
@@ -1860,21 +2018,27 @@ if engineOn and confirmed
         if not ctxShortOk
             activeShort.state := "IDLE"
         else if bslSwept and not na(sweptBslLevel)
-            activeShort.state      := "LIQUIDITY_SWEPT"
-            activeShort.sweepLevel := math.max(sweptBslLevel, high)
-            activeShort.sweepBar   := bar_index
+            activeShort.state         := "LIQUIDITY_SWEPT"
+            activeShort.sweepLevel    := math.max(sweptBslLevel, high)
+            activeShort.sweepBar      := bar_index
+            activeShort.sweepKind     := sweptBslKind
+            activeShort.sweepStrength := sweptBslStr
+            activeShort.sweepInKz     := inKz
     else if activeShort.state == "LIQUIDITY_SWEPT"
         if bar_index - activeShort.sweepBar > mssTimeout
             activeShort.state := "INVALIDATED"
         else if dispBearOk and bar_index > activeShort.sweepBar
-            activeShort.state := "DISPLACEMENT_CONFIRMED"
+            activeShort.state    := "DISPLACEMENT_CONFIRMED"
+            activeShort.dispMult := dispMultNow
     else if activeShort.state == "DISPLACEMENT_CONFIRMED"
         if bar_index - activeShort.sweepBar > mssTimeout
             activeShort.state := "INVALIDATED"
         else if mssDn
-            activeShort.state    := "MSS_CONFIRMED"
-            activeShort.mssLevel := intLow
-            activeShort.mssBar   := bar_index
+            activeShort.state        := "MSS_CONFIRMED"
+            activeShort.mssLevel     := intLow
+            activeShort.mssBar       := bar_index
+            activeShort.mssConfirmed := true
+            intLow                   := na   // spent: the next MSS needs a fresh pivot
     else if activeShort.state == "MSS_CONFIRMED"
         if bar_index - activeShort.mssBar > mssValidBars
             activeShort.state := "INVALIDATED"
@@ -1906,7 +2070,9 @@ if engineOn and confirmed
             float tpLiqS = f_nextLiqBelow(entryS)
             float tpSdS  = f_sdevTarget("SHORT", activeShort.sweepLevel, activeShort.mssLevel)
             float tpS    = not na(tpLiqS) ? tpLiqS : (sdevOn and sdevAsTp and not na(tpSdS) ? tpSdS : entryS - riskS * 2.0)
-            float rrS    = (entryS - tpS) / riskS
+            // Phase 51 - RR is measured against the target the trade actually takes
+            float tp1S   = tmOn ? f_tpLadder("SHORT", entryS, slS, tpLiqS, 1) : tpS
+            float rrS    = (entryS - tp1S) / riskS
             int   scS    = f_scoreFinal(activeShort, "SHORT")
             bool  kzOkS  = not killZoneReq or inKz
             bool  sbOkS  = not sbOnly or inSB
@@ -1915,13 +2081,13 @@ if engineOn and confirmed
                 activeShort.entryPrice := entryS
                 activeShort.slPrice    := slS
                 activeShort.slInit     := slS
-                float s1 = f_tpLadder("SHORT", entryS, slS, tpLiqS, 1)
-                activeShort.tp1        := tmOn ? s1 : tpS
+                activeShort.tp1        := tp1S
                 activeShort.tp2        := f_tpLadder("SHORT", entryS, slS, tpLiqS, 2)
                 activeShort.tp3        := f_tpLadder("SHORT", entryS, slS, tpLiqS, 3)
                 activeShort.posSize    := f_posSize(entryS, slS)
                 activeShort.rr         := rrS
                 activeShort.score      := scS
+                activeShort.scoreBreak := f_scoreBreak(activeShort, "SHORT")
                 activeShort.state      := "ENTRY_TRIGGERED"
                 activeShort.modelName  := not na(activeShort.poi) and activeShort.poi.kind == "UNICORN" ? "UNICORN" : inSB ? "SILVER_BULLET" : marketModel == "MMSM" ? "MMSM" : "STANDARD"
                 activeShort.dolTarget  := na(dolTarget) ? 0.0 : dolTarget
@@ -2060,15 +2226,17 @@ if confirmed and array.size(liquidity) > 0
                 label.delete(lv.lbl)
             array.remove(liquidity, i)
 
-// liquidity hard cap (TLQ / TRAP pushes bypass f_pushLiq)
-if array.size(liquidity) > 50
+// Phase 56 - hard caps. Every liquidity push now routes through f_pushLiqEx, which
+// caps as it goes, so this is only a backstop. Both drain with `while`: shifting one
+// element per bar could not keep up with a bar that pushed several.
+while array.size(liquidity) > 50
     LiqLevel oldL = array.shift(liquidity)
     if not na(oldL.drawing)
         line.delete(oldL.drawing)
     if not na(oldL.lbl)
         label.delete(oldL.lbl)
 
-if array.size(zones) > 100
+while array.size(zones) > 100
     Zone oldZ = array.shift(zones)
     if not na(oldZ.drawing)
         box.delete(oldZ.drawing)
@@ -2106,7 +2274,9 @@ plotshape(showDisp and isBearDisp, title = "Bear Displacement", style = shape.tr
 if liqOn and densNorm and array.size(liquidity) > 0
     for i = 0 to array.size(liquidity) - 1
         LiqLevel lv = array.get(liquidity, i)
-        bool vis = lv.kind == "BSL" or lv.kind == "SSL" ? showBslSsl : lv.kind == "EQH" or lv.kind == "EQL" ? showEq : lv.kind == "PDH" or lv.kind == "PDL" ? showPdhPdl : showPwhPwl
+        // Phase 55 - explicit default. The chain used to end on showPwhPwl, so TLQ /
+        // TRAP / CRT levels were only visible when previous-week lines were switched on.
+        bool vis = lv.kind == "BSL" or lv.kind == "SSL" ? showBslSsl : lv.kind == "EQH" or lv.kind == "EQL" ? showEq : lv.kind == "PDH" or lv.kind == "PDL" ? showPdhPdl : lv.kind == "PWH" or lv.kind == "PWL" ? showPwhPwl : densFull
         if vis and na(lv.drawing)
             lv.drawing := line.new(lv.createdBar, lv.price, bar_index, lv.price, color = colLiq, style = line.style_dotted, width = 1)
             lv.lbl     := label.new(lv.createdBar, lv.price, lv.kind, style = label.style_none, textcolor = color.new(colLiq, 0), size = tSizeSub)
@@ -2228,25 +2398,13 @@ if amdOn and amdShow and barstate.islast and not na(asiaHigh) and not na(asiaLow
 plotshape(trapShow and (bullTrap or tsShort), title = "Bull Trap", style = shape.labeldown, location = location.abovebar, color = color.new(colBear, 20), text = "TRAP", textcolor = color.white, size = size.small)
 plotshape(trapShow and (bearTrap or tsLong),  title = "Bear Trap", style = shape.labelup,   location = location.belowbar, color = color.new(colBull, 20), text = "TRAP", textcolor = color.white, size = size.small)
 
-// -- Phase 24 - liquidity void boxes
-if voidOn and array.size(gaps) > 0
-    for i = 0 to array.size(gaps) - 1
-        Gap g = array.get(gaps, i)
-        if na(g.drawing) and not g.filled
-            g.drawing := box.new(g.createdBar - 2, g.top, g.createdBar + zoneExtend, g.bottom, border_color = color.new(colVoid, 60), bgcolor = colVoid, text = g.kind, text_size = size.small, text_color = uiTextCol)
-            box.set_text_size(g.drawing, tSizeSub)
-            g.ceLine  := line.new(g.createdBar - 2, g.ce, g.createdBar + zoneExtend, g.ce, color = color.new(colVoid, 30), style = line.style_dashed)
-        if not na(g.drawing) and not g.filled and bar_index + zoneExtend > box.get_right(g.drawing)
-            box.set_right(g.drawing, bar_index + zoneExtend)
-            if not na(g.ceLine)
-                line.set_x2(g.ceLine, bar_index + zoneExtend)
-
-// -- Phase 25 - opening gap boxes
+// -- Phase 25 / 55 - opening gap boxes (NWOG / NDOG / ORG only - VOID and VI live
+//    in microGaps and are drawn further down, each with its own switch and colour)
 if array.size(gaps) > 0
     for i = 0 to array.size(gaps) - 1
         Gap g = array.get(gaps, i)
-        bool gvis = g.kind == "VOID" ? voidOn : g.kind == "NWOG" ? nwogOn : g.kind == "NDOG" ? ndogOn : orgOn
-        if gvis and na(g.drawing) and not g.filled and g.kind != "VOID"
+        bool gvis = g.kind == "NWOG" ? nwogOn : g.kind == "NDOG" ? ndogOn : g.kind == "ORG" ? orgOn : false
+        if gvis and na(g.drawing) and not g.filled
             g.drawing := box.new(g.createdBar, g.top, g.createdBar + zoneExtend, g.bottom, border_color = color.new(colGap, 60), bgcolor = colGap, text = g.kind, text_size = size.small, text_color = uiTextCol)
             box.set_text_size(g.drawing, tSizeSub)
             g.ceLine  := line.new(g.createdBar, g.ce, g.createdBar + zoneExtend, g.ce, color = color.new(colGap, 30), style = line.style_dashed)
@@ -2316,12 +2474,23 @@ if barstate.islast
             line.set_xy1(tdoLn, bar_index - 40, trueDayOpen)
             line.set_xy2(tdoLn, bar_index + 8, trueDayOpen)
 
-// -- Phase 38 - VI boxes (only in Full density, they are tiny and many)
-if viOn and densFull and array.size(gaps) > 0
-    for i = 0 to array.size(gaps) - 1
-        Gap g = array.get(gaps, i)
-        if g.kind == "VI" and na(g.drawing) and not g.filled
-            g.drawing := box.new(g.createdBar, g.top, g.createdBar + 10, g.bottom, border_color = color.new(colVi, 60), bgcolor = colVi)
+// -- Phase 24 / 38 / 55 - micro gaps: VOID boxes and VI boxes, one loop, each kind
+//    behind its own switch. VI stays behind Full density - they are tiny and many.
+if array.size(microGaps) > 0
+    for i = 0 to array.size(microGaps) - 1
+        Gap g = array.get(microGaps, i)
+        bool mvis = g.kind == "VOID" ? voidOn : viOn and densFull
+        if mvis and na(g.drawing) and not g.filled
+            if g.kind == "VOID"
+                g.drawing := box.new(g.createdBar - 2, g.top, g.createdBar + zoneExtend, g.bottom, border_color = color.new(colVoid, 60), bgcolor = colVoid, text = g.kind, text_size = size.small, text_color = uiTextCol)
+                box.set_text_size(g.drawing, tSizeSub)
+                g.ceLine  := line.new(g.createdBar - 2, g.ce, g.createdBar + zoneExtend, g.ce, color = color.new(colVoid, 30), style = line.style_dashed)
+            else
+                g.drawing := box.new(g.createdBar, g.top, g.createdBar + 10, g.bottom, border_color = color.new(colVi, 60), bgcolor = colVi)
+        if mvis and g.kind == "VOID" and not na(g.drawing) and not g.filled and bar_index + zoneExtend > box.get_right(g.drawing)
+            box.set_right(g.drawing, bar_index + zoneExtend)
+            if not na(g.ceLine)
+                line.set_x2(g.ceLine, bar_index + zoneExtend)
 
 // -- Phase 42 - news blackout shading
 bgcolor(newsOn and newsShade and inBlackout ? color.new(color.red, 92) : na, title = "News blackout")
@@ -2359,7 +2528,7 @@ plotshape(crtOn and crtShow and crtTwsBull and not crtTbsBull, title = "TWS bull
 plotshape(crtOn and crtShow and crtTwsBear and not crtTbsBear, title = "TWS bear", style = shape.circle, location = location.abovebar, color = color.new(#ab47bc, 45), size = size.tiny)
 
 // === 10 - DASHBOARD ========================================================
-dashPosition = dashPos == "Top Left" ? position.top_left : dashPos == "Bottom Left" ? position.bottom_left : position.top_right
+dashPosition = dashPos == "Top Left" ? position.top_left : dashPos == "Bottom Left" ? position.bottom_left : dashPos == "Bottom Right" ? position.bottom_right : position.top_right
 var table dash = table.new(position.top_right, 2, 11, border_width = 1)
 if showDash and barstate.islast
     table.set_position(dash, dashPosition)
@@ -2382,11 +2551,11 @@ if showDash and barstate.islast
     table.cell(dash, 0, 8, "DOL target", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
     table.cell(dash, 1, 8, na(dolTarget) ? "-" : str.tostring(dolTarget, format.mintick) + "  (" + str.tostring(math.abs(dolTarget - close) / math.max(atrVal, syminfo.mintick), "#.#") + " ATR)", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
     table.cell(dash, 0, 9, "Objects z/l/g/t", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
-    table.cell(dash, 1, 9, str.tostring(array.size(zones)) + "/" + str.tostring(array.size(liquidity)) + "/" + str.tostring(array.size(gaps)) + "/" + str.tostring(array.size(trendlines)), text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
+    table.cell(dash, 1, 9, str.tostring(array.size(zones)) + "/" + str.tostring(array.size(liquidity)) + "/" + str.tostring(array.size(gaps) + array.size(microGaps)) + "/" + str.tostring(array.size(trendlines)), text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
     table.cell(dash, 0, 10, "Signals today / all", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
     table.cell(dash, 1, 10, str.tostring(todayLong + todayShort) + " / " + str.tostring(totalLong + totalShort), text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSize)
 
-var table dbg = table.new(position.bottom_right, 2, 6, border_width = 1)
+var table dbg = table.new(position.bottom_right, 2, 8, border_width = 1)
 if showDebug and barstate.islast
     table.cell(dbg, 0, 0, "DEBUG", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = tSizeSub)
     table.cell(dbg, 1, 0, "bar " + str.tostring(bar_index), text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = tSizeSub)
@@ -2400,13 +2569,17 @@ if showDebug and barstate.islast
     table.cell(dbg, 1, 4, str.tostring(totalLong) + " / " + str.tostring(totalShort), text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
     table.cell(dbg, 0, 5, "Int H / L", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
     table.cell(dbg, 1, 5, str.tostring(intHigh, format.mintick) + " / " + str.tostring(intLow, format.mintick), text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(dbg, 0, 6, "Sweep kind / str", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(dbg, 1, 6, (activeLong.state != "IDLE" ? activeLong.sweepKind + " x" + str.tostring(activeLong.sweepStrength) + (activeLong.sweepInKz ? " KZ" : "") : activeShort.state != "IDLE" ? activeShort.sweepKind + " x" + str.tostring(activeShort.sweepStrength) + (activeShort.sweepInKz ? " KZ" : "") : "-"), text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(dbg, 0, 7, "Last score break", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
+    table.cell(dbg, 1, 7, activeLong.scoreBreak != "" ? activeLong.scoreBreak : activeShort.scoreBreak != "" ? activeShort.scoreBreak : "-", text_color = uiTextCol, bgcolor = uiPanelBg, text_size = tSizeSub)
 
 f_alertMsg(Setup st, string side) =>
     string m = ""
     if alertFmt == "JSON"
-        m := '{"sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","side":"' + side + '","entry":' + str.tostring(st.entryPrice, format.mintick) + ',"sl":' + str.tostring(st.slPrice, format.mintick) + ',"tp1":' + str.tostring(st.tp1, format.mintick) + ',"tp2":' + str.tostring(st.tp2, format.mintick) + ',"tp3":' + str.tostring(st.tp3, format.mintick) + ',"rr":' + str.tostring(st.rr, "#.##") + ',"score":' + str.tostring(st.score) + ',"model":"' + st.modelName + '","size":' + str.tostring(st.posSize, "#.##") + ',"time":' + str.tostring(time) + '}'
+        m := '{"sym":"' + syminfo.ticker + '","tf":"' + timeframe.period + '","side":"' + side + '","entry":' + str.tostring(st.entryPrice, format.mintick) + ',"sl":' + str.tostring(st.slPrice, format.mintick) + ',"tp1":' + str.tostring(st.tp1, format.mintick) + ',"tp2":' + str.tostring(st.tp2, format.mintick) + ',"tp3":' + str.tostring(st.tp3, format.mintick) + ',"rr":' + str.tostring(st.rr, "#.##") + ',"score":' + str.tostring(st.score) + ',"model":"' + st.modelName + '","size":' + str.tostring(st.posSize, "#.##") + ',"score_break":"' + st.scoreBreak + '","time":' + str.tostring(time) + '}'
     else
-        m := side + " " + syminfo.ticker + " | E:" + str.tostring(st.entryPrice, format.mintick) + " SL:" + str.tostring(st.slPrice, format.mintick) + " TP:" + str.tostring(st.tp1, format.mintick) + " RR:" + str.tostring(st.rr, "#.##") + " Score:" + str.tostring(st.score) + " Model:" + st.modelName + (sizeOn ? " Size:" + str.tostring(st.posSize, "#.##") + f_sizeUnit() : "") + (tmOn ? " TP1close:" + str.tostring(tp1Pct) + "%" : "")
+        m := side + " " + syminfo.ticker + " | E:" + str.tostring(st.entryPrice, format.mintick) + " SL:" + str.tostring(st.slPrice, format.mintick) + " TP:" + str.tostring(st.tp1, format.mintick) + " RR:" + str.tostring(st.rr, "#.##") + " Score:" + str.tostring(st.score) + " Model:" + st.modelName + " [" + st.scoreBreak + "]" + (sizeOn ? " Size:" + str.tostring(st.posSize, "#.##") + f_sizeUnit() : "") + (tmOn ? " TP1close:" + str.tostring(tp1Pct) + "%" : "")
     m
 
 var table stats = table.new(position.bottom_left, 2, 8, border_width = 1)

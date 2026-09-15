@@ -98,6 +98,122 @@ def t_sl_below_sweep():
     return (sl < 98.8 and entry > sl and tp > entry and rr >= 1.5), e
 
 
+# ===================== Phase 50..56 regression cases =====================
+
+def t_score_discriminates():
+    """Phase 50: the score must separate a good setup from a poor one.
+
+    Before the rebuild, score v1 added a flat 6 of 12 and score v2 handed out
+    liq=2, mom=2 and stc=2 as constants, so these two runs scored the same and the
+    minimum-score input decided nothing."""
+    strong = run(valid_long(touch_after=1), minScore=0, inKz=True,  htfBias="BULL")
+    weak   = run(valid_long(touch_after=1), minScore=0, inKz=False, htfBias="NEUTRAL",
+                 requireHtf=False, inDiscount=False)
+    if not strong.signals or not weak.signals:
+        return None, strong
+    return (strong.signals[0][6], weak.signals[0][6]), strong
+
+
+def t_buyside_level_cannot_arm_a_long():
+    """Phase 52: a buy-side pool sitting below price is not sell-side liquidity.
+
+    The sweep test used to look only at position relative to close, so a PDH price
+    had already traded through was consumed as an SSL sweep and armed a long."""
+    e = sim.Engine()
+    e.liq.append(sim.Liq("PDH", 99.0, 0))          # buy-side pool, now below price
+    e.step(100.0, 100.3, 99.7, 100.0)
+    ev = e.step(100.0, 100.2, 98.0, 100.0)         # wick under it, close back above
+    return ev["sslSwept"], e
+
+
+def t_sellside_level_still_arms_a_long():
+    """control for the case above: a genuine SSL must still pass through the door."""
+    e = sim.Engine()
+    e.liq.append(sim.Liq("SSL", 99.0, 0))
+    e.step(100.0, 100.3, 99.7, 100.0)
+    ev = e.step(100.0, 100.2, 98.0, 100.0)
+    return ev["sslSwept"], e
+
+
+def t_poi_must_be_reachable():
+    """Phase 54: a long retraces DOWN into its POI, so a bull zone above price is
+    unreachable and must never be selected - it used to be, whenever it was newest,
+    and the setup then died silently on poiTimeout."""
+    e = sim.Engine()
+    e.zones.append(sim.Zone("Z_LOW",   "FVG", "BULL",  99.0,  98.0, 0))
+    e.zones.append(sim.Zone("Z_ABOVE", "FVG", "BULL", 120.0, 118.0, 0))   # newest
+    pick = e._latestZone("BULL", 100.0)
+    return (pick.id if pick else None), e
+
+
+def t_poi_prefers_better_kind():
+    """among reachable zones, priority beats recency."""
+    e = sim.Engine()
+    e.zones.append(sim.Zone("Z_FVG", "FVG", "BULL", 99.0, 98.0, 0))
+    e.zones.append(sim.Zone("Z_SD",  "SD",  "BULL", 99.5, 99.2, 1))       # newer, weaker
+    pick = e._latestZone("BULL", 100.0)
+    return (pick.id if pick else None), e
+
+
+def t_mss_pivot_is_spent():
+    """Phase 54: the internal pivot is retired once a setup confirms its MSS against
+    it, so the next MSS needs fresh structure instead of re-breaking a dead level."""
+    e = sim.Engine()
+    e.bars.append(dict(o=100.0, h=102.0, l=99.5, c=101.5))
+    e.intHigh = 100.0
+    e.L.state = "DISPLACEMENT_CONFIRMED"
+    e.L.sweepBar = 0
+    e.L.sweepLevel = 99.0
+    ev = dict(bullDisp=True, bearDisp=False, sslSwept=False, bslSwept=False,
+              sweptSsl=None, sweptBsl=None, mssUp=True, mssDn=False,
+              sweptSslKind="", sweptBslKind="", sweptSslStr=1, sweptBslStr=1,
+              dispMult=2.0)
+    e._machine(0, ev)
+    return (e.L.state == "MSS_CONFIRMED" and e.intHigh is None), e
+
+
+def t_mss_survives_the_displacement_bar():
+    """guard against over-correcting the case above: retiring the pivot as soon as
+    mssUp is true (rather than when a setup uses it) starves the state machine,
+    because DISPLACEMENT_CONFIRMED sits between the sweep and the MSS."""
+    e = run(valid_long(touch_after=1))
+    return len(e.signals), e
+
+
+def t_rr_grades_the_real_tp1():
+    """Phase 51: with R-based trade management, TP1 is 1.0R. Measuring RR against a
+    far liquidity pool let that setup clear a 1.5R filter and then take a 1.0R exit."""
+    e = run(valid_long(touch_after=1), tmOn=True, tpMode="R-based", tp1R=1.0)
+    return len(e.signals), e
+
+
+def t_rr_passes_when_tp1_really_is_big_enough():
+    """control: the same setup with TP1 at 2R must still trade."""
+    e = run(valid_long(touch_after=1), tmOn=True, tpMode="R-based", tp1R=2.0)
+    return len(e.signals), e
+
+
+EXTRA_CASES = [
+    ("P50  score separates strong from weak setup", t_score_discriminates,
+     lambda v: v is not None and v[0] > v[1]),
+    ("P52  buy-side pool below price -> no SSL sweep", t_buyside_level_cannot_arm_a_long,
+     lambda v: v is False),
+    ("P52  genuine SSL still sweeps", t_sellside_level_still_arms_a_long,
+     lambda v: v is True),
+    ("P54  unreachable POI above price is skipped", t_poi_must_be_reachable,
+     lambda v: v == "Z_LOW"),
+    ("P54  reachable POI picked by priority", t_poi_prefers_better_kind,
+     lambda v: v == "Z_FVG"),
+    ("P54  MSS retires the internal pivot", t_mss_pivot_is_spent,
+     lambda v: v is True),
+    ("P54  MSS still fires after the disp bar", t_mss_survives_the_displacement_bar,
+     lambda v: v == 1),
+    ("P51  R-based TP1 below minRR -> 0", t_rr_grades_the_real_tp1,
+     lambda v: v == 0),
+    ("P51  R-based TP1 above minRR -> 1", t_rr_passes_when_tp1_really_is_big_enough,
+     lambda v: v == 1),
+]
+
 CASES = [
     ("T1   valid sequence -> exactly 1 LONG",        t1,                 lambda v: v == 1),
     ("T4   sweep without displacement -> 0",         t4,                 lambda v: v == 0),
@@ -108,6 +224,8 @@ CASES = [
     ("T_TO displacement after mssTimeout -> 0",      t_timeout,          lambda v: v == 0),
     ("T12  SL sits below the sweep, RR >= 1.5",      t_sl_below_sweep,   lambda v: v is True),
 ]
+
+CASES += EXTRA_CASES
 
 fails = 0
 for name, fn, ok in CASES:
