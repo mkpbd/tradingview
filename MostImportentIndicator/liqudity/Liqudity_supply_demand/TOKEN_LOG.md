@@ -8,3 +8,4 @@
 | v8.0.0-full `V8_FULL.pine` | 2026-09-17 | compiles (< 100,256) | unknown, > 0 | user: "ok" — engine + context fit in ONE script. V8_FULL is now the main file |
 | v8.0.1 funnel (before cut) | 2026-09-17 | **100,511** | −255 (CE10117) | first real measurement · V8_FULL + funnel rows |
 | v8.0.1 funnel (after cut) | 2026-09-17 | compiles, est. ~98k | est. ~2k | cut 3 panel rows + 23 tooltips + dead vars · headroom thin — any new feature must cut first |
+| v8.0.3 funnel+MSS (before cut) | 2026-09-17 | **100,602** | −346 | cut opening lines, run chips, AMD/Judas, sesStory, Targets row → compiles |

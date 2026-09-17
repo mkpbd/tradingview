@@ -105,3 +105,9 @@
 - Funnel after v8.0.2 (5 symbols): RAID→POI now ~80%; POI→MSS still 6–17%; 4 candidates reached the gates, all failed (3× no TP target, 1× grade).
 - MSS stage gains two sources: (a) short-term shift — the latest INTERNAL swing high/low crossed this bar with body ≥ structDisp·ATR; (b) a CISD that fired on the raid candle itself counts one bar later if the close still holds its run-open (new globals cisdUpLvl/cisdDnLvl). Chronology unchanged (mssBar > liqBar).
 - Defaults for the test phase: allowSynthTp true (synthetic TP2 graded ≤ B), minGrade "B".
+
+## v8.0.4 — wall definition + retest (V8_FULL.pine)
+- US30 5m after v8.0.3: P→M 37% (fixed), D/M 41%, F→E 14%, 1 candidate blocked by "RR floor" — synthetic TP2 clamped by the nearest wall, and every validated minor swing / T3 zone counted as a wall.
+- Walls are now engineered pools only (not PK_SWING / PK_WICK) and fresh T1/T2 zones only (f_oppLiq, f_nextZone). Minor swings stay TP1 targets.
+- retestDepth 0.5→0.35, lateBars 6→8.
+- Token: v8.0.3 measured 100,602 before the display cut; compiles after.
