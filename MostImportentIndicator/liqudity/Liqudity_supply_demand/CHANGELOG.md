@@ -95,3 +95,8 @@
 ## v8.0.1 — funnel diagnostics (V8_FULL.pine)
 - XAUUSD 5m, 8–17 Sep: 0 signals in ~10 days (T6 starvation FAIL). Long side never armed (HTF 60 BEAR, PD 46% → no reversal); short side stuck at TARGET with no history of why.
 - Added dashboard rows "Funnel" (setups that reached T/R/P/M/D/F/E + top kill reason) and "Gates" (candidates that reached M16 + first failing gate). `f_gates` now returns the first failing gate code (0 = pass). Diagnostics only — no gate/grade/score change.
+
+## v8.0.2 — funnel-driven fix (V8_FULL.pine)
+- Funnel on 4 symbols (XAU/BTC/EUR/ETH 5m): RAID→POI ~88% dead, POI→MSS ~90% dead, 0 candidates reached M16.
+- POI fallback `poiWickFb` (default on): when no zone / HTF FVG contains the raid wick, the raid candle's own rejection wick [extreme → body edge] becomes the POI (tier 2, PA_REJ). New Setup field `poiWick`.
+- Defaults: poiBindAtr 0.15→0.35 · mssNeedDisp true→false (CISD alone = MSS; stage 6 still demands the displacement) · mssWin 12→16.
