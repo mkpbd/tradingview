@@ -91,3 +91,7 @@
 - Adds 9 request.security (4 ladder · 4 HTF layer · 1 POI #2) → 15 total. Plot outputs 20/64.
 - Purpose doubles as the token probe: a CE10117 on this file gives the exact compiled-token count.
 - 2026-09-17: user compiled V8_FULL.pine → green, no CE10117. V8_FULL.pine is the MAIN file from here; V8_ENGINE / V8_CONTEXT kept as split fallback.
+
+## v8.0.1 — funnel diagnostics (V8_FULL.pine)
+- XAUUSD 5m, 8–17 Sep: 0 signals in ~10 days (T6 starvation FAIL). Long side never armed (HTF 60 BEAR, PD 46% → no reversal); short side stuck at TARGET with no history of why.
+- Added dashboard rows "Funnel" (setups that reached T/R/P/M/D/F/E + top kill reason) and "Gates" (candidates that reached M16 + first failing gate). `f_gates` now returns the first failing gate code (0 = pass). Diagnostics only — no gate/grade/score change.

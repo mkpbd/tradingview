@@ -2462,6 +2462,27 @@ type Setup
 var upSetups = array.new<Setup>()
 var dnSetups = array.new<Setup>()
 var setupSeq = array.new<int>(1, 0)
+// V8 · FUNNEL diagnostics (dashboard only, never a gate): setups that REACHED each stage, kills by
+// reason, hard-gate failures by first failing gate. Answers "why 0 signals" from one screenshot.
+var stageReach = array.new<int>(10, 0)
+var killCnt    = array.new<int>(14, 0)
+var gateCnt    = array.new<int>(16, 0)
+f_killTxt(int k) =>
+    k == 1 ? "setup expired" : k == 2 ? "opp CHoCH" : k == 3 ? "raid failed/stale" : k == 4 ? "no POI at raid" :
+         k == 5 ? "MSS window" : k == 6 ? "disp window" : k == 7 ? "no FVG" : k == 8 ? "retest window" : k == 9 ? "LATE" :
+         k == 10 ? "FVG invalid" : k == 11 ? "POI invalid" : k == 12 ? "SB close" : "target lost"
+f_gateTxt(int g) =>
+    g == 1 ? "base (bias/kz/news/cd)" : g == 2 ? "narrative" : g == 3 ? "SL range" : g == 4 ? "no TP target" : g == 5 ? "RR floor" :
+         g == 6 ? "room" : g == 7 ? "dedupe" : g == 8 ? "tier" : g == 9 ? "grade" : g == 10 ? "score" : g == 11 ? "congestion" :
+         g == 12 ? "run" : g == 13 ? "story" : g == 14 ? "HTF conflict" : "—"
+f_topIx(array<int> a, int from) =>
+    int bi = 0
+    int bv = 0
+    for i = from to array.size(a) - 1
+        if array.get(a, i) > bv
+            bv := array.get(a, i)
+            bi := i
+    [bi, bv]
 // V8 · per-POOL blackout instead of a global resetBar: a pool whose setup died this bar or the last
 // may not be re-locked by a new setup (own-grave rule), everything else may arm immediately.
 var deadPoolId  = array.new<int>()
@@ -2533,6 +2554,7 @@ f_setupAdvance(Setup s, int dir) =>
     bool   kill  = false
     string blk   = ""
     bool   sbT   = s.sbWin != SBW_NONE
+    int    st0   = s.st
     // SB-tagged setups run on the shorter SB clocks
     int    wMss  = sbT ? sbPoiWait : mssWin
     int    wPoi  = sbT ? sbLiqWait : mssWin
@@ -2848,8 +2870,17 @@ f_setupAdvance(Setup s, int dir) =>
                     blk := "retest without a rejection candle"
     if confirmed
         s.blk := blk
+        if s.st > st0 and s.st <= ST_ENTRY
+            for k = st0 + 1 to s.st
+                array.set(stageReach, k, array.get(stageReach, k) + 1)
     if kill
         s.st := ST_DEAD
+        int kc = str.contains(blk, "setup expired") ? 1 : str.contains(blk, "opposite external") ? 2 :
+             str.contains(blk, "stale before a POI") ? 4 : str.contains(blk, "raid") ? 3 :
+             str.contains(blk, "MSS window") ? 5 : str.contains(blk, "displacement window") ? 6 :
+             str.contains(blk, "no FVG") ? 7 : str.contains(blk, "retest window") ? 8 : str.contains(blk, "LATE") ? 9 :
+             str.contains(blk, "FVG invalidated") ? 10 : str.contains(blk, "POI") or str.contains(blk, "FEM") ? 11 : str.contains(blk, "SB window") ? 12 : 13
+        array.set(killCnt, kc, array.get(killCnt, kc) + 1)
     kill
 
 // ---- run one side: advance every live setup, remove the dead, arm a new one, pick the winner ------
@@ -2905,6 +2936,7 @@ f_runSide(array<Setup> arr, int dir) =>
                 n.tgtW     := isL ? tgtSellW : tgtBuyW
                 n.blk      := "target locked — awaiting the raid"
                 array.push(arr, n)
+                array.set(stageReach, ST_TGT, array.get(stageReach, ST_TGT) + 1)
     winner
 
 Setup winL = f_runSide(upSetups, 1)
@@ -3300,21 +3332,29 @@ gradeS = prodS == 0 ? GR_NONE : f_grade(prodS <= PR_MACH, narrShort, tierS, rqS,
 // ---- HARD GATES — a high score can never buy past any of these ----------------------------------
 storyL  = f_storyKey(prodL > 0, 1,  poolIdL, raidBL, poiIdL, mssBL, fvgBL)
 storyS  = f_storyKey(prodS > 0, -1, poolIdS, raidBS, poiIdS, mssBS, fvgBS)
+// returns the FIRST failing gate (0 = every gate passed) so the funnel can count WHERE candidates die
 f_gates(int prod, bool base, bool narr, bool slOk, int tgtSrc, float rr, float room, bool dedup, int tier, int grade, int score, bool runFade, string story) =>
-    bool hNarr  = prod > PR_MACH or narr
-    bool hTgt   = tgtSrc != 0 or allowSynthTp
-    bool hRr    = f_geq(rr, rrB)
-    bool hRoom  = not useOppLiq or not oppLiqHard or na(room) or room >= oppLiqMult
-    bool hTier  = tier <= minTier
-    bool hGrade = grade >= minGradeEff
-    bool hScore = minScore == 0 or score >= minScore
-    bool hCong  = not congested or not congHard or (congGate == "A+ only" and grade == GR_AP)
-    bool hRun   = not runFade or runGate != "Block"
-    bool hStory = f_storyNew(story)
-    bool hHtf   = not htfConf or htfConfMode == "Off" or htfConfMode == "Downgrade" or (htfConfMode == "A+ only" and grade == GR_AP)
-    prod > 0 and base and hNarr and slOk and hTgt and hRr and hRoom and dedup and hTier and hCong and hRun and hGrade and hScore and hStory and hHtf
-okLong  = f_gates(prodL, baseLongOK,  narrLong,  slOkL, tgtSrcL, rrL, roomL, f_dedupeOk(1,  poolIdL, poiIdL, mssBL, evPxL), tierL, gradeL, scoreLong,  runFadeLong,  storyL)
-okShort = f_gates(prodS, baseShortOK, narrShort, slOkS, tgtSrcS, rrS, roomS, f_dedupeOk(-1, poolIdS, poiIdS, mssBS, evPxS), tierS, gradeS, scoreShort, runFadeShort, storyS)
+    int g = prod == 0 ? 15 : not base ? 1 : not (prod > PR_MACH or narr) ? 2 : not slOk ? 3 :
+         not (tgtSrc != 0 or allowSynthTp) ? 4 : not f_geq(rr, rrB) ? 5 :
+         not (not useOppLiq or not oppLiqHard or na(room) or room >= oppLiqMult) ? 6 : not dedup ? 7 :
+         tier > minTier ? 8 : grade < minGradeEff ? 9 : not (minScore == 0 or score >= minScore) ? 10 :
+         not (not congested or not congHard or (congGate == "A+ only" and grade == GR_AP)) ? 11 :
+         not (not runFade or runGate != "Block") ? 12 : not f_storyNew(story) ? 13 :
+         not (not htfConf or htfConfMode == "Off" or htfConfMode == "Downgrade" or (htfConfMode == "A+ only" and grade == GR_AP)) ? 14 : 0
+    g
+gateL   = f_gates(prodL, baseLongOK,  narrLong,  slOkL, tgtSrcL, rrL, roomL, f_dedupeOk(1,  poolIdL, poiIdL, mssBL, evPxL), tierL, gradeL, scoreLong,  runFadeLong,  storyL)
+gateS   = f_gates(prodS, baseShortOK, narrShort, slOkS, tgtSrcS, rrS, roomS, f_dedupeOk(-1, poolIdS, poiIdS, mssBS, evPxS), tierS, gradeS, scoreShort, runFadeShort, storyS)
+okLong  = gateL == 0
+okShort = gateS == 0
+if confirmed
+    if prodL > 0
+        array.set(gateCnt, 0, array.get(gateCnt, 0) + 1)
+        if gateL > 0
+            array.set(gateCnt, gateL, array.get(gateCnt, gateL) + 1)
+    if prodS > 0
+        array.set(gateCnt, 0, array.get(gateCnt, 0) + 1)
+        if gateS > 0
+            array.set(gateCnt, gateS, array.get(gateCnt, gateS) + 1)
 
 // ---- arbitration: never both, never twice. SB-tagged machine entry outranks everything. -------------
 rankL = prodL == 0 ? 99 : (sbWL != SBW_NONE and prodL <= PR_MACH ? 0 : prodL)
@@ -3639,7 +3679,10 @@ if barstate.islast
         sbHiLn := line.new(bar_index - 10, sbRngHi, bar_index + 5, sbRngHi, color = color.new(COL_SB, 30), style = line.style_dashed)
 
 // ═══════════════════════════════════════════════════════════ M19 · DASHBOARD (last bar only)
-var table dash = table.new(position.top_right, 2, 9, border_width = 1, frame_color = color.new(color.gray, 60), border_color = color.new(color.gray, 80))
+// funnel read-outs at global scope (tuple destructure never inside a local block)
+[kIx, kN] = f_topIx(killCnt, 1)
+[gIx, gN] = f_topIx(gateCnt, 1)
+var table dash = table.new(position.top_right, 2, 11, border_width = 1, frame_color = color.new(color.gray, 60), border_color = color.new(color.gray, 80))
 f_dRow(int r, string k, string v, color vc) =>
     table.cell(dash, 0, r, k, text_color = color.new(color.gray, 10), text_size = dashSize, bgcolor = color.new(color.black, 60), text_halign = text.align_left)
     table.cell(dash, 1, r, v, text_color = vc, text_size = dashSize, bgcolor = color.new(color.black, 60), text_halign = text.align_left)
@@ -3659,6 +3702,11 @@ if showDash and barstate.islast
     f_dRow(6, "Silver Bullet",   sbTxt, sbActive ? COL_SB : color.gray)
     f_dRow(7, "Trade",           trdTxt, trd.dir == 1 ? COL_BULL : trd.dir == -1 ? COL_BEAR : color.gray)
     f_dRow(8, "Count",           cnt, color.white)
+    // FUNNEL: setups that reached each stage since load · top kill reason · candidates vs top gate failure
+    string fun = "T" + str.tostring(array.get(stageReach, ST_TGT)) + " R" + str.tostring(array.get(stageReach, ST_RAID)) + " P" + str.tostring(array.get(stageReach, ST_POI)) +
+         " M" + str.tostring(array.get(stageReach, ST_MSS)) + " D" + str.tostring(array.get(stageReach, ST_DISP)) + " F" + str.tostring(array.get(stageReach, ST_FVG)) + " E" + str.tostring(array.get(stageReach, ST_ENTRY))
+    f_dRow(9,  "Funnel",  fun + " · kill: " + (kN > 0 ? f_killTxt(kIx) + " ×" + str.tostring(kN) : "—"), color.new(color.yellow, 0))
+    f_dRow(10, "Gates",   "cand " + str.tostring(array.get(gateCnt, 0)) + " · fail: " + (gN > 0 ? f_gateTxt(gIx) + " ×" + str.tostring(gN) : "—"), color.new(color.yellow, 0))
 
 // ═══════════════════════════════════════════════════════════ M20 · ALERTS
 // alertcondition: user picks "Once per bar close". alert(): structured payload, once per bar close.
