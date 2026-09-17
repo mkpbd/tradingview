@@ -90,3 +90,4 @@
 - V8_ENGINE.pine + the unique parts of V8_CONTEXT.pine in one script (user request). Context block reuses engine globals; B's duplicate inputs/core/structure/sweep/FVG-slot removed, B's HTF POI #1 dropped (engine M6 already has it).
 - Adds 9 request.security (4 ladder · 4 HTF layer · 1 POI #2) → 15 total. Plot outputs 20/64.
 - Purpose doubles as the token probe: a CE10117 on this file gives the exact compiled-token count.
+- 2026-09-17: user compiled V8_FULL.pine → green, no CE10117. V8_FULL.pine is the MAIN file from here; V8_ENGINE / V8_CONTEXT kept as split fallback.
