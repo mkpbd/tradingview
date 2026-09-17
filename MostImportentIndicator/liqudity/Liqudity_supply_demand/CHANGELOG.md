@@ -131,3 +131,4 @@
 - Defaults: htfConfMode "A+ only" → "Downgrade" (ETH: HTF conflict gate blocked the only candidate); tpClamp true → false (EUR: RR floor ×2 from the wall clamp; room check still downgrades).
 - Entry label head now carries the entry price: `▲ LONG B @ 4312.5`.
 - Releases: every version is now also saved as `releases/V8_FULL_vX.Y.Z.pine` (v8.0.4–v8.0.7 exported from git) so an older build can be restored without git.
+- Guide rewritten for v8.0.7: single file, releases/ restore, entry price on the label, Funnel/Gates reading table with per-stage pass-rate targets, gate-reason table, updated tuning sheet and report template.
