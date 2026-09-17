@@ -111,3 +111,11 @@
 - Walls are now engineered pools only (not PK_SWING / PK_WICK) and fresh T1/T2 zones only (f_oppLiq, f_nextZone). Minor swings stay TP1 targets.
 - retestDepth 0.5→0.35, lateBars 6→8.
 - Token: v8.0.3 measured 100,602 before the display cut; compiles after.
+
+## v8.0.5 — soft penalty floor, MSS short-term fallback, disp body (V8_FULL.pine)
+- 4-symbol funnel after v8.0.4 (XAU/EUR/BTC/ETH 5m): P→M 18–29%, M→D 6–42% (ETH 16→1), F→E ~25%; gate fails "grade" (BTC) and "RR floor" (EUR, tie hidden).
+- f_grade: a soft penalty (room / congestion / run-fade / HTF conflict / regime) can no longer push B → NONE. Floor is GR_B once the hard grade exists. Soft = re-label, never block (hard blocks stay in f_gates).
+- MSS stage: when the confirmed internal pivot is missing or pre-dates the raid by > mssWin, the short-term level is the extreme of the MSS_STH_LOOK (8) bars INTO the raid candle — ICT short-term high/low break.
+- dispBodyAtr 1.3 → 1.0.
+- Gates row now shows total fails (`fail N: top ×n`) — ties between gates were invisible.
+- Cut 7 unused helpers (f_kindTxt, f_tick, f_tmTxt, f_rqTxt, f_biasTxt, f_paTxt, f_roomTxt) to pay for the MSS loop.

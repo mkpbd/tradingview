@@ -1,7 +1,7 @@
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════
 // V8 FULL · Engine + Context merged in ONE script (token probe build)
-// v8.0.4-full · M0-M20 (engine) + C5-C10 (context: MTF ladder, HTF CRT/TBS/TWS, HTF POI #2, trap LT-1..7, panel)
+// v8.0.5-full · M0-M20 (engine) + C5-C10 (context: MTF ladder, HTF CRT/TBS/TWS, HTF POI #2, trap LT-1..7, panel)
 //
 // Lineage: 2..txt (ICT-TE v7.10) causal core + 1.txt (LQ-SD-PA v3.1.1) feature set.
 // Plan:    V8_MASTER_PLAN_BN.md · Build rules: V8_BUILD_PROCESS_BN.md
@@ -132,7 +132,7 @@ retestDepth  = input.float(0.35, "FVG retest depth required (0.5 = 50%)", step =
 lateBars     = input.int(8, "LATE entry — max bars from first FVG touch", minval = 1, group = grpE)
 poiMaxAge    = input.int(80, "Max POI age for binding (bars)", minval = 5, group = grpE)
 poiWickFb    = input.bool(true, "POI fallback: the raid candle's own rejection wick (tier 2)", group = grpE)
-dispBodyAtr  = input.float(1.3, "Setup displacement body ≥ ATR ×", step = 0.1, minval = 0.5, group = grpE)
+dispBodyAtr  = input.float(1.0, "Setup displacement body ≥ ATR ×", step = 0.1, minval = 0.5, group = grpE)
 useVolConf   = input.bool(true, "Displacement needs relative volume", group = grpE)
 volMult      = input.float(1.2, "Relative volume ≥ (× 20-bar mean)", step = 0.1, minval = 0.5, group = grpE)
 apMaxTouch   = input.int(2, "A+ only within this many touches of the execution FVG", minval = 1, group = grpE)
@@ -286,6 +286,7 @@ OTE_2            = 0.79
 PD_EXTREME       = 0.25   // within 25% of a range extreme = premium / discount extreme
 POOL_CONSUME_ATR = 4.0    // price this far from a reacted pool → pool consumed
 MSS_MIN_SEP_ATR  = 0.10   // an MSS level this close to the raid extreme is the raid itself
+MSS_STH_LOOK     = 8      // bars INTO the raid whose extreme is the short-term level when no confirmed pivot fits
 TGT_HYST         = 6.0    // a challenger must out-rank the LOCKED target by this much to re-aim
 DISP_HOLD_FRAC   = 0.55   // displacement must close in this fraction of its own range
 POI_LEAVE_ATR    = 0.10   // displacement must close OUTSIDE the POI by at least this
@@ -433,31 +434,19 @@ f_kindPri(int k) =>
     k == PK_HTF ? 7 : k == PK_PW ? 6 : k == PK_PD ? 5 : k == PK_EQ ? 5 :
          k == PK_EXT ? 4 : k == PK_TL ? 4 : k == PK_SES ? 3 : k == PK_WICK ? 2 : 1
 
-f_kindTxt(int k) =>
-    k == PK_HTF ? "HTF SWING" : k == PK_PW ? "PWH/PWL" : k == PK_PD ? "PDH/PDL" :
-         k == PK_EQ ? "EQ" : k == PK_EXT ? "EXT SWING" : k == PK_TL ? "TRENDLINE" :
-         k == PK_SES ? "SESSION" : k == PK_WICK ? "WICK POOL" : "SWING"
 
 // vocabulary for labels / dashboard
-f_tick(bool ok)   => ok ? "✓" : "✗"
 f_rgTxt(int r)    => r == RG_TREND ? "TREND" : r == RG_EXP ? "EXPANSION" : r == RG_CHOP ? "CHOP" : "RANGE"
-f_tmTxt(int t)    => t == TM_LATE ? "LATE" : t == TM_VALID ? "VALID" : "PREMATURE"
-f_rqTxt(int q)    => q == RQ_A ? "A" : q == RQ_B ? "B" : q == RQ_C ? "C" : "—"
 f_grTxt(int g)    => g == GR_AP ? "A+" : g == GR_A ? "A" : g == GR_B ? "B" : "—"
 f_grMin(string s) => s == "A+" ? GR_AP : s == "A" ? GR_A : GR_B
-f_biasTxt(int b)  => b > 0 ? "▲ Bull" : b < 0 ? "▼ Bear" : "—"
 f_hsTxt(int h)    => h == HS_BULL ? "BULL" : h == HS_BEAR ? "BEAR" : h == HS_CONF ? "CONFLICT" : "NEUTRAL"
 f_rnTxt(int c)    => c == RN_CONT ? "RUN" : c == RN_EXH ? "exhausted" : c == RN_REV ? "REVERSED" : c == RN_UNCONF ? "1 leg" : "none"
 f_stTxt(int s)    =>
     s == ST_CTX ? "CTX" : s == ST_TGT ? "TARGET" : s == ST_RAID ? "RAIDED" : s == ST_POI ? "POI" :
          s == ST_MSS ? "MSS" : s == ST_DISP ? "DISP" : s == ST_FVG ? "FVG" : s == ST_ENTRY ? "ENTRY" : s == ST_DEAD ? "dead" : "idle"
-f_paTxt(int a)    =>
-    a == PA_OB ? "OB" : a == PA_BRK ? "BREAKER" : a == PA_MIT ? "MITIGATION" :
-         a == PA_IFVG ? "IFVG" : a == PA_BPR ? "BPR" : a == PA_REJ ? "REJECTION" : "FVG"
 f_paRank(int a)   =>
     a == PA_OB ? 0 : a == PA_BRK ? 1 : a == PA_IFVG ? 2 : a == PA_BPR ? 3 : a == PA_FVG ? 4 : a == PA_MIT ? 5 : 6
 f_sbWinTxt(int w) => w == SBW_LO ? "London" : w == SBW_AM ? "NY AM" : w == SBW_PM ? "NY PM" : "—"
-f_roomTxt(float r) => na(r) ? "∞" : str.tostring(r, "#.##") + "R"
 
 // ---- normalised risk inputs (engine reads these, inputs keep the user's numbers) ----
 // rrAplus < rrA would make A+ easier than A; minRisk > maxRisk would reject every stop.
@@ -2678,6 +2667,13 @@ f_setupAdvance(Setup s, int dir) =>
                 // V8.0.3 · ICT short-term shift: the latest INTERNAL swing (the lower-high / higher-low made into the raid) crossed with a displaced body
                 float sth  = isL ? sInt.swHi : sInt.swLo
                 int   sthB = isL ? sInt.swHiBar : sInt.swLoBar
+                // V8.0.5 · an unconfirmed pivot (pivLen not yet elapsed) or a pre-raid one → the extreme of the 8 bars INTO the raid
+                if na(sth) or nz(sthB, -99999999) < s.liqBar - mssWin
+                    int kO = bar_index - s.liqBar
+                    sth  := isL ? high[kO + 1] : low[kO + 1]
+                    sthB := s.liqBar - 1
+                    for i = 2 to MSS_STH_LOOK
+                        sth := isL ? math.max(sth, high[kO + i]) : math.min(sth, low[kO + i])
                 bool  st   = not ch and not ci and not ciL and not mssNeedChoch and not na(sth) and body >= structDisp * atrSafe and (isL ? close > sth and close[1] <= sth : close < sth and close[1] >= sth)
                 float lvl  = ch ? (isL ? sInt.evLvlUp : sInt.evLvlDn) : ci ? (isL ? bearRunOpen : bullRunOpen) : ciL ? (isL ? cisdUpLvl : cisdDnLvl) : sth
                 int   lvlB = ch ? (isL ? sInt.evBarUp : sInt.evBarDn) : ci ? (isL ? bearRunBar : bullRunBar) : ciL ? s.liqBar : sthB
@@ -3117,7 +3113,8 @@ f_grade(bool mach, bool narr, int tier, int rq, bool rev, bool mssCh, float rr, 
             g := GR_A
         if g == GR_A and mach and narr and tier == 1 and rq == RQ_A and f_geq(rr, rrAPn) and apTouch and (oteNeedAp ? oteQ == 1 : oteQ <= 1)
             g := GR_AP
-        g := math.max(g - f_penalty(roomBad, cong, runFade, hconf, regDown), GR_NONE)
+        // V8.0.5 · a SOFT downgrade re-labels, it never blocks: B is the floor (hard blocks are gates in M16)
+        g := g > GR_NONE ? math.max(g - f_penalty(roomBad, cong, runFade, hconf, regDown), GR_B) : g
         if synth
             g := math.min(g, GR_B)          // V8: a synthetic TP2 never grades above B
     g
@@ -3642,7 +3639,7 @@ if showDash and barstate.islast
     string fun = "T" + str.tostring(array.get(stageReach, ST_TGT)) + " R" + str.tostring(array.get(stageReach, ST_RAID)) + " P" + str.tostring(array.get(stageReach, ST_POI)) +
          " M" + str.tostring(array.get(stageReach, ST_MSS)) + " D" + str.tostring(array.get(stageReach, ST_DISP)) + " F" + str.tostring(array.get(stageReach, ST_FVG)) + " E" + str.tostring(array.get(stageReach, ST_ENTRY))
     f_dRow(8,  "Funnel",  fun + " · kill: " + (kN > 0 ? f_killTxt(kIx) + " ×" + str.tostring(kN) : "—"), color.new(color.yellow, 0))
-    f_dRow(9, "Gates",   "cand " + str.tostring(array.get(gateCnt, 0)) + " · fail: " + (gN > 0 ? f_gateTxt(gIx) + " ×" + str.tostring(gN) : "—"), color.new(color.yellow, 0))
+    f_dRow(9, "Gates",   "cand " + str.tostring(array.get(gateCnt, 0)) + " · fail " + str.tostring(array.sum(gateCnt) - array.get(gateCnt, 0)) + ": " + (gN > 0 ? f_gateTxt(gIx) + " ×" + str.tostring(gN) : "—"), color.new(color.yellow, 0))
 
 // ═══════════════════════════════════════════════════════════ M20 · ALERTS
 // alertcondition: user picks "Once per bar close". alert(): structured payload, once per bar close.
