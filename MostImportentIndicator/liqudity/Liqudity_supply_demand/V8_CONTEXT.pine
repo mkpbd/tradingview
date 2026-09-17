@@ -1,0 +1,891 @@
+//@version=6
+// ═══════════════════════════════════════════════════════════════════════════════
+// V8 CONTEXT · companion to V8_ENGINE.pine (file B)
+// v8.0.0 · MTF bias ladder · HTF CRT / Turtle-soup / TWS layer · HTF FVG POI boxes ·
+//          ◬ Liquidity-trap engine LT-1…LT-7 (VISUAL + alert() ONLY) · verbose panel
+//
+// RULES
+//   · This file NEVER emits an entry. No SL / TP / grade. It annotates and alerts.
+//   · It cannot read file A's state, so it runs its OWN light copies of structure, sweep
+//     memory and a one-slot FVG registry — for display and the trap score only.
+//   · Every HTF read is expr[1] inside the request + lookahead_on + f_tfUp clamp (same
+//     convention as file A) → visible on the FIRST chart bar of the new HTF candle, no leak.
+//   · Budget: 10 request.security (4 ladder · 4 HTF layer · 2 HTF POI). Hard cap 12.
+//
+// Module order:  C0 indicator · C1 inputs · C2 constants+helpers · C3 core series ·
+//                C4 light structure + sweep memory + FVG slot · C5 MTF ladder ·
+//                C6 HTF CRT/TBS/TWS layer · C7 HTF POI · C8 trap engine · C9 panel · C10 alerts
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════ C0 · INDICATOR
+indicator("V8 Context · MTF ladder + HTF CRT/TBS + Trap layer", "V8-CTX", overlay = true,
+     max_boxes_count = 100, max_lines_count = 200, max_labels_count = 400)
+
+// ═══════════════════════════════════════════════════════════ C1 · INPUTS
+// Keep these numbers EQUAL to file A's so both files read the same structure / displacement.
+grpG       = "① General (match V8_ENGINE)"
+pivLen     = input.int(5,  "Pivot length (internal)", minval = 2, group = grpG)
+extPiv     = input.int(12, "Pivot length (external)", minval = 5, group = grpG)
+atrLen     = input.int(14, "ATR length", minval = 1, group = grpG)
+biasLen    = input.int(50, "Bias EMA length", minval = 5, group = grpG)
+dispFactor = input.float(1.2, "Displacement body ≥ ATR ×", step = 0.1, minval = 0.5, group = grpG)
+structDisp = input.float(0.5, "Structural break body ≥ ATR ×", step = 0.1, minval = 0, group = grpG)
+minWickAtr = input.float(0.3, "Min significant wick (ATR ×)", step = 0.1, group = grpG)
+sweepLook  = input.int(15, "Sweep stays in play (bars)", minval = 1, group = grpG)
+raidMinAtr = input.float(0.10, "Min sweep penetration (ATR ×)", step = 0.05, minval = 0, group = grpG)
+htfSel     = input.string("Auto", "HTF (POI #1 / trap bias)", options = ["Auto", "15", "30", "60", "240", "D"], group = grpG)
+htf2Sel    = input.string("D", "HTF #2 for POI boxes", options = ["60", "240", "D", "W"], group = grpG)
+
+grpL      = "② MTF bias ladder (annotation only)"
+showLad   = input.bool(true, "Show ladder in panel", group = grpL)
+ladTf1    = input.string("5",   "Rung 1", options = ["1", "3", "5", "15", "30", "60", "120", "240", "D"], group = grpL)
+ladTf2    = input.string("15",  "Rung 2", options = ["1", "3", "5", "15", "30", "60", "120", "240", "D"], group = grpL)
+ladTf3    = input.string("60",  "Rung 3", options = ["5", "15", "30", "60", "120", "240", "D", "W"], group = grpL)
+ladTf4    = input.string("240", "Rung 4", options = ["15", "30", "60", "120", "240", "D", "W"], group = grpL)
+
+grpT        = "③ HTF CRT · Turtle soup · TWS layer"
+useHtfCrt   = input.bool(true, "Enable HTF layer", group = grpT)
+showHtfCrt  = input.bool(true, "Chip every HTF event on the chart", group = grpT)
+htfT1       = input.string("15",  "Layer TF 1", options = ["5", "15", "30", "60", "120", "240", "D"], group = grpT)
+htfT2       = input.string("30",  "Layer TF 2", options = ["5", "15", "30", "60", "120", "240", "D"], group = grpT)
+htfT3       = input.string("60",  "Layer TF 3", options = ["15", "30", "60", "120", "240", "D"], group = grpT)
+htfT4       = input.string("240", "Layer TF 4", options = ["30", "60", "120", "240", "D", "W"], group = grpT)
+crtRangeAtr = input.float(1.2, "CRT min candle-1 range (ATR ×)", step = 0.1, minval = 0.5, group = grpT)
+crtDispAtr  = input.float(0.5, "CRT / TWS min delivery body (ATR ×)", step = 0.1, minval = 0.1, group = grpT)
+tbsLen      = input.int(20, "Turtle soup lookback (HTF bars)", minval = 5, group = grpT)
+tbsAgeMin   = input.int(4, "Swept extreme min age", minval = 1, group = grpT)
+tbsAgeMax   = input.int(60, "Swept extreme max age (0 = off)", minval = 0, group = grpT)
+
+grpP         = "④ HTF FVG POI boxes"
+showPoi      = input.bool(true, "Draw HTF FVG boxes (HTF #1 + #2)", group = grpP)
+hPoiMaxAge   = input.int(40, "HTF POI max age (HTF candles)", minval = 5, group = grpP)
+hPoiMaxTouch = input.int(3, "HTF POI max mitigations", minval = 1, group = grpP)
+hPoiDisp     = input.float(0.8, "HTF FVG min displacement body (ATR ×)", step = 0.1, minval = 0, group = grpP)
+hPoiNeedDir  = input.bool(true, "HTF POI must agree with HTF EMA direction", group = grpP)
+
+grpLT    = "⑤ ◬ Liquidity Trap Engine (visual + alert only)"
+ltEnable = input.bool(true, "Enable trap engine", group = grpLT)
+ltP1 = input.bool(true, "LT-1 Compression → Expansion breakout (long)", group = grpLT)
+ltP2 = input.bool(true, "LT-2 Expansion + Compression trap (short)",    group = grpLT)
+ltP3 = input.bool(true, "LT-3 Lower-wick liquidity trap (short)",       group = grpLT)
+ltP4 = input.bool(true, "LT-4 Shadow-high liquidity (long)",            group = grpLT)
+ltP5 = input.bool(true, "LT-5 Weak breakout trap (short)",              group = grpLT)
+ltP6 = input.bool(true, "LT-6 Structural breakout trap (short)",        group = grpLT)
+ltP7 = input.bool(true, "LT-7 Supply rejection breakout (short)",       group = grpLT)
+
+grpLTs       = "⑥ LT — sensitivity"
+ltWickAtr    = input.float(0.4, "Wick sensitivity (ATR ×)",               step = 0.1,  minval = 0.1,  group = grpLTs)
+ltWickRatio  = input.float(1.5, "Significant wick ≥ body ×",              step = 0.25, minval = 1,    group = grpLTs)
+ltWickMin    = input.int(3,     "Wick cluster — min candles",             minval = 2, maxval = 6,     group = grpLTs)
+ltWickWin    = input.int(8,     "Wick cluster — window (bars)",           minval = 4, maxval = 12,    group = grpLTs)
+ltClusterTol = input.float(0.6, "Wick cluster — level tolerance (ATR ×)", step = 0.1,  minval = 0.1,  group = grpLTs)
+ltCmpLen     = input.int(5,     "Compression window (bars)",              minval = 3, maxval = 10,    group = grpLTs)
+ltCmpSens    = input.float(0.5, "Compression — avg body ≤ ATR ×",         step = 0.1,  minval = 0.1,  group = grpLTs)
+ltCmpRngAtr  = input.float(2.5, "Compression — window range ≤ ATR ×",     step = 0.5,  minval = 1,    group = grpLTs)
+ltExpSens    = input.float(1.2, "Expansion body ≥ ATR × (genuine break)", step = 0.1,  minval = 0.5,  group = grpLTs)
+ltBrkStr     = input.float(0.8, "Weak breakout body < ATR ×",             step = 0.1,  minval = 0.2,  group = grpLTs)
+ltNearAtr    = input.float(2.0, "Compression near level (ATR ×)",         step = 0.5,  minval = 0.5,  group = grpLTs)
+ltRetestAtr  = input.float(0.5, "Retest distance from level (ATR ×)",     step = 0.1,  minval = 0.1,  group = grpLTs)
+ltDispLook   = input.int(20,    "Seller-displacement memory (bars)",      minval = 5,  group = grpLTs)
+ltPoolLook   = input.int(25,    "Wick pool stays valid (bars)",           minval = 5,  group = grpLTs)
+ltWaitBars   = input.int(25,    "Setup expiry — bars to confirm",         minval = 5,  group = grpLTs)
+ltInvAtr     = input.float(1.0, "Invalidation beyond level (ATR ×)",      step = 0.25, minval = 0.25, group = grpLTs)
+ltCd         = input.int(10,    "Cooldown after a trap signal (bars)",    minval = 0,  group = grpLTs)
+
+grpLTc      = "⑦ LT — confirmation"
+ltReqRetest = input.bool(true,  "Require retest (long: level retap · short: close back below)", group = grpLTc)
+ltReqMss    = input.bool(false, "Require recent MSS / CHoCH", group = grpLTc)
+ltReqSweep  = input.bool(false, "Require sweep in play",      group = grpLTc)
+ltReqFvg    = input.bool(false, "Require live FVG (signal side)", group = grpLTc)
+ltReqMtf    = input.bool(false, "Require ladder-net agreement", group = grpLTc)
+ltPreview   = input.bool(false, "Intrabar PREVIEW alert() (repaints)", group = grpLTc)
+
+grpLTv       = "⑧ LT — score / display"
+ltScoreMed   = input.int(50, "MEDIUM score ≥",    minval = 1, maxval = 100, group = grpLTv)
+ltScoreHigh  = input.int(70, "HIGH score ≥",      minval = 1, maxval = 100, group = grpLTv)
+ltScoreVHigh = input.int(85, "VERY HIGH score ≥", minval = 1, maxval = 100, group = grpLTv)
+ltShowSig    = input.bool(true, "Trap labels",                       group = grpLTv)
+ltShowSetup  = input.bool(true, "Setup (armed) chips",               group = grpLTv)
+ltShowPools  = input.bool(true, "Wick-cluster pool lines",           group = grpLTv)
+ltShowMarks  = input.bool(true, "Retest / failed-break marks",       group = grpLTv)
+ltShowScore  = input.bool(true, "Score in label",                    group = grpLTv)
+ltDynAlert   = input.bool(true, "Dynamic alert() (pattern + score + level)", group = grpLTv)
+
+grpD        = "⑨ Panel / UI"
+showPanel   = input.bool(true, "Show context panel", group = grpD)
+panelPosOpt = input.string("Bottom right", "Panel position", options = ["Top left", "Top right", "Bottom left", "Bottom right"], group = grpD)
+panelSizeOpt = input.string("Small", "Panel text size", options = ["Tiny", "Small", "Normal"], group = grpD)
+sigSizeOpt  = input.string("Normal", "Trap label size", options = ["Tiny", "Small", "Normal", "Large"], group = grpD)
+uiMicroBig  = input.bool(true, "Readable micro-chips", group = grpD)
+uiChipGap   = input.float(0.9, "Chip spacing (× ATR)", minval = 0.2, maxval = 3.0, step = 0.1, group = grpD)
+
+// ═══════════════════════════════════════════════════════════ C2 · CONSTANTS + HELPERS
+STRONG_CLOSE_PCT = 0.30
+CISD_NEUTRAL_PCT = 0.10
+PIN_OPP_PCT      = 0.35
+TRIG_LOOK        = 10
+IFC_LOOK         = 3
+BRK_BODY_ATR     = 0.5
+NEAR_LVL_ATR     = 0.25
+SWEEP_CTX_ATR    = 2.0
+COL_BULL         = #089981
+COL_BEAR         = #f23645
+COL_NEU          = #787b86
+COL_CRT          = color.teal
+COL_TWS          = color.purple
+COL_TBS          = color.orange
+
+f_szPick(string s) =>
+    s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Normal" ? size.normal : size.large
+sigSize   = f_szPick(sigSizeOpt)
+panelSize = f_szPick(panelSizeOpt)
+infoSize  = size.small
+mkSize    = uiMicroBig ? size.small : size.tiny
+f_pos(string p) =>
+    p == "Top left" ? position.top_left : p == "Top right" ? position.top_right : p == "Bottom left" ? position.bottom_left : position.bottom_right
+
+f_recent(int b, int look) => not na(b) and bar_index - b <= look
+f_tfUp(simple string tf) => timeframe.in_seconds(tf) < timeframe.in_seconds() ? timeframe.period : tf
+f_autoHtf() =>
+    switch timeframe.period
+        "1"   => "15"
+        "2"   => "30"
+        "3"   => "30"
+        "5"   => "60"
+        "10"  => "120"
+        "15"  => "240"
+        "30"  => "240"
+        "60"  => "D"
+        "120" => "D"
+        "240" => "D"
+        => "D"
+f_tfTxt(string tf) =>
+    tf == "D" ? "D" : tf == "W" ? "W" : tf == "60" ? "1H" : tf == "120" ? "2H" : tf == "240" ? "4H" : tf + "m"
+f_ago(int b) => na(b) ? "" : " · " + str.tostring(bar_index - b) + "b ago"
+
+// ═══════════════════════════════════════════════════════════ C3 · CORE SERIES + CANDLE ANATOMY
+atr       = ta.atr(atrLen)
+atrSafe   = math.max(nz(atr, syminfo.mintick), syminfo.mintick)
+confirmed = barstate.isconfirmed
+body    = math.abs(close - open)
+rng     = high - low
+rngSafe = math.max(rng, syminfo.mintick)
+upWick  = high - math.max(open, close)
+dnWick  = math.min(open, close) - low
+bullBar = close > open
+bearBar = close < open
+
+var int[] chipLn = array.new_int(3, -1)
+f_chip(bool below, string txt, color bg, color tc, string sz) =>
+    if array.get(chipLn, 2) != bar_index
+        array.set(chipLn, 2, bar_index)
+        array.set(chipLn, 0, 0)
+        array.set(chipLn, 1, 0)
+    int   k  = below ? 1 : 0
+    int   n  = array.get(chipLn, k)
+    array.set(chipLn, k, n + 1)
+    float st = atrSafe * (0.45 + n * uiChipGap)
+    label.new(bar_index, below ? low - st : high + st, txt,
+         style = below ? label.style_label_up : label.style_label_down,
+         color = bg, textcolor = tc, size = sz)
+
+bullPin    = rng > 0 and dnWick >= 2 * body and dnWick >= 0.45 * rng and upWick <= PIN_OPP_PCT * rng and dnWick >= minWickAtr * atrSafe
+bearPin    = rng > 0 and upWick >= 2 * body and upWick >= 0.45 * rng and dnWick <= PIN_OPP_PCT * rng and upWick >= minWickAtr * atrSafe
+bullEngulf = bullBar and bearBar[1] and close >= open[1] and open <= close[1] and body > body[1]
+bearEngulf = bearBar and bullBar[1] and close <= open[1] and open >= close[1] and body > body[1]
+bullConfirm = bullPin or bullEngulf
+bearConfirm = bearPin or bearEngulf
+
+strongUp  = rng > 0 and close >= high - STRONG_CLOSE_PCT * rng
+strongDn  = rng > 0 and close <= low  + STRONG_CLOSE_PCT * rng
+dispUpBar = bullBar and body >= dispFactor * atrSafe and strongUp
+dispDnBar = bearBar and body >= dispFactor * atrSafe and strongDn
+
+// CISD (light copy of file A M3)
+cisdNeutral = rng == 0 or body <= CISD_NEUTRAL_PCT * rng
+cisdSeqUp   = bullBar and not cisdNeutral
+cisdSeqDn   = bearBar and not cisdNeutral
+var float bullRunOpen = na
+var float bearRunOpen = na
+var int   bullRunLen  = 0
+var int   bearRunLen  = 0
+var bool  cisdDnDone  = false
+var bool  cisdUpDone  = false
+if confirmed
+    if cisdNeutral
+        bullRunOpen := na
+        bearRunOpen := na
+        bullRunLen  := 0
+        bearRunLen  := 0
+    if cisdSeqUp and not cisdSeqUp[1]
+        bullRunOpen := open
+        bullRunLen  := 1
+        cisdDnDone  := false
+    else if cisdSeqUp
+        bullRunLen += 1
+    if cisdSeqDn and not cisdSeqDn[1]
+        bearRunOpen := open
+        bearRunLen  := 1
+        cisdUpDone  := false
+    else if cisdSeqDn
+        bearRunLen += 1
+cisdDn = confirmed and not na(bullRunOpen) and not cisdDnDone and cisdSeqDn and close < bullRunOpen and bullRunLen >= 2 and body >= BRK_BODY_ATR * atrSafe and strongDn
+cisdUp = confirmed and not na(bearRunOpen) and not cisdUpDone and cisdSeqUp and close > bearRunOpen and bearRunLen >= 2 and body >= BRK_BODY_ATR * atrSafe and strongUp
+if cisdDn
+    cisdDnDone := true
+if cisdUp
+    cisdUpDone := true
+
+// IFC
+prevMid  = (high[1] + low[1]) / 2
+ifcPoolL = ta.lowest(low, IFC_LOOK)[1]
+ifcPoolH = ta.highest(high, IFC_LOOK)[1]
+ifcBull  = low  < ifcPoolL and ifcPoolL - low  >= NEAR_LVL_ATR * atrSafe and bullBar and close > prevMid and strongUp and body >= BRK_BODY_ATR * atrSafe
+ifcBear  = high > ifcPoolH and high - ifcPoolH >= NEAR_LVL_ATR * atrSafe and bearBar and close < prevMid and strongDn and body >= BRK_BODY_ATR * atrSafe
+zoneBullConf = bullConfirm or ifcBull or cisdUp
+zoneBearConf = bearConfirm or ifcBear or cisdDn
+
+// ═══════════════════════════════════════════════════════════ C4 · LIGHT STRUCTURE · SWEEP MEMORY · FVG SLOT
+// Same engine as file A M4 (verbatim) so both files agree on BOS / CHoCH / protected swings.
+type Struct
+    int   dir       = 0
+    float swHi      = na
+    int   swHiBar   = na
+    float swLo      = na
+    int   swLoBar   = na
+    bool  hiBroken  = false
+    bool  loBroken  = false
+    bool  hiRun     = false
+    bool  loRun     = false
+    float protLo    = na
+    int   protLoBar = na
+    float protHi    = na
+    int   protHiBar = na
+    float evLvlUp   = na
+    float evLvlDn   = na
+
+f_structUpdate(Struct s, float pvH, float pvL, simple int pvLen) =>
+    bool bosU = false
+    bool bosD = false
+    bool chU  = false
+    bool chD  = false
+    if confirmed
+        if not na(pvH)
+            s.swHi     := pvH
+            s.swHiBar  := bar_index - pvLen
+            s.hiBroken := false
+            s.hiRun    := false
+        if not na(pvL)
+            s.swLo     := pvL
+            s.swLoBar  := bar_index - pvLen
+            s.loBroken := false
+            s.loRun    := false
+        bool disp = body >= structDisp * atrSafe
+        if s.dir == 1 and not na(s.protLo) and close < s.protLo and disp
+            chD          := true
+            s.dir        := -1
+            s.evLvlDn    := s.protLo
+            s.protHi     := s.swHi
+            s.protHiBar  := s.swHiBar
+            s.protLo     := na
+            s.protLoBar  := na
+            s.loBroken   := false
+        else if s.dir == -1 and not na(s.protHi) and close > s.protHi and disp
+            chU          := true
+            s.dir        := 1
+            s.evLvlUp    := s.protHi
+            s.protLo     := s.swLo
+            s.protLoBar  := s.swLoBar
+            s.protHi     := na
+            s.protHiBar  := na
+            s.hiBroken   := false
+        else if not na(s.swHi) and not s.hiBroken and close > s.swHi and s.dir >= 0
+            if disp
+                bosU        := true
+                s.hiBroken  := true
+                s.dir       := 1
+                s.evLvlUp   := s.swHi
+                s.protLo    := s.swLo
+                s.protLoBar := s.swLoBar
+            else if not s.hiRun
+                s.hiRun := true
+        else if not na(s.swLo) and not s.loBroken and close < s.swLo and s.dir <= 0
+            if disp
+                bosD        := true
+                s.loBroken  := true
+                s.dir       := -1
+                s.evLvlDn   := s.swLo
+                s.protHi    := s.swHi
+                s.protHiBar := s.swHiBar
+            else if not s.loRun
+                s.loRun := true
+        else if s.dir == 1 and na(s.protLo) and not na(s.swLo) and not s.loBroken and close < s.swLo and disp
+            chD         := true
+            s.dir       := -1
+            s.evLvlDn   := s.swLo
+            s.loBroken  := true
+            s.protHi    := s.swHi
+            s.protHiBar := s.swHiBar
+        else if s.dir == -1 and na(s.protHi) and not na(s.swHi) and not s.hiBroken and close > s.swHi and disp
+            chU         := true
+            s.dir       := 1
+            s.evLvlUp   := s.swHi
+            s.hiBroken  := true
+            s.protLo    := s.swLo
+            s.protLoBar := s.swLoBar
+    [bosU, bosD, chU, chD]
+
+ph  = ta.pivothigh(high, pivLen, pivLen)
+pl  = ta.pivotlow(low, pivLen, pivLen)
+eph = ta.pivothigh(high, extPiv, extPiv)
+epl = ta.pivotlow(low, extPiv, extPiv)
+var Struct sInt = Struct.new()
+var Struct sExt = Struct.new()
+[bosUp, bosDn, chochUp, chochDn]     = f_structUpdate(sInt, ph, pl, pivLen)
+[eBosUp, eBosDn, eChochUp, eChochDn] = f_structUpdate(sExt, eph, epl, extPiv)
+msDir   = sInt.dir
+extDir  = sExt.dir
+lastRes = sInt.swHi
+lastSup = sInt.swLo
+extRes  = sExt.swHi
+extSup  = sExt.swLo
+brokeUp = bosUp or eBosUp or chochUp or eChochUp
+brokeDn = bosDn or eBosDn or chochDn or eChochDn
+mssBull = chochUp or (cisdUp and dispUpBar)
+mssBear = chochDn or (cisdDn and dispDnBar)
+
+// trigger memories
+var int iChUpBar   = na
+var int iChDnBar   = na
+var int eChUpBar   = na
+var int eChDnBar   = na
+var int cisdUpBar  = na
+var int cisdDnBar  = na
+var int dispUpBar2 = na
+var int dispDnBar2 = na
+if confirmed
+    if chochUp
+        iChUpBar := bar_index
+    if chochDn
+        iChDnBar := bar_index
+    if eChochUp
+        eChUpBar := bar_index
+    if eChochDn
+        eChDnBar := bar_index
+    if cisdUp
+        cisdUpBar := bar_index
+    if cisdDn
+        cisdDnBar := bar_index
+    if dispUpBar
+        dispUpBar2 := bar_index
+    if dispDnBar
+        dispDnBar2 := bar_index
+recentChUp   = f_recent(iChUpBar, TRIG_LOOK) or f_recent(eChUpBar, TRIG_LOOK)
+recentChDn   = f_recent(iChDnBar, TRIG_LOOK) or f_recent(eChDnBar, TRIG_LOOK)
+recentMssUp  = f_recent(iChUpBar, TRIG_LOOK) or f_recent(cisdUpBar, TRIG_LOOK)
+recentMssDn  = f_recent(iChDnBar, TRIG_LOOK) or f_recent(cisdDnBar, TRIG_LOOK)
+recentDispUp = f_recent(dispUpBar2, 3)
+recentDispDn = f_recent(dispDnBar2, 3)
+
+// sweep memory (light): latest internal swing taken by a wick and rejected
+sslSweep = confirmed and not na(lastSup) and low  < lastSup and close > lastSup and lastSup - low  >= raidMinAtr * atrSafe
+bslSweep = confirmed and not na(lastRes) and high > lastRes and close < lastRes and high - lastRes >= raidMinAtr * atrSafe
+var int sslBar = na
+var int bslBar = na
+if sslSweep
+    sslBar := bar_index
+if bslSweep
+    bslBar := bar_index
+sslInPlay = f_recent(sslBar, sweepLook)
+bslInPlay = f_recent(bslBar, sweepLook)
+
+// one-slot FVG registry per side (live gap made by a displacement candle) — trap score + LT-7 supply
+var float cFvgBTop = na
+var float cFvgBBot = na
+var float cFvgSTop = na
+var float cFvgSBot = na
+if confirmed
+    if low > high[2] and bullBar[1] and body[1] >= dispFactor * atrSafe
+        cFvgBTop := low
+        cFvgBBot := high[2]
+    if high < low[2] and bearBar[1] and body[1] >= dispFactor * atrSafe
+        cFvgSTop := low[2]
+        cFvgSBot := high
+    if not na(cFvgBBot) and close < cFvgBBot
+        cFvgBTop := na
+        cFvgBBot := na
+    if not na(cFvgSTop) and close > cFvgSTop
+        cFvgSTop := na
+        cFvgSBot := na
+inDemand = not na(cFvgBTop) and low  <= cFvgBTop and close >= cFvgBBot
+inSupply = not na(cFvgSTop) and high >= cFvgSBot and close <= cFvgSTop
+nsBot    = not na(cFvgSBot) and cFvgSBot >= close ? cFvgSBot : na
+nsTop    = na(nsBot) ? na : cFvgSTop
+
+// chop: tight window, no net progress
+chop = ta.highest(high, 10) - ta.lowest(low, 10) <= 2.5 * atrSafe
+
+// ═══════════════════════════════════════════════════════════ C5 · MTF BIAS LADDER (4 security)
+// ANNOTATION ONLY. A rung below the chart TF is the chart looking at itself → shown as ·
+f_biasSrc() =>
+    _v = close > ta.ema(close, biasLen) ? 1 : -1
+    _v[1]
+f_bias(simple string tf) =>
+    request.security(syminfo.tickerid, f_tfUp(tf), f_biasSrc(), lookahead = barmerge.lookahead_on)
+tfSec = timeframe.in_seconds()
+mtfB1 = nz(f_bias(ladTf1), 0)
+mtfB2 = nz(f_bias(ladTf2), 0)
+mtfB3 = nz(f_bias(ladTf3), 0)
+mtfB4 = nz(f_bias(ladTf4), 0)
+mtfU1 = timeframe.in_seconds(ladTf1) >= tfSec
+mtfU2 = timeframe.in_seconds(ladTf2) >= tfSec
+mtfU3 = timeframe.in_seconds(ladTf3) >= tfSec
+mtfU4 = timeframe.in_seconds(ladTf4) >= tfSec
+mtfNet = (mtfU1 ? mtfB1 : 0) + (mtfU2 ? mtfB2 : 0) + (mtfU3 ? mtfB3 : 0) + (mtfU4 ? mtfB4 : 0)
+mtfN   = (mtfU1 ? 1 : 0) + (mtfU2 ? 1 : 0) + (mtfU3 ? 1 : 0) + (mtfU4 ? 1 : 0)
+htfB   = mtfNet > 0 ? 1 : mtfNet < 0 ? -1 : 0          // the trap score's "HTF agreement"
+f_rung(string tf, int b, bool u) => f_tfTxt(tf) + (u ? (b > 0 ? "▲" : b < 0 ? "▼" : "·") : "·")
+ladTxt = f_rung(ladTf1, mtfB1, mtfU1) + " " + f_rung(ladTf2, mtfB2, mtfU2) + " " + f_rung(ladTf3, mtfB3, mtfU3) + " " + f_rung(ladTf4, mtfB4, mtfU4) +
+     "  net " + (mtfNet > 0 ? "+" : "") + str.tostring(mtfNet) + "/" + str.tostring(mtfN)
+
+// ═══════════════════════════════════════════════════════════ C6 · HTF CRT · TURTLE SOUP · TWS LAYER (4 security)
+// ONE closed-HTF-candle classifier, returns an int code (one tuple slot instead of six):
+//   ±1 CRT (range → raid → reclaim → delivery) · ±2 TWS (turtle soup whose reclaim candle is
+//   displacement-grade: body ≥ crtDispAtr and closes in the outer 30%) · ±3 TBS (plain turtle soup)
+// Positive = bullish. Priority CRT > TWS > TBS when one candle qualifies for several.
+f_tbsAgeOk(int age) => age >= tbsAgeMin and (tbsAgeMax == 0 or age <= tbsAgeMax)
+f_crtTbs() =>
+    float _atr  = ta.atr(atrLen)
+    float _rng  = high - low
+    float _body = math.abs(close - open)
+    bool  _bull = close > open
+    bool  _bear = close < open
+    bool  _c1big = _rng[2] >= crtRangeAtr * _atr
+    bool  _crtB = _c1big and low[1]  < low[2]  and close[1] > low[2]  and close[1] < high[2] and low[2] - low[1]   >= minWickAtr * _atr and _bull and close > high[1] and _body >= crtDispAtr * _atr
+    bool  _crtS = _c1big and high[1] > high[2] and close[1] < high[2] and close[1] > low[2]  and high[1] - high[2] >= minWickAtr * _atr and _bear and close < low[1]  and _body >= crtDispAtr * _atr
+    float _tl    = ta.lowest(low, tbsLen)[1]
+    float _th    = ta.highest(high, tbsLen)[1]
+    int   _loAge = -ta.lowestbars(low, tbsLen)[1] + 1
+    int   _hiAge = -ta.highestbars(high, tbsLen)[1] + 1
+    bool  _tbsB = low  < _tl and close > _tl and _bull and f_tbsAgeOk(_loAge) and close >= low  + 0.5 * _rng
+    bool  _tbsS = high > _th and close < _th and _bear and f_tbsAgeOk(_hiAge) and close <= high - 0.5 * _rng
+    bool  _twsB = _tbsB and _body >= crtDispAtr * _atr and close >= high - STRONG_CLOSE_PCT * _rng
+    bool  _twsS = _tbsS and _body >= crtDispAtr * _atr and close <= low  + STRONG_CLOSE_PCT * _rng
+    int   _k = _crtB ? 1 : _crtS ? -1 : _twsB ? 2 : _twsS ? -2 : _tbsB ? 3 : _tbsS ? -3 : 0
+    [_k[1], time[1]]
+
+f_kTxt(int k) => k == 1 ? "CRT ▲" : k == -1 ? "CRT ▼" : k == 2 ? "TWS ▲" : k == -2 ? "TWS ▼" : k == 3 ? "TBS ▲" : k == -3 ? "TBS ▼" : "—"
+f_kCol(int k) => math.abs(k) == 1 ? COL_CRT : math.abs(k) == 2 ? COL_TWS : COL_TBS
+
+// per-TF memory of the LAST event (panel) — arrays because a function may mutate a global array
+var hEvtK   = array.new<int>(4, 0)
+var hEvtBar = array.new<int>(4, int(na))
+f_htfLayer(simple string tfIn, int ix) =>
+    string tf = f_tfUp(tfIn)
+    [k, t] = request.security(syminfo.tickerid, tf, f_crtTbs(), lookahead = barmerge.lookahead_on)
+    bool nb = tf != timeframe.period and not na(t) and t != nz(t[1])
+    int  ev = useHtfCrt and confirmed and nb ? nz(k, 0) : 0
+    if ev != 0
+        array.set(hEvtK, ix, ev)
+        array.set(hEvtBar, ix, bar_index)
+        if showHtfCrt
+            f_chip(ev > 0, f_tfTxt(tf) + " " + f_kTxt(ev), color.new(f_kCol(ev), 25), color.white, mkSize)
+    ev
+hEv1 = f_htfLayer(htfT1, 0)
+hEv2 = f_htfLayer(htfT2, 1)
+hEv3 = f_htfLayer(htfT3, 2)
+hEv4 = f_htfLayer(htfT4, 3)
+hEvLong  = hEv1 > 0 or hEv2 > 0 or hEv3 > 0 or hEv4 > 0
+hEvShort = hEv1 < 0 or hEv2 < 0 or hEv3 < 0 or hEv4 < 0
+// how many layer TFs printed the SAME direction on this bar — the confluence read the panel shows
+hEvNet = (hEv1 > 0 ? 1 : hEv1 < 0 ? -1 : 0) + (hEv2 > 0 ? 1 : hEv2 < 0 ? -1 : 0) + (hEv3 > 0 ? 1 : hEv3 < 0 ? -1 : 0) + (hEv4 > 0 ? 1 : hEv4 < 0 ? -1 : 0)
+f_evTxt(simple string tfIn, int ev) => ev == 0 ? "" : f_tfTxt(f_tfUp(tfIn)) + " " + f_kTxt(ev) + " "
+hEvTxt = f_evTxt(htfT1, hEv1) + f_evTxt(htfT2, hEv2) + f_evTxt(htfT3, hEv3) + f_evTxt(htfT4, hEv4)
+
+// ═══════════════════════════════════════════════════════════ C7 · HTF FVG POI (2 security)
+// Same detector as file A M6 (displacement + direction filter + edge-triggered mitigation counter).
+htfTf  = f_tfUp(htfSel == "Auto" ? f_autoHtf() : htfSel)
+htf2Tf = f_tfUp(htf2Sel)
+f_htfPoi() =>
+    _atr = ta.atr(atrLen)
+    _dir = close > ta.ema(close, biasLen) ? 1 : -1
+    _dU  = close[1] > open[1] and math.abs(close[1] - open[1]) >= hPoiDisp * _atr
+    _dD  = close[1] < open[1] and math.abs(close[1] - open[1]) >= hPoiDisp * _atr
+    var float bTop = na
+    var float bBot = na
+    var int   bBar = na
+    var int   bIn  = 0
+    var bool  bInZ = false
+    var float sTop = na
+    var float sBot = na
+    var int   sBar = na
+    var int   sIn  = 0
+    var bool  sInZ = false
+    if low > high[2] and _dU and (not hPoiNeedDir or _dir > 0)
+        bTop := low
+        bBot := high[2]
+        bBar := bar_index
+        bIn  := 0
+        bInZ := false
+    if high < low[2] and _dD and (not hPoiNeedDir or _dir < 0)
+        sBot := high
+        sTop := low[2]
+        sBar := bar_index
+        sIn  := 0
+        sInZ := false
+    bool bNow = not na(bTop) and bar_index > bBar and low <= bTop
+    if bNow and not bInZ
+        bIn += 1
+    bInZ := bNow
+    bool sNow = not na(sTop) and bar_index > sBar and high >= sBot
+    if sNow and not sInZ
+        sIn += 1
+    sInZ := sNow
+    if not na(bBot) and (close < bBot or bar_index - bBar > hPoiMaxAge or bIn > hPoiMaxTouch)
+        bTop := na
+        bBot := na
+        bBar := na
+        bIn  := 0
+    if not na(sTop) and (close > sTop or bar_index - sBar > hPoiMaxAge or sIn > hPoiMaxTouch)
+        sTop := na
+        sBot := na
+        sBar := na
+        sIn  := 0
+    [bTop[1], bBot[1], sTop[1], sBot[1], bIn[1], sIn[1]]
+[h1BTop, h1BBot, h1STop, h1SBot, h1BIn, h1SIn] = request.security(syminfo.tickerid, htfTf,  f_htfPoi(), lookahead = barmerge.lookahead_on)
+[h2BTop, h2BBot, h2STop, h2SBot, h2BIn, h2SIn] = request.security(syminfo.tickerid, htf2Tf, f_htfPoi(), lookahead = barmerge.lookahead_on)
+atHtfPoiL = not na(h1BTop) and low  <= h1BTop and high >= h1BBot
+atHtfPoiS = not na(h1STop) and high >= h1SBot and low  <= h1STop
+
+// boxes redrawn on the LAST bar only (4 var boxes)
+var box hb1 = na
+var box hs1 = na
+var box hb2 = na
+var box hs2 = na
+f_poiBox(box b, float top, float bot, string txt, color c) =>
+    box r = na
+    if showPoi and not na(top)
+        r := box.new(bar_index - 20, top, bar_index + 5, bot, border_color = color.new(c, 40), bgcolor = color.new(c, 92),
+             text = txt, text_color = color.new(c, 0), text_size = size.small, text_halign = text.align_right)
+    r
+if barstate.islast
+    box.delete(hb1)
+    box.delete(hs1)
+    box.delete(hb2)
+    box.delete(hs2)
+    hb1 := f_poiBox(hb1, h1BTop, h1BBot, "HTF FVG " + f_tfTxt(htfTf) + " · mit " + str.tostring(nz(h1BIn, 0)), color.fuchsia)
+    hs1 := f_poiBox(hs1, h1STop, h1SBot, "HTF FVG " + f_tfTxt(htfTf) + " · mit " + str.tostring(nz(h1SIn, 0)), color.fuchsia)
+    hb2 := f_poiBox(hb2, h2BTop, h2BBot, "HTF FVG " + f_tfTxt(htf2Tf) + " · mit " + str.tostring(nz(h2BIn, 0)), color.blue)
+    hs2 := f_poiBox(hs2, h2STop, h2SBot, "HTF FVG " + f_tfTxt(htf2Tf) + " · mit " + str.tostring(nz(h2SIn, 0)), color.blue)
+
+// ═══════════════════════════════════════════════════════════ C8 · ◬ LIQUIDITY TRAP ENGINE (LT-1…LT-7)
+// 1.txt M16B lineage. VISUAL + alert() ONLY — file A owns every entry. Closed-bar detection.
+//   LT-1 compression → expansion break (long, genuine)     LT-2 expansion + compression trap (short)
+//   LT-3 lower-wick pool contradicts the break (short)      LT-4 shadow-high pool after a strong break (long)
+//   LT-5 weak-body / long-upper-wick break (short)          LT-6 strong bear leg + weak poke, MUST close back below (short)
+//   LT-7 break runs into a live supply gap and is rejected (short)
+// State per direction: 0 idle · 1 waiting confirmation · 2 active / cooldown.
+f_addPat(string acc, bool c, string nm) => c ? (acc == "" ? nm : acc + "+" + nm) : acc
+f_ltCls(int s) => s >= ltScoreVHigh ? "VERY HIGH" : s >= ltScoreHigh ? "HIGH" : s >= ltScoreMed ? "MEDIUM" : "LOW"
+f_ltStTxt(int s) => s == 0 ? "idle" : s == 1 ? "WAITING" : "ACTIVE"
+
+ltAtrAvg = ta.sma(atr, 50)
+ltLowVol = ltAtrAvg > 0 and atr < 0.7 * ltAtrAvg
+ltLoWickBar = rng > 0 and dnWick >= ltWickAtr * atrSafe and dnWick >= ltWickRatio * body and dnWick > upWick
+ltHiWickBar = rng > 0 and upWick >= ltWickAtr * atrSafe and upWick >= ltWickRatio * body and upWick > dnWick
+
+ltCmpBodyAvg = ta.sma(body, ltCmpLen)
+ltCmpWinRng  = ta.highest(high, ltCmpLen) - ta.lowest(low, ltCmpLen)
+ltCmpBullCnt = math.sum(bullBar ? 1 : 0, ltCmpLen)
+ltCmpMaxBody = ta.highest(body, ltCmpLen)
+ltCmp = ltCmpBodyAvg <= ltCmpSens * atrSafe and ltCmpWinRng <= ltCmpRngAtr * atrSafe and ltCmpBullCnt >= 1 and ltCmpBullCnt <= ltCmpLen - 1 and ltCmpMaxBody < dispFactor * atrSafe
+
+f_wickClusterLow(bool en) =>
+    int   cnt = 0
+    float mn  = na
+    float mx  = na
+    if en
+        for i = 1 to ltWickWin
+            if ltLoWickBar[i]
+                cnt += 1
+                mn := na(mn) ? low[i] : math.min(mn, low[i])
+                mx := na(mx) ? low[i] : math.max(mx, low[i])
+    bool ok = cnt >= ltWickMin and not na(mn) and mx - mn <= ltClusterTol * atrSafe
+    [ok, mn]
+
+// wick pools, breakout memory and the LT-4 shadow-high watcher — one function, eight values back
+f_ltPools() =>
+    [_p3ClusterOk, _p3ClusterLow] = f_wickClusterLow(ltEnable and ltP3)
+    var float _p3PoolLow = na
+    var int   _p3PoolBar = na
+    var float _p3Swept   = na
+    if ltEnable and ltP3 and confirmed
+        if not na(_p3PoolLow) and low < _p3PoolLow
+            _p3Swept   := _p3PoolLow
+            _p3PoolLow := na
+        if not na(_p3PoolLow) and bar_index - _p3PoolBar > ltPoolLook
+            _p3PoolLow := na
+        bool _p3FreshOk = na(_p3Swept) or math.abs(_p3ClusterLow - _p3Swept) > ltClusterTol * atrSafe
+        if _p3ClusterOk and low > _p3ClusterLow and _p3FreshOk
+            _p3PoolLow := _p3ClusterLow
+            _p3PoolBar := bar_index
+    var int   _ltBrkUpBar = na
+    var float _ltBrkUpLvl = na
+    if ltEnable and confirmed and brokeUp
+        _ltBrkUpBar := bar_index
+        _ltBrkUpLvl := lastRes
+    var int   _p4Stage   = 0
+    var float _p4Lvl     = na
+    var int   _p4Bar     = na
+    var int   _p4WickCnt = 0
+    var float _p4HiMax   = na
+    var float _p4HiMin   = na
+    var float _p4PoolHi  = na
+    var int   _p4PoolBar = na
+    bool _p4Arm = false
+    if ltEnable and ltP4 and confirmed
+        if not na(_p4PoolHi) and (high > _p4PoolHi or bar_index - _p4PoolBar > ltPoolLook)
+            _p4PoolHi := na
+        if _p4Stage == 1
+            if close < _p4Lvl or bar_index - _p4Bar > ltPoolLook
+                _p4Stage := 0
+            else
+                if ltHiWickBar and high <= high[1]
+                    _p4WickCnt += 1
+                    _p4HiMax := na(_p4HiMax) ? high : math.max(_p4HiMax, high)
+                    _p4HiMin := na(_p4HiMin) ? high : math.min(_p4HiMin, high)
+                if _p4WickCnt >= ltWickMin and not na(_p4HiMax) and _p4HiMax - _p4HiMin <= ltClusterTol * atrSafe
+                    _p4PoolHi  := _p4HiMax
+                    _p4PoolBar := bar_index
+                    _p4Stage   := 0
+                    _p4Arm     := true
+        if _p4Stage == 0 and not _p4Arm and brokeUp and bullBar and body >= dispFactor * atrSafe
+            _p4Stage   := 1
+            _p4Lvl     := lastRes
+            _p4Bar     := bar_index
+            _p4WickCnt := 0
+            _p4HiMax   := na
+            _p4HiMin   := na
+    [_p3PoolLow, _p3PoolBar, _p4PoolHi, _p4PoolBar, _p4Lvl, _ltBrkUpLvl, _ltBrkUpBar, _p4Arm]
+[p3PoolLow, p3PoolBar, p4PoolHi, p4PoolBar, p4Lvl, ltBrkUpLvl, ltBrkUpBar, p4Arm] = f_ltPools()
+
+// pattern setup events — edge-triggered, closed bars
+var int p1PrimeBar = na
+if ltEnable and ltP1 and confirmed and ltCmp and not na(lastRes) and close < lastRes and lastRes - close <= ltNearAtr * atrSafe
+    p1PrimeBar := bar_index
+ltWeakPoke   = brokeUp and body <= ltBrkStr * atrSafe
+ltWeakWickUp = ltHiWickBar and body <= ltBrkStr * atrSafe
+p1Arm = ltEnable and ltP1 and confirmed and brokeUp and bullBar and body >= ltExpSens * atrSafe and f_recent(p1PrimeBar, ltCmpLen * 2)
+p2Arm = ltEnable and ltP2 and confirmed and ltWeakPoke and f_recent(dispDnBar2, ltDispLook) and (ltCmp or ltCmp[1]) and close > close[ltCmpLen]
+p3Arm = ltEnable and ltP3 and confirmed and brokeUp and not na(p3PoolLow) and close - p3PoolLow <= SWEEP_CTX_ATR * atrSafe
+p5Arm = ltEnable and ltP5 and confirmed and ((brokeUp and ltHiWickBar) or (f_recent(ltBrkUpBar, 3) and not na(ltBrkUpLvl) and close > ltBrkUpLvl and ltWeakWickUp and ltWeakWickUp[1]))
+p6Arm = ltEnable and ltP6 and confirmed and ltWeakPoke and not na(extSup) and (extDir == -1 or f_recent(dispDnBar2, ltDispLook * 2)) and (na(dispUpBar2) or bar_index - dispUpBar2 > ltCmpLen) and (ltCmp or ltCmp[1])
+p7Arm = ltEnable and ltP7 and confirmed and not na(nsBot) and high >= nsBot and close <= nsTop and (brokeUp or f_recent(ltBrkUpBar, 3)) and not na(ltBrkUpLvl) and nsBot >= ltBrkUpLvl
+
+// confidence score — clamped 0–100. HTF POI interaction replaces 1.txt's OB term (no OB engine here).
+f_ltScore(bool isLong, bool retOk, int lState, int sState) =>
+    int s = 10
+    s += (isLong ? sslInPlay : bslInPlay) ? 20 : 0
+    bool strongRej = isLong ? (bullPin or (rng > 0 and dnWick >= 2 * body and dnWick >= minWickAtr * atrSafe)) : (bearPin or (rng > 0 and upWick >= 2 * body and upWick >= minWickAtr * atrSafe))
+    s += strongRej ? 15 : 0
+    s += (isLong ? (recentMssUp or recentChUp) : (recentMssDn or recentChDn)) ? 20 : 0
+    s += (isLong ? inDemand : inSupply) ? 10 : 0
+    s += (isLong ? not na(cFvgBTop) : not na(cFvgSTop)) ? 10 : 0
+    s += (isLong ? atHtfPoiL : atHtfPoiS) ? 10 : 0
+    s += (isLong ? recentDispUp : recentDispDn) ? 10 : 0
+    s += retOk ? 10 : 0
+    s += (isLong ? htfB > 0 : htfB < 0) ? 15 : 0
+    s -= chop ? 10 : 0
+    s -= (isLong ? extDir == -1 : extDir == 1) ? 10 : 0
+    s -= ltLowVol ? 5 : 0
+    s -= not (isLong ? (sslInPlay or not na(p3PoolLow)) : (bslInPlay or not na(p4PoolHi))) ? 10 : 0
+    s -= lState >= 1 and sState >= 1 ? 15 : 0
+    math.max(0, math.min(100, s))
+
+// the two trap machines, their labels and alert() feed — state lives here
+f_ltMachines() =>
+    var int    _lSt   = 0
+    var int    _lBar  = na
+    var float  _lLvl  = na
+    var string _lPats = ""
+    var bool   _lRet  = false
+    var string _lWhy  = ""
+    var int    _sSt   = 0
+    var int    _sBar  = na
+    var float  _sLvl  = na
+    var string _sPats = ""
+    var bool   _sRet  = false
+    var string _sWhy  = ""
+    bool _lSig = false
+    bool _sSig = false
+    int  _lSc  = 0
+    int  _sSc  = 0
+    bool _retL = false
+    bool _retS = false
+    string _lArm = f_addPat(f_addPat("", p1Arm, "LT-1"), p4Arm, "LT-4")
+    string _sArm = f_addPat(f_addPat(f_addPat(f_addPat(f_addPat("", p2Arm, "LT-2"), p3Arm, "LT-3"), p5Arm, "LT-5"), p6Arm, "LT-6"), p7Arm, "LT-7")
+    float  _brkLvl = not na(ltBrkUpLvl) and f_recent(ltBrkUpBar, 5) ? ltBrkUpLvl : lastRes
+    if ltEnable and confirmed
+        // ── LONG machine (LT-1 / LT-4)
+        if _lSt == 1
+            if bar_index - _lBar > ltWaitBars
+                _lSt  := 0
+                _lWhy := "expired (no confirmation)"
+            else if close < _lLvl - ltInvAtr * atrSafe and bearBar and body >= dispFactor * atrSafe
+                _lSt  := 0
+                _lWhy := "breakout failed (bear displacement below level)"
+        if _lSt == 2 and bar_index - _lBar > ltCd
+            _lSt := 0
+        if _lArm != ""
+            if _lSt == 0
+                _lSt   := 1
+                _lBar  := bar_index
+                _lLvl  := p1Arm ? _brkLvl : p4Lvl
+                _lPats := _lArm
+                _lRet  := false
+                if ltShowSetup
+                    f_chip(true, "◬ " + _lPats + " setup", color.new(color.orange, 45), color.white, mkSize)
+            else if _lSt == 1
+                if p1Arm and not str.contains(_lPats, "LT-1")
+                    _lPats := _lPats + "+LT-1"
+                if p4Arm and not str.contains(_lPats, "LT-4")
+                    _lPats := _lPats + "+LT-4"
+        if _lSt == 1 and bar_index > _lBar and not na(_lLvl) and low <= _lLvl + ltRetestAtr * atrSafe and not _lRet
+            _lRet := true
+            _retL := true
+        bool confL  = zoneBullConf or mssBull or chochUp or eChochUp or sslSweep
+        bool gatesL = (not ltReqMss or recentMssUp or recentChUp) and (not ltReqSweep or sslInPlay) and (not ltReqFvg or not na(cFvgBTop)) and (not ltReqMtf or htfB >= 0)
+        if _lSt == 1 and confL and gatesL and (not ltReqRetest or _lRet) and close > _lLvl - ltInvAtr * atrSafe
+            int scL = f_ltScore(true, _lRet, _lSt, _sSt)
+            if scL >= ltScoreMed
+                _lSig := true
+                _lSc  := scL
+                _lSt  := 2
+                _lBar := bar_index
+        // ── SHORT machine (LT-2 / LT-3 / LT-5 / LT-6 / LT-7)
+        if _sSt == 1
+            if bar_index - _sBar > ltWaitBars
+                _sSt  := 0
+                _sWhy := "expired (no confirmation)"
+            else if close > _sLvl + ltInvAtr * atrSafe and bullBar and body >= dispFactor * atrSafe
+                _sSt  := 0
+                _sWhy := "breakout accepted (bull displacement above level)"
+        if _sSt == 2 and bar_index - _sBar > ltCd
+            _sSt := 0
+        if _sArm != ""
+            if _sSt == 0
+                _sSt   := 1
+                _sBar  := bar_index
+                _sLvl  := _brkLvl
+                _sPats := _sArm
+                _sRet  := p7Arm            // LT-7's supply tap IS its retest
+                if ltShowSetup
+                    f_chip(false, "◬ " + _sPats + " trap?", color.new(color.orange, 45), color.white, mkSize)
+            else if _sSt == 1
+                if p2Arm and not str.contains(_sPats, "LT-2")
+                    _sPats := _sPats + "+LT-2"
+                if p3Arm and not str.contains(_sPats, "LT-3")
+                    _sPats := _sPats + "+LT-3"
+                if p5Arm and not str.contains(_sPats, "LT-5")
+                    _sPats := _sPats + "+LT-5"
+                if p6Arm and not str.contains(_sPats, "LT-6")
+                    _sPats := _sPats + "+LT-6"
+                if p7Arm
+                    _sRet := true
+                    if not str.contains(_sPats, "LT-7")
+                        _sPats := _sPats + "+LT-7"
+        if _sSt == 1 and bar_index > _sBar and not na(_sLvl) and close < _sLvl and not _sRet
+            _sRet := true
+            _retS := true
+        bool confS  = zoneBearConf or mssBear or chochDn or eChochDn or bslSweep
+        bool gatesS = (not ltReqMss or recentMssDn or recentChDn) and (not ltReqSweep or bslInPlay) and (not ltReqFvg or not na(cFvgSTop)) and (not ltReqMtf or htfB <= 0)
+        bool needBelow = str.contains(_sPats, "LT-6")
+        if _sSt == 1 and confS and gatesS and (not ltReqRetest or _sRet) and (not needBelow or close < _sLvl)
+            int scS = f_ltScore(false, _sRet, _lSt, _sSt)
+            if scS >= ltScoreMed
+                _sSig := true
+                _sSc  := scS
+                _sSt  := 2
+                _sBar := bar_index
+    // ── visuals
+    if ltEnable and ltShowSig and _lSig
+        color bgL = _lSc >= ltScoreHigh ? color.new(COL_BULL, _lSc >= ltScoreVHigh ? 0 : 15) : color.new(color.orange, 25)
+        label.new(bar_index, na, "◬ TRAP LONG · " + f_ltCls(_lSc) + (ltShowScore ? " · " + str.tostring(_lSc) : "") + "\n" + _lPats + (_lRet ? " · retest✓" : ""),
+             yloc = yloc.belowbar, style = label.style_label_up, color = bgL, textcolor = color.white, size = sigSize)
+    if ltEnable and ltShowSig and _sSig
+        color bgS = _sSc >= ltScoreHigh ? color.new(COL_BEAR, _sSc >= ltScoreVHigh ? 0 : 15) : color.new(color.orange, 25)
+        label.new(bar_index, na, "◬ TRAP SHORT · " + f_ltCls(_sSc) + (ltShowScore ? " · " + str.tostring(_sSc) : "") + "\n" + _sPats + (_sRet ? " · failed-break✓" : ""),
+             yloc = yloc.abovebar, style = label.style_label_down, color = bgS, textcolor = color.white, size = sigSize)
+    // ── dynamic alerts (create one "Any alert() function call" alert)
+    if ltDynAlert and _lSig
+        string cL = (bullEngulf ? "engulf " : "") + (bullPin ? "pin " : "") + (mssBull ? "MSS " : (chochUp or eChochUp) ? "CHoCH " : "") + (cisdUp ? "CISD " : "") + (sslSweep ? "sweep" : "")
+        alert("V8-CTX ◬ TRAP LONG " + syminfo.ticker + " " + timeframe.period + " · " + _lPats + " · " + f_ltCls(_lSc) + " " + str.tostring(_lSc) + " · level " + str.tostring(_lLvl, format.mintick) + " · confirm: " + cL, alert.freq_once_per_bar_close)
+    if ltDynAlert and _sSig
+        string cS = (bearEngulf ? "engulf " : "") + (bearPin ? "pin " : "") + (mssBear ? "MSS " : (chochDn or eChochDn) ? "CHoCH " : "") + (cisdDn ? "CISD " : "") + (bslSweep ? "sweep" : "")
+        alert("V8-CTX ◬ TRAP SHORT " + syminfo.ticker + " " + timeframe.period + " · " + _sPats + " · " + f_ltCls(_sSc) + " " + str.tostring(_sSc) + " · level " + str.tostring(_sLvl, format.mintick) + " · confirm: " + cS, alert.freq_once_per_bar_close)
+    if ltEnable and ltPreview and barstate.isrealtime and not confirmed
+        if _lSt == 1 and (bullConfirm or ifcBull)
+            alert("V8-CTX ◬ PREVIEW (repaints): bullish trap confirmation forming on " + syminfo.ticker + " " + timeframe.period, alert.freq_once_per_bar)
+        if _sSt == 1 and (bearConfirm or ifcBear)
+            alert("V8-CTX ◬ PREVIEW (repaints): bearish trap confirmation forming on " + syminfo.ticker + " " + timeframe.period, alert.freq_once_per_bar)
+    string _dbgMach = "L " + f_ltStTxt(_lSt) + (_lSt >= 1 and _lPats != "" ? " [" + _lPats + "]" : "") + " · S " + f_ltStTxt(_sSt) + (_sSt >= 1 and _sPats != "" ? " [" + _sPats + "]" : "")
+    string _dbgLast = "L: " + (_lWhy != "" ? _lWhy : "—") + " · S: " + (_sWhy != "" ? _sWhy : "—")
+    [_lSig, _sSig, _lSc, _sSc, _lSt, _sSt, _dbgMach, _dbgLast, _retL, _retS]
+[ltLongSig, ltShortSig, ltLongScore, ltShortScore, ltLState, ltSState, ltDbgMach, ltDbgLast, ltRetLEvt, ltRetSEvt] = f_ltMachines()
+
+plotchar(ltEnable and ltShowMarks and ltRetLEvt, "LT retest (long)",        "◦", location.belowbar, color.new(COL_BULL, 20), size = size.tiny)
+plotchar(ltEnable and ltShowMarks and ltRetSEvt, "LT failed break (short)", "◦", location.abovebar, color.new(COL_BEAR, 20), size = size.tiny)
+
+// wick-cluster pool lines — last bar only
+var line  p3Ln = na
+var label p3Lb = na
+var line  p4Ln = na
+var label p4Lb = na
+if barstate.islast
+    line.delete(p3Ln)
+    label.delete(p3Lb)
+    line.delete(p4Ln)
+    label.delete(p4Lb)
+    if ltEnable and ltShowPools and not na(p3PoolLow)
+        p3Ln := line.new(p3PoolBar, p3PoolLow, bar_index + 5, p3PoolLow, color = color.new(COL_BULL, 30), style = line.style_dashed)
+        p3Lb := label.new(bar_index + 5, p3PoolLow, "◬ SSL pool · wick cluster", style = label.style_label_left, color = color.new(COL_BULL, 40), textcolor = color.white, size = infoSize)
+    if ltEnable and ltShowPools and not na(p4PoolHi)
+        p4Ln := line.new(p4PoolBar, p4PoolHi, bar_index + 5, p4PoolHi, color = color.new(COL_BEAR, 30), style = line.style_dashed)
+        p4Lb := label.new(bar_index + 5, p4PoolHi, "◬ BSL pool · shadow highs", style = label.style_label_left, color = color.new(COL_BEAR, 40), textcolor = color.white, size = infoSize)
+
+// ═══════════════════════════════════════════════════════════ C9 · CONTEXT PANEL (last bar only)
+var table pnl = table.new(f_pos(panelPosOpt), 2, 14, border_width = 1, frame_color = color.new(color.gray, 60), border_color = color.new(color.gray, 80))
+f_row(int r, string k, string v, color vc) =>
+    table.cell(pnl, 0, r, k, text_color = color.new(color.gray, 10), text_size = panelSize, bgcolor = color.new(color.black, 60), text_halign = text.align_left)
+    table.cell(pnl, 1, r, v, text_color = vc, text_size = panelSize, bgcolor = color.new(color.black, 60), text_halign = text.align_left)
+    true
+f_evRow(int r, simple string tfIn, int ix) =>
+    int k = array.get(hEvtK, ix)
+    int b = array.get(hEvtBar, ix)
+    f_row(r, "HTF " + f_tfTxt(f_tfUp(tfIn)), useHtfCrt ? f_kTxt(k) + f_ago(b) : "off", k > 0 ? COL_BULL : k < 0 ? COL_BEAR : color.gray)
+f_dirTxt(int d) => d > 0 ? "▲ bull" : d < 0 ? "▼ bear" : "—"
+f_px(float x) => na(x) ? "—" : str.tostring(x, format.mintick)
+if showPanel and barstate.islast
+    color cNet = mtfNet > 0 ? COL_BULL : mtfNet < 0 ? COL_BEAR : color.gray
+    f_row(0,  "V8-CTX " + timeframe.period, "HTF " + f_tfTxt(htfTf) + " · POI#2 " + f_tfTxt(htf2Tf), color.white)
+    f_row(1,  "MTF ladder", showLad ? ladTxt : "hidden", cNet)
+    f_evRow(2, htfT1, 0)
+    f_evRow(3, htfT2, 1)
+    f_evRow(4, htfT3, 2)
+    f_evRow(5, htfT4, 3)
+    f_row(6,  "HTF FVG " + f_tfTxt(htfTf),  (na(h1BTop) ? "" : "▲ " + f_px(h1BBot) + "–" + f_px(h1BTop) + " ") + (na(h1STop) ? "" : "▼ " + f_px(h1SBot) + "–" + f_px(h1STop)) + (na(h1BTop) and na(h1STop) ? "—" : ""), color.fuchsia)
+    f_row(7,  "HTF FVG " + f_tfTxt(htf2Tf), (na(h2BTop) ? "" : "▲ " + f_px(h2BBot) + "–" + f_px(h2BTop) + " ") + (na(h2STop) ? "" : "▼ " + f_px(h2SBot) + "–" + f_px(h2STop)) + (na(h2BTop) and na(h2STop) ? "—" : ""), color.new(color.blue, 0))
+    f_row(8,  "Structure", "ext " + f_dirTxt(extDir) + " · int " + f_dirTxt(msDir) + " · H " + f_px(lastRes) + " · L " + f_px(lastSup), extDir > 0 ? COL_BULL : extDir < 0 ? COL_BEAR : color.gray)
+    f_row(9,  "Sweeps", "SSL " + (sslInPlay ? "in play" + f_ago(sslBar) : "—") + " · BSL " + (bslInPlay ? "in play" + f_ago(bslBar) : "—"), color.white)
+    f_row(10, "Live FVG", (na(cFvgBTop) ? "▲ —" : "▲ " + f_px(cFvgBBot) + "–" + f_px(cFvgBTop)) + " · " + (na(cFvgSTop) ? "▼ —" : "▼ " + f_px(cFvgSBot) + "–" + f_px(cFvgSTop)), color.white)
+    f_row(11, "Wick pools", "SSL " + f_px(p3PoolLow) + " · BSL " + f_px(p4PoolHi) + (chop ? " · CHOP" : ""), color.white)
+    f_row(12, "◬ Trap", ltEnable ? ltDbgMach : "off", ltLState == 1 or ltSState == 1 ? color.orange : color.gray)
+    f_row(13, "◬ Last exit", ltEnable ? ltDbgLast : "—", color.gray)
+
+// ═══════════════════════════════════════════════════════════ C10 · ALERTS
+alertcondition(hEvLong,    "V8-CTX HTF CRT/TBS bullish", "V8-CTX HTF CRT / turtle soup bullish")
+alertcondition(hEvShort,   "V8-CTX HTF CRT/TBS bearish", "V8-CTX HTF CRT / turtle soup bearish")
+alertcondition(ltLongSig,  "V8-CTX trap LONG",  "V8-CTX ◬ trap LONG confirmed")
+alertcondition(ltShortSig, "V8-CTX trap SHORT", "V8-CTX ◬ trap SHORT confirmed")
+if useHtfCrt and hEvTxt != ""
+    alert("V8-CTX HTF " + syminfo.ticker + " " + timeframe.period + " · " + hEvTxt + "· confluence " + (hEvNet > 0 ? "+" : "") + str.tostring(hEvNet) + " · ladder " + ladTxt, alert.freq_once_per_bar_close)

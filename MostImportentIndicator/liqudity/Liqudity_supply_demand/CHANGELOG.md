@@ -1,0 +1,83 @@
+# V8 CHANGELOG
+
+## v8.0.0-P0 — skeleton
+- M0 indicator, M1 inputs (19 groups), M2 constants + enums + helpers.
+- New inputs vs 2..txt: maxSetups, maxPenalty, useVolConf/volMult, spreadGuard, htfOverlapUp,
+  allowSynthTp, adaptGrade, trailAfterTp2, previewAlert, SB arming-path group (from 1.txt).
+- Removed vs 2..txt: trap engine inputs (→ V8_CONTEXT), MTF ladder (→ V8_CONTEXT), verbose debug (→ V8_CONTEXT).
+- No detection yet.
+
+## v8.0.0-P1 — core series + structure
+- M3: atrSafe/rngSafe (never divide by raw atr/rng), f_chip lane counter, pins (range-based opposite wick),
+  relVol + volPass (auto-bypass when no volume), dispUp/DnBar with volume gate, f_dispQ 7 readings, CISD, IFC.
+- M4: Struct UDT, f_structUpdate (real-pivot protected swing, run latch separate from break latch),
+  internal + external instances, trigger memories, four vocabularies (BOS/CHoCH/MSS/CISD).
+- Temp P1 plots: last swing hi/lo, protected ext hi/lo, display-independence probe (data window).
+
+## v8.0.0-P2 — sessions + SB clock + HTF
+- M5: f_inSes, killzone/news gates (newsOK — not volOK, that name is volume), SB minute-math clock
+  (sbStart/End, sbPre*, sbWinNow/sbCtxWin, sbActive/sbCtx/sbGate, sbEnd*Evt + f_sbEndEvt, sbWinPts, sbMinRq),
+  00:00 / 08:30 lines (draw only), Ses UDT + f_sesTrack (fhi/flo ALWAYS set, lines gated by showSesHL).
+- M6: SIX request.security, all expr[1] + lookahead_on + f_tfUp: bias(filter TF), htfCtx, PD, PW, htfStruct, htfPoi.
+  htfState (BULL/BEAR/NEUTRAL/CONFLICT), edge-triggered HTF POI mitigation + bSeq/sSeq identity,
+  f_atHtfPoi, continuation/reversal verdicts, lqTol/lqReact.
+- Temp P2: PDH/PDL plots, SB + news bgcolor, 3 data-window probes (repaint + display-independence).
+
+## v8.0.0-P3 — liquidity registry
+- M7: Pool UDT (+kmask/legs), 9 na-safe accessors, f_evTag, f_poolById, draw attrs (PK_WICK lime dashed),
+  f_poolPush (single inlined copy, weakest-first prune), registration queue f_qPush/f_qFlush,
+  f_poolScan (raid A/B/C grading, TEST vs RAID vs BREAK, two clocks reactWin/sweepLook, consume by distance),
+  EQ pivot ring (eqScanN), registrations: swing/EXT/session/PD/PW/HTF,
+  V8 wick-cluster pools PK_WICK (LT-3/LT-4 lineage, constants WK_*), trendline sweep → PK_TL,
+  target ranking loop (tgtBuy/SellPool objects, inducement, pool breaks), f_findRaid, f_anyRaid, raid marks.
+- Temp P3: 8 plotchar raid marks, pool-count + raid probes.
+
+## v8.0.0-P4 — dealing range + zones
+- M8: impulse-leg dealing range, OTE bands, PD extremes, SB range LOCK (sbRngHi/Lo frozen at window open; sbSetLive written in M17).
+- M9: Zone UDT (+htfOv), accessors, spreadEst/f_zoneThin (V8), f_htfOverlap (V8 nested PD array → tier −1),
+  f_raidAtZone, f_gradeZone (causal T1), f_zoneProv, f_regrade (ratchet), f_newZone, f_zoneFlip,
+  per-side cap (unbound oldest), lifecycle loop written once via `sup`, 50% CANDIDATE engine,
+  f_mkZone (decide-first-delete-second, BPR, OB with own containment), f_mkRb, NEXT POI scan.
+- Temp P4: range EQ plot, zone/tier + sdCand/pdPos probes.
+
+## v8.0.0-P5 — triggers + run/congestion/regime + penalty
+- M10: CRT (crtTrigB/S) and Turtle soup (tbsTrigB/S) as BOOLEAN stage-6 triggers only → trigDispUp/Dn = disp OR crt OR tbs. Volume-gated like displacement. Never a producer.
+- M11: Run UDT + run engine (RN_UNCONF/CONT/EXH/REV), runFadeLong/Short; congestion 4 readings (congMeasured vs congested); regime; AMD/Judas descriptors via f_evTag; f_penalty (V8 counter, capped by maxPenalty).
+- Temp P5: regime·run·congN·trig probe.
+
+## v8.0.0-P6 — setup state machine (multi-setup)
+- M12: Setup UDT (+sbWin, sbCeFill, dispTrig, blk), upSetups/dnSetups arrays (maxSetups), setupSeq,
+  per-POOL blackout (deadPoolId ring) instead of a global resetBar, f_setupRelease (bindings only — no 37-field reset),
+  f_narrOk (na-safe), f_inOte, f_htfTier, f_setupAdvance (moved latch, kill flag, SB clocks, SB tag at stage 3,
+  trigDispUp/Dn at stage 5/6, SB CE/proximal entry rule + locked-range PD check at stage 8, spread guard on the gap),
+  f_runSide (retire → advance → pick winner by tier then raid grade → arm with ctx+tgt SAME bar), f_sideStage.
+- Temp P6: stage probe, ungated machine LONG/SHORT triangles (NOT signals yet — no risk/grade gates until P7).
+
+## v8.0.0-P7 — score · gates · risk · trade engine (FIRST REAL SIGNALS)
+- M13 f_score (+SB context ≤15, PK_WICK class), f_sesStory.
+- M14 base gates, f_dedupeOk (id + price/recency + POI + MSS), story keys (ring 64), minGradeEff (adaptGrade), f_machWorking.
+- M15 f_slOk/f_sl (sign-based, 5-level hierarchy, fallback clamped), f_nextPool/f_nextZone/f_oppLiq, f_tp ladder + clamp, f_grade with f_penalty and synthetic-TP2 cap at B.
+- M16 f_prod (machine/FEM/S&D, SB tag in label), na-safe Setup/Zone accessors, risk-first, CE entry only if traded, f_gates (allowSynthTp softens hTgt), rank arbitration (SB machine = rank 0), consumption.
+- Temp P7: LONG/SHORT plotshape, grade/prod/RR/score probes.
+
+## v8.0.0-P8 — trade management
+- M17 Trade UDT, one active trade, stop-first (also intrabar), TP1/TP2/TP3 on closed bars, adaptive BE buffer
+  (max(beBuf·ATR, 15% of TP1 distance)), protected-swing trail after TP2 capped by last-2-bar extreme,
+  SB exits (opposing shift ≥ entry grade, window-close time exit full/partial), new signal → REPLACED (never overwrite),
+  consecSL feedback (adaptGrade), mechanical counters, sbSetLive written here, f_exitTxt.
+- Temp P8: trade SL/TP2 plots, tradeEvt probe.
+
+## v8.0.0 — file A complete
+- M18 drawing: permanent context plots (18/64 outputs), entry label (signal bar only), 5 trade lines updated per bar,
+  exit chip, HTF POI boxes / NEXT-zone tags / SB range-lock lines on last bar only. All P1-P8 temp probes removed.
+- M19 dashboard: 9 rows x 2 cells, last bar only; showDebug appends block reason.
+- M20 alerts: 6 alertcondition + structured alert() payload + trade-event alert() + optional PREVIEW alert.
+
+## v8.0.0-B — file B `V8_CONTEXT.pine` (P10)
+- New companion indicator. Annotation + alert() only — never emits an entry.
+- C5 MTF bias ladder: 4 configurable rungs, net figure, rung below chart TF shown as `·`.
+- C6 HTF CRT / Turtle-soup / TWS layer on 4 TFs (int-coded classifier, one tuple slot), chip per event, per-TF last-event memory, confluence alert().
+- C7 HTF FVG POI boxes on HTF #1 and #2 (same detector as file A M6, edge-triggered mitigation count).
+- C8 ◬ trap engine LT-1…LT-7 (1.txt M16B lineage): wick pools, LT-4 shadow-high watcher, two machines, score, labels, dynamic alert(), optional PREVIEW. OB term replaced by HTF POI interaction.
+- C9 14-row context panel. C10 4 alertcondition + 2 alert() streams.
+- request.security = 10 (cap 12). Plot outputs = 2.
