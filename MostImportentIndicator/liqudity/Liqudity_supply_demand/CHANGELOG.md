@@ -100,3 +100,8 @@
 - Funnel on 4 symbols (XAU/BTC/EUR/ETH 5m): RAID→POI ~88% dead, POI→MSS ~90% dead, 0 candidates reached M16.
 - POI fallback `poiWickFb` (default on): when no zone / HTF FVG contains the raid wick, the raid candle's own rejection wick [extreme → body edge] becomes the POI (tier 2, PA_REJ). New Setup field `poiWick`.
 - Defaults: poiBindAtr 0.15→0.35 · mssNeedDisp true→false (CISD alone = MSS; stage 6 still demands the displacement) · mssWin 12→16.
+
+## v8.0.3 — funnel round 2 (V8_FULL.pine)
+- Funnel after v8.0.2 (5 symbols): RAID→POI now ~80%; POI→MSS still 6–17%; 4 candidates reached the gates, all failed (3× no TP target, 1× grade).
+- MSS stage gains two sources: (a) short-term shift — the latest INTERNAL swing high/low crossed this bar with body ≥ structDisp·ATR; (b) a CISD that fired on the raid candle itself counts one bar later if the close still holds its run-open (new globals cisdUpLvl/cisdDnLvl). Chronology unchanged (mssBar > liqBar).
+- Defaults for the test phase: allowSynthTp true (synthetic TP2 graded ≤ B), minGrade "B".

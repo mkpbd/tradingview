@@ -1,7 +1,7 @@
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════
 // V8 FULL · Engine + Context merged in ONE script (token probe build)
-// v8.0.2-full · M0-M20 (engine) + C5-C10 (context: MTF ladder, HTF CRT/TBS/TWS, HTF POI #2, trap LT-1..7, panel)
+// v8.0.3-full · M0-M20 (engine) + C5-C10 (context: MTF ladder, HTF CRT/TBS/TWS, HTF POI #2, trap LT-1..7, panel)
 //
 // Lineage: 2..txt (ICT-TE v7.10) causal core + 1.txt (LQ-SD-PA v3.1.1) feature set.
 // Plan:    V8_MASTER_PLAN_BN.md · Build rules: V8_BUILD_PROCESS_BN.md
@@ -28,7 +28,7 @@ entryMode    = input.string("Narrative + confluence", "Entry mode",
      options = ["Narrative only (A+)", "Narrative + confluence", "All engines"], group = grpMaster)
 minTier      = input.int(2, "Minimum POI tier (1 = A+ only, 3 = any)", minval = 1, maxval = 3, group = grpMaster)
 needHtfAlign = input.bool(true, "Require HTF context alignment", group = grpMaster)
-minGrade     = input.string("A", "Minimum grade to trade", options = ["A+", "A", "B"], group = grpMaster)
+minGrade     = input.string("B", "Minimum grade to trade", options = ["A+", "A", "B"], group = grpMaster)
 strictSeq    = input.bool(true, "Strict chronological sequencing", group = grpMaster)
 allowRev     = input.bool(true, "Allow counter-HTF REVERSAL setups", group = grpMaster)
 maxSetups    = input.int(2, "Concurrent setups per side", minval = 1, maxval = 3, group = grpMaster)
@@ -239,7 +239,7 @@ minRiskAtr   = input.float(0.25, "Minimum stop distance (ATR ×)", step = 0.05, 
 maxRiskAtr   = input.float(3.0,  "Maximum stop distance (ATR ×)", step = 0.25, minval = 0.5, group = grpR)
 atrStopMult  = input.float(1.0, "ATR fallback stop (ATR ×)", step = 0.25, minval = 0.25, group = grpR)
 tpClamp      = input.bool(true, "Clamp TPs behind an un-raided opposing pool / POI", group = grpR)
-allowSynthTp = input.bool(false, "Allow synthetic TP2 when no structural target (grade capped at B)", group = grpR)
+allowSynthTp = input.bool(true, "Allow synthetic TP2 when no structural target (grade capped at B)", group = grpR)
 rrAplus      = input.float(2.0, "Minimum RR — A+", step = 0.1, minval = 0.5, group = grpR)
 rrA          = input.float(1.5, "Minimum RR — A",  step = 0.1, minval = 0.5, group = grpR)
 rrB          = input.float(1.5, "Minimum RR — B (hard floor)", step = 0.1, minval = 1.5, group = grpR)
@@ -576,10 +576,14 @@ if confirmed
         bearRunLen += 1
 cisdDn = confirmed and not na(bullRunOpen) and not cisdDnDone and cisdSeqDn and close < bullRunOpen and bullRunLen >= 2 and body >= BRK_BODY_ATR * atrSafe and strongDn
 cisdUp = confirmed and not na(bearRunOpen) and not cisdUpDone and cisdSeqUp and close > bearRunOpen and bearRunLen >= 2 and body >= BRK_BODY_ATR * atrSafe and strongUp
+var float cisdDnLvl = na     // the run-open a CISD closed through — survives the next run's reset (raid-bar CISD → MSS next bar)
+var float cisdUpLvl = na
 if cisdDn
     cisdDnDone := true
+    cisdDnLvl  := bullRunOpen
 if cisdUp
     cisdUpDone := true
+    cisdUpLvl  := bearRunOpen
 if showCisd and cisdDn
     f_chip(false, "CISD", color.new(COL_BEAR, 55), color.white, mkSize)
 if showCisd and cisdUp
@@ -2724,11 +2728,17 @@ f_setupAdvance(Setup s, int dir) =>
             else
                 bool  ch   = isL ? chochUp : chochDn
                 bool  ci   = isL ? cisdMssUp : cisdMssDn
-                float lvl  = ch ? (isL ? sInt.evLvlUp : sInt.evLvlDn) : (isL ? bearRunOpen : bullRunOpen)
-                int   lvlB = ch ? (isL ? sInt.evBarUp : sInt.evBarDn) : (isL ? bearRunBar : bullRunBar)
+                // V8.0.3 · a CISD that fired ON the raid candle counts one bar later if the close still holds the level
+                bool  ciL  = not ch and not ci and not mssNeedChoch and (isL ? nz(cisdUpBar, -1) == s.liqBar and close > cisdUpLvl : nz(cisdDnBar, -1) == s.liqBar and close < cisdDnLvl)
+                // V8.0.3 · ICT short-term shift: the latest INTERNAL swing (the lower-high / higher-low made into the raid) crossed with a displaced body
+                float sth  = isL ? sInt.swHi : sInt.swLo
+                int   sthB = isL ? sInt.swHiBar : sInt.swLoBar
+                bool  st   = not ch and not ci and not ciL and not mssNeedChoch and not na(sth) and body >= structDisp * atrSafe and (isL ? close > sth and close[1] <= sth : close < sth and close[1] >= sth)
+                float lvl  = ch ? (isL ? sInt.evLvlUp : sInt.evLvlDn) : ci ? (isL ? bearRunOpen : bullRunOpen) : ciL ? (isL ? cisdUpLvl : cisdDnLvl) : sth
+                int   lvlB = ch ? (isL ? sInt.evBarUp : sInt.evBarDn) : ci ? (isL ? bearRunBar : bullRunBar) : ciL ? s.liqBar : sthB
                 bool  rel  = not na(lvl) and nz(lvlB, -99999999) >= s.liqBar - mssWin
                 bool  sep  = not na(lvl) and math.abs(lvl - s.liqExt) >= MSS_MIN_SEP_ATR * atrSafe
-                if (ch or (ci and not mssNeedChoch)) and rel and sep
+                if (ch or ((ci or ciL or st) and not mssNeedChoch)) and rel and sep
                     s.st       := ST_MSS
                     s.mssBar   := bar_index
                     s.mssChoch := ch
@@ -2742,7 +2752,7 @@ f_setupAdvance(Setup s, int dir) =>
                         s.dispQ      := isL ? dqUp : dqDn
                         s.dispTrig   := not (isL ? dispUpBar : dispDnBar)
                         s.dispOutRng := rangeOK and (isL ? close > rngHi : close < rngLo)
-                else if ch or ci
+                else if ch or ci or ciL or st
                     blk := not rel ? "MSS broke an unrelated (pre-raid) level" : "MSS level is the raid itself"
                 else
                     blk := "MSS / CHoCH missing"
