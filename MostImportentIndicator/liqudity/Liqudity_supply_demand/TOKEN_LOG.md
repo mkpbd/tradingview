@@ -12,3 +12,5 @@
 | v8.0.5 | 2026-09-17 | compile pending | est. ~0–500 | +MSS fallback loop, +array.sum, −7 helpers · net chars +28 |
 | v8.0.5 | 2026-09-17 | compiles | unknown, > 0 | user: XAU 5m OK |
 | v8.0.6 | 2026-09-17 | compile pending | est. thin | +fb loop always, +2nd kill reason · net chars +~400 |
+| v8.0.6 | 2026-09-17 | compiles | unknown, > 0 | user: 4 symbols OK |
+| v8.0.7 | 2026-09-17 | compile pending | est. thin | −reclaim kill, −f_poolBrkBar, +entry on label · net chars ≈ 0 |

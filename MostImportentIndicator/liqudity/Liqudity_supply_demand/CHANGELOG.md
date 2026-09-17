@@ -124,3 +124,10 @@
 - XAU 5m after v8.0.5: P→M unchanged at 21% (65→14). Two causes in the stage-4→5 code: (a) `st` fired only on the exact cross bar — a weak cross bar lost the MSS for good; (b) a confirmed pivot inside the window always won over the 8-bar-into-raid extreme, so the level to break was the far pivot, not the nearest lower-high/higher-low.
 - Level = NEAREST of the confirmed internal pivot and the MSS_STH_LOOK extreme (long: lower, short: higher). Break = close through it with `min(close[1], open)` on the wrong side (cross, or open-below/close-above) and a displaced body.
 - Funnel row shows the top TWO kill reasons (f_topIx takes a skip index) — the P→M kill was hidden behind "setup expired".
+
+## v8.0.7 — raid invalidation = wick only, reversal grading, defaults, entry price on label (V8_FULL.pine)
+- 4-symbol funnel after v8.0.6 (second kill reason now visible): "raid failed/stale" ×55–66 = ~70% of raided setups. Cause: "raid level reclaimed" — any close back through the swept LEVEL (pool px) set brkBar and killed the setup. ICT invalidation is the raid WICK, not the level. Rule removed; the wick rule stays. `f_poolBrkBar` accessor cut (unused).
+- Gates: BTC "grade ×2" = reversal setups — `revOk` demanded CHoCH + T1 + A-raid + PD-extreme together. Now a reversal exists with a ≥ B raid and grades above B only with the full chain (`revAp`).
+- Defaults: htfConfMode "A+ only" → "Downgrade" (ETH: HTF conflict gate blocked the only candidate); tpClamp true → false (EUR: RR floor ×2 from the wall clamp; room check still downgrades).
+- Entry label head now carries the entry price: `▲ LONG B @ 4312.5`.
+- Releases: every version is now also saved as `releases/V8_FULL_vX.Y.Z.pine` (v8.0.4–v8.0.7 exported from git) so an older build can be restored without git.

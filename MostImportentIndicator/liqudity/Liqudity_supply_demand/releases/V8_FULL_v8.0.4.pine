@@ -1,7 +1,7 @@
 //@version=6
 // ═══════════════════════════════════════════════════════════════════════════════
 // V8 FULL · Engine + Context merged in ONE script (token probe build)
-// v8.0.7-full · M0-M20 (engine) + C5-C10 (context: MTF ladder, HTF CRT/TBS/TWS, HTF POI #2, trap LT-1..7, panel)
+// v8.0.4-full · M0-M20 (engine) + C5-C10 (context: MTF ladder, HTF CRT/TBS/TWS, HTF POI #2, trap LT-1..7, panel)
 //
 // Lineage: 2..txt (ICT-TE v7.10) causal core + 1.txt (LQ-SD-PA v3.1.1) feature set.
 // Plan:    V8_MASTER_PLAN_BN.md · Build rules: V8_BUILD_PROCESS_BN.md
@@ -116,7 +116,7 @@ hPoiMaxAge   = input.int(40, "HTF POI max age (HTF candles)", minval = 5, group 
 hPoiMaxTouch = input.int(3, "HTF POI max mitigations before expiry", minval = 1, group = grpH)
 hPoiDisp     = input.float(0.8, "HTF FVG min displacement body (ATR ×)", step = 0.1, minval = 0, group = grpH)
 hPoiNeedDir  = input.bool(true, "HTF POI must agree with HTF direction", group = grpH)
-htfConfMode  = input.string("Downgrade", "HTF CONFLICT (structure ≠ momentum) handling",
+htfConfMode  = input.string("A+ only", "HTF CONFLICT (structure ≠ momentum) handling",
      options = ["Off", "Downgrade", "A+ only", "Block"], group = grpH)
 
 // ── ⑧ Entry engine ────────────────────────────────────────────────────────
@@ -132,7 +132,7 @@ retestDepth  = input.float(0.35, "FVG retest depth required (0.5 = 50%)", step =
 lateBars     = input.int(8, "LATE entry — max bars from first FVG touch", minval = 1, group = grpE)
 poiMaxAge    = input.int(80, "Max POI age for binding (bars)", minval = 5, group = grpE)
 poiWickFb    = input.bool(true, "POI fallback: the raid candle's own rejection wick (tier 2)", group = grpE)
-dispBodyAtr  = input.float(1.0, "Setup displacement body ≥ ATR ×", step = 0.1, minval = 0.5, group = grpE)
+dispBodyAtr  = input.float(1.3, "Setup displacement body ≥ ATR ×", step = 0.1, minval = 0.5, group = grpE)
 useVolConf   = input.bool(true, "Displacement needs relative volume", group = grpE)
 volMult      = input.float(1.2, "Relative volume ≥ (× 20-bar mean)", step = 0.1, minval = 0.5, group = grpE)
 apMaxTouch   = input.int(2, "A+ only within this many touches of the execution FVG", minval = 1, group = grpE)
@@ -236,7 +236,7 @@ rrMult       = input.float(2.0, "TP R multiple (fallback + TP2 floor)", step = 0
 minRiskAtr   = input.float(0.25, "Minimum stop distance (ATR ×)", step = 0.05, minval = 0.05, group = grpR)
 maxRiskAtr   = input.float(3.0,  "Maximum stop distance (ATR ×)", step = 0.25, minval = 0.5, group = grpR)
 atrStopMult  = input.float(1.0, "ATR fallback stop (ATR ×)", step = 0.25, minval = 0.25, group = grpR)
-tpClamp      = input.bool(false, "Clamp TPs behind an un-raided opposing pool / POI", group = grpR)
+tpClamp      = input.bool(true, "Clamp TPs behind an un-raided opposing pool / POI", group = grpR)
 allowSynthTp = input.bool(true, "Allow synthetic TP2 when no structural target (grade capped at B)", group = grpR)
 rrAplus      = input.float(2.0, "Minimum RR — A+", step = 0.1, minval = 0.5, group = grpR)
 rrA          = input.float(1.5, "Minimum RR — A",  step = 0.1, minval = 0.5, group = grpR)
@@ -286,7 +286,6 @@ OTE_2            = 0.79
 PD_EXTREME       = 0.25   // within 25% of a range extreme = premium / discount extreme
 POOL_CONSUME_ATR = 4.0    // price this far from a reacted pool → pool consumed
 MSS_MIN_SEP_ATR  = 0.10   // an MSS level this close to the raid extreme is the raid itself
-MSS_STH_LOOK     = 8      // bars INTO the raid whose extreme is the short-term level when no confirmed pivot fits
 TGT_HYST         = 6.0    // a challenger must out-rank the LOCKED target by this much to re-aim
 DISP_HOLD_FRAC   = 0.55   // displacement must close in this fraction of its own range
 POI_LEAVE_ATR    = 0.10   // displacement must close OUTSIDE the POI by at least this
@@ -434,19 +433,31 @@ f_kindPri(int k) =>
     k == PK_HTF ? 7 : k == PK_PW ? 6 : k == PK_PD ? 5 : k == PK_EQ ? 5 :
          k == PK_EXT ? 4 : k == PK_TL ? 4 : k == PK_SES ? 3 : k == PK_WICK ? 2 : 1
 
+f_kindTxt(int k) =>
+    k == PK_HTF ? "HTF SWING" : k == PK_PW ? "PWH/PWL" : k == PK_PD ? "PDH/PDL" :
+         k == PK_EQ ? "EQ" : k == PK_EXT ? "EXT SWING" : k == PK_TL ? "TRENDLINE" :
+         k == PK_SES ? "SESSION" : k == PK_WICK ? "WICK POOL" : "SWING"
 
 // vocabulary for labels / dashboard
+f_tick(bool ok)   => ok ? "✓" : "✗"
 f_rgTxt(int r)    => r == RG_TREND ? "TREND" : r == RG_EXP ? "EXPANSION" : r == RG_CHOP ? "CHOP" : "RANGE"
+f_tmTxt(int t)    => t == TM_LATE ? "LATE" : t == TM_VALID ? "VALID" : "PREMATURE"
+f_rqTxt(int q)    => q == RQ_A ? "A" : q == RQ_B ? "B" : q == RQ_C ? "C" : "—"
 f_grTxt(int g)    => g == GR_AP ? "A+" : g == GR_A ? "A" : g == GR_B ? "B" : "—"
 f_grMin(string s) => s == "A+" ? GR_AP : s == "A" ? GR_A : GR_B
+f_biasTxt(int b)  => b > 0 ? "▲ Bull" : b < 0 ? "▼ Bear" : "—"
 f_hsTxt(int h)    => h == HS_BULL ? "BULL" : h == HS_BEAR ? "BEAR" : h == HS_CONF ? "CONFLICT" : "NEUTRAL"
 f_rnTxt(int c)    => c == RN_CONT ? "RUN" : c == RN_EXH ? "exhausted" : c == RN_REV ? "REVERSED" : c == RN_UNCONF ? "1 leg" : "none"
 f_stTxt(int s)    =>
     s == ST_CTX ? "CTX" : s == ST_TGT ? "TARGET" : s == ST_RAID ? "RAIDED" : s == ST_POI ? "POI" :
          s == ST_MSS ? "MSS" : s == ST_DISP ? "DISP" : s == ST_FVG ? "FVG" : s == ST_ENTRY ? "ENTRY" : s == ST_DEAD ? "dead" : "idle"
+f_paTxt(int a)    =>
+    a == PA_OB ? "OB" : a == PA_BRK ? "BREAKER" : a == PA_MIT ? "MITIGATION" :
+         a == PA_IFVG ? "IFVG" : a == PA_BPR ? "BPR" : a == PA_REJ ? "REJECTION" : "FVG"
 f_paRank(int a)   =>
     a == PA_OB ? 0 : a == PA_BRK ? 1 : a == PA_IFVG ? 2 : a == PA_BPR ? 3 : a == PA_FVG ? 4 : a == PA_MIT ? 5 : 6
 f_sbWinTxt(int w) => w == SBW_LO ? "London" : w == SBW_AM ? "NY AM" : w == SBW_PM ? "NY PM" : "—"
+f_roomTxt(float r) => na(r) ? "∞" : str.tostring(r, "#.##") + "R"
 
 // ---- normalised risk inputs (engine reads these, inputs keep the user's numbers) ----
 // rrAplus < rrA would make A+ easier than A; minRisk > maxRisk would reject every stop.
@@ -1109,6 +1120,11 @@ f_poolTouch(Pool p) =>
     int r = 0
     if not na(p)
         r := p.touches
+    r
+f_poolBrkBar(Pool p) =>
+    int r = na
+    if not na(p)
+        r := p.brkBar
     r
 f_poolPx(Pool p) =>
     float r = na
@@ -2375,11 +2391,11 @@ f_gateTxt(int g) =>
     g == 1 ? "base (bias/kz/news/cd)" : g == 2 ? "narrative" : g == 3 ? "SL range" : g == 4 ? "no TP target" : g == 5 ? "RR floor" :
          g == 6 ? "room" : g == 7 ? "dedupe" : g == 8 ? "tier" : g == 9 ? "grade" : g == 10 ? "score" : g == 11 ? "congestion" :
          g == 12 ? "run" : g == 13 ? "story" : g == 14 ? "HTF conflict" : "—"
-f_topIx(array<int> a, int from, int skip) =>
+f_topIx(array<int> a, int from) =>
     int bi = 0
     int bv = 0
     for i = from to array.size(a) - 1
-        if i != skip and array.get(a, i) > bv
+        if array.get(a, i) > bv
             bv := array.get(a, i)
             bi := i
     [bi, bv]
@@ -2482,6 +2498,9 @@ f_setupAdvance(Setup s, int dir) =>
             kill := true
         else if s.st >= ST_RAID and not na(s.liqExt) and (isL ? close < s.liqExt : close > s.liqExt)
             blk  := "raid failed (closed beyond the wick)"
+            kill := true
+        else if s.st >= ST_RAID and nz(f_poolBrkBar(s.pool), -1) > nz(s.liqBar, -1)
+            blk  := "raid level reclaimed"
             kill := true
         else if s.st >= ST_POI and s.poiIsHtf and bar_index - s.poiBar > femWait
             blk  := "FEM window expired"
@@ -2659,17 +2678,7 @@ f_setupAdvance(Setup s, int dir) =>
                 // V8.0.3 · ICT short-term shift: the latest INTERNAL swing (the lower-high / higher-low made into the raid) crossed with a displaced body
                 float sth  = isL ? sInt.swHi : sInt.swLo
                 int   sthB = isL ? sInt.swHiBar : sInt.swLoBar
-                // V8.0.6 · ICT short-term level = the NEAREST of the confirmed pivot and the extreme of the 8 bars INTO the raid
-                // (a lower-high 3 bars before the sweep is not a pivot yet — it is still the level that has to break)
-                int   kO   = bar_index - s.liqBar
-                float fb   = isL ? high[kO + 1] : low[kO + 1]
-                for i = 2 to MSS_STH_LOOK
-                    fb := isL ? math.max(fb, high[kO + i]) : math.min(fb, low[kO + i])
-                if na(sth) or nz(sthB, -99999999) < s.liqBar - mssWin or (isL ? fb < sth : fb > sth)
-                    sth  := fb
-                    sthB := s.liqBar - 1
-                // break = the close crossed it, OR this candle opened on the wrong side and closed through with a displaced body
-                bool  st   = not ch and not ci and not ciL and not mssNeedChoch and not na(sth) and body >= structDisp * atrSafe and (isL ? close > sth and math.min(close[1], open) <= sth : close < sth and math.max(close[1], open) >= sth)
+                bool  st   = not ch and not ci and not ciL and not mssNeedChoch and not na(sth) and body >= structDisp * atrSafe and (isL ? close > sth and close[1] <= sth : close < sth and close[1] >= sth)
                 float lvl  = ch ? (isL ? sInt.evLvlUp : sInt.evLvlDn) : ci ? (isL ? bearRunOpen : bullRunOpen) : ciL ? (isL ? cisdUpLvl : cisdDnLvl) : sth
                 int   lvlB = ch ? (isL ? sInt.evBarUp : sInt.evBarDn) : ci ? (isL ? bearRunBar : bullRunBar) : ciL ? s.liqBar : sthB
                 bool  rel  = not na(lvl) and nz(lvlB, -99999999) >= s.liqBar - mssWin
@@ -3099,9 +3108,7 @@ f_tp(bool go, int dir, float entry, float risk) =>
 
 // GRADE — hard gates decide IF a trade exists; this decides WHAT it is. V8: soft downgrades via f_penalty (capped).
 f_grade(bool mach, bool narr, int tier, int rq, bool rev, bool mssCh, float rr, bool roomBad, bool cong, bool runFade, int oteQ, bool pdExt, bool apTouch, bool hconf, bool regDown, bool synth) =>
-    // V8.0.7 · a reversal needs a B-grade raid to exist; it grades above B only with the full chain (CHoCH · T1 · A raid · PD extreme)
-    bool revOk = not rev or rq >= RQ_B
-    bool revAp = not rev or (mssCh and tier == 1 and rq == RQ_A and pdExt)
+    bool revOk = not rev or (mssCh and tier == 1 and rq == RQ_A and pdExt)
     int  g     = GR_NONE
     if revOk
         if rq >= RQ_C and f_geq(rr, rrB)
@@ -3110,10 +3117,9 @@ f_grade(bool mach, bool narr, int tier, int rq, bool rev, bool mssCh, float rr, 
             g := GR_A
         if g == GR_A and mach and narr and tier == 1 and rq == RQ_A and f_geq(rr, rrAPn) and apTouch and (oteNeedAp ? oteQ == 1 : oteQ <= 1)
             g := GR_AP
-        // V8.0.5 · a SOFT downgrade re-labels, it never blocks: B is the floor (hard blocks are gates in M16)
-        g := g > GR_NONE ? math.max(g - f_penalty(roomBad, cong, runFade, hconf, regDown), GR_B) : g
-        if synth or not revAp
-            g := math.min(g, GR_B)          // V8: a synthetic TP2 or a partial reversal chain never grades above B
+        g := math.max(g - f_penalty(roomBad, cong, runFade, hconf, regDown), GR_NONE)
+        if synth
+            g := math.min(g, GR_B)          // V8: a synthetic TP2 never grades above B
     g
 
 // ═══════════════════════════════════════════════════════════ M16 · TRADE ENGINE
@@ -3537,7 +3543,7 @@ plotchar(showSweeps and sesHiRaid, "Session high raided",  "▿", location.above
 f_fmt(float x) => str.tostring(x, format.mintick)
 if sigDir != 0 and confirmed
     bool   isL   = sigDir == 1
-    string head  = (isL ? "▲ LONG " : "▼ SHORT ") + f_grTxt(trd.grade) + (trd.sbWin != SBW_NONE ? " ◆SB" : "") + " @ " + f_fmt(trd.entry)
+    string head  = (isL ? "▲ LONG " : "▼ SHORT ") + f_grTxt(trd.grade) + (trd.sbWin != SBW_NONE ? " ◆SB" : "")
     string body1 = (showReason ? trd.tag + "\n" : "") + "RR " + str.tostring(trd.rr, "#.#") + "R · score " + str.tostring(trd.score) +
          "\nSL " + f_fmt(trd.sl) + " · TP " + f_fmt(trd.tp1) + " / " + f_fmt(trd.tp2) + " / " + f_fmt(trd.tp3)
     color  bg    = trd.grade == GR_AP ? (isL ? COL_BULL : COL_BEAR) : trd.grade == GR_A ? color.new(isL ? COL_BULL : COL_BEAR, 20) : color.new(color.orange, 20)
@@ -3611,9 +3617,8 @@ if barstate.islast
 
 // ═══════════════════════════════════════════════════════════ M19 · DASHBOARD (last bar only)
 // funnel read-outs at global scope (tuple destructure never inside a local block)
-[kIx, kN]   = f_topIx(killCnt, 1, -1)
-[kIx2, kN2] = f_topIx(killCnt, 1, kIx)
-[gIx, gN]   = f_topIx(gateCnt, 1, -1)
+[kIx, kN] = f_topIx(killCnt, 1)
+[gIx, gN] = f_topIx(gateCnt, 1)
 var table dash = table.new(position.top_right, 2, 10, border_width = 1, frame_color = color.new(color.gray, 60), border_color = color.new(color.gray, 80))
 f_dRow(int r, string k, string v, color vc) =>
     table.cell(dash, 0, r, k, text_color = color.new(color.gray, 10), text_size = dashSize, bgcolor = color.new(color.black, 60), text_halign = text.align_left)
@@ -3636,8 +3641,8 @@ if showDash and barstate.islast
     // FUNNEL: setups that reached each stage since load · top kill reason · candidates vs top gate failure
     string fun = "T" + str.tostring(array.get(stageReach, ST_TGT)) + " R" + str.tostring(array.get(stageReach, ST_RAID)) + " P" + str.tostring(array.get(stageReach, ST_POI)) +
          " M" + str.tostring(array.get(stageReach, ST_MSS)) + " D" + str.tostring(array.get(stageReach, ST_DISP)) + " F" + str.tostring(array.get(stageReach, ST_FVG)) + " E" + str.tostring(array.get(stageReach, ST_ENTRY))
-    f_dRow(8,  "Funnel",  fun + " · kill: " + (kN > 0 ? f_killTxt(kIx) + " ×" + str.tostring(kN) : "—") + (kN2 > 0 ? " · " + f_killTxt(kIx2) + " ×" + str.tostring(kN2) : ""), color.new(color.yellow, 0))
-    f_dRow(9, "Gates",   "cand " + str.tostring(array.get(gateCnt, 0)) + " · fail " + str.tostring(array.sum(gateCnt) - array.get(gateCnt, 0)) + ": " + (gN > 0 ? f_gateTxt(gIx) + " ×" + str.tostring(gN) : "—"), color.new(color.yellow, 0))
+    f_dRow(8,  "Funnel",  fun + " · kill: " + (kN > 0 ? f_killTxt(kIx) + " ×" + str.tostring(kN) : "—"), color.new(color.yellow, 0))
+    f_dRow(9, "Gates",   "cand " + str.tostring(array.get(gateCnt, 0)) + " · fail: " + (gN > 0 ? f_gateTxt(gIx) + " ×" + str.tostring(gN) : "—"), color.new(color.yellow, 0))
 
 // ═══════════════════════════════════════════════════════════ M20 · ALERTS
 // alertcondition: user picks "Once per bar close". alert(): structured payload, once per bar close.
