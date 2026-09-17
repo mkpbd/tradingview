@@ -1,174 +1,8 @@
 //@version=6
 // ─────────────────────────────────────────────────────────────────────────────
-// Liquidity + Supply/Demand + Price Action — v9.2
+// Liquidity + Supply/Demand + Price Action — v9
 // ─────────────────────────────────────────────────────────────────────────────
-// v9.2 CHANGELOG — NEWEST. SEVENTH forensic audit, this one of v9 by an outside
-// reader. Full report: Demand_Price_Action_v9_Forensic_Post_Mortem_Audit.md
-// beside this file. No new indicator, no new lookback, no threshold retuned to
-// flatter the history, no new input. Every change is a WIRING repair.
-//
-// THE PATTERN THE AUDIT NAMED — and the rule that follows from it:
-//   Every fault this file has ever had lives in the SEAM between two subsystems,
-//   and every fix has been applied INSIDE one of them. v5.3 said so explicitly
-//   ("six WIRING faults, all in the seams") and the four versions after it went
-//   on auditing subsystems. Five of the ten findings below are the same shape:
-//   A SINGLE-SLOT SCALAR SERVING CONSUMERS THAT NEED DIFFERENT ANSWERS.
-//   RULE FOR v10: when a scalar is read by more than one producer, either it is
-//   genuinely producer-independent, or it must become a function of the producer.
-//
-// A1 P0 · HTF ALIGNMENT AWARDED A FREE POINT. htfAlnL's third term was
-//    `not na(hPoiBTop) and close >= hPoiBBot` — but f_htfPoi DELETES a bullish
-//    POI the instant `close < bBot`, so the second half was implied by the first
-//    for the POI's entire life. The term meant "an HTF bull gap exists somewhere
-//    below", not "price is at an HTF POI". A+ needs htfAln >= v8ApHtf (3 of 4),
-//    so the real bar was 2 of the 3 remaining terms — and filter EMA + daily EMA
-//    are heavily correlated, so a single EMA side very nearly bought the A+ that
-//    V8-09 was written to prevent. Now htfLocL / htfLocS (the entry candle INSIDE
-//    the POI), which is what the V8-09 tooltip claims and what poiTL == 1 uses.
-//    Feeds BOTH A+ paths — f_tier and mcApL/mcApS. (MODULE 9)
-// A2 P0 · f_zoneFree DESTROYED ZONES FOR A CANDIDATE IT THEN REFUSED. One pass
-//    that both DECIDED and MUTATED: no break after `dup := true`, and the delete
-//    branch not guarded by it. A new zone overlapping three live ones — one strong
-//    enough to block it, two weaker — was refused AND deleted the two weaker
-//    zones on its way out. Silent POI loss through nbTop/nbBot → inDemand →
-//    poiLong → tier, the machine's tapZone and the P7 BRK scan. Two passes now.
-//    (MODULE 13)
-// A3 P0 · BPR RETEST DOUBLE-COUNTED POI AND EXECUTION. The tap REQUIRED
-//    zoneBullConf, so one engulfing candle satisfied the POI layer (p3BprTapUp →
-//    poiTL, and f_v5Gate's poiL) AND the EXEC layer (zoneBullConf IS f_tier's
-//    hasExec and the subject of execQ). Structurally identical to V9-06 (creation
-//    candle counted as its own retest) and V9-07 (shift candle counted as its own
-//    retest) — the same audit pass closed both and left this one open a module
-//    away. Detection is the tap alone; the confirmation candle only decides
-//    whether the ✓ chip is drawn. (MODULE 12C)
-// A4 P0 · THE MACHINE WAS INVALIDATED BY A ZONE IT NEVER TAPPED. f_zoneLoop set
-//    ONE registry-wide invU / invD flag, and the machine read it as "my POI
-//    broke". maxZones is 6 PER SIDE and the same array also holds OB companions,
-//    rejection blocks, breakers and mitigation blocks — so a stale demand zone
-//    3 ATR lower finally giving way killed a healthy setup at stage 2, with the
-//    dashboard printing "↳ POI violated" at an operator who would read it as the
-//    opposite of the truth. A false-negative generator on the PRIMARY signal
-//    path, and the same class as v5.3 F4 (machine locked out by an unrelated
-//    trade). The machine tests its OWN anchor now; invU / invD are deleted
-//    outright — they were read nowhere else. NET TOKEN GAIN. (MODULES 13 / 17)
-// A5 P0 · f_taken's "level was REPLACED" reset missed the two cases that matter.
-//    `lvl != lvl[1]` does not fire for a new pivot at the SAME price (equal highs
-//    / lows — the exact pattern the EQ-pool engine exists for), and `na != na`
-//    evaluates to na, so the na → value transition did not reset either. A
-//    latched level is dropped from the Phase-2 target map, which fails the RR
-//    gate and REFUSES a valid signal while the dashboard reports "no target".
-//    The caller now states when the level was rewritten. (MODULE 5)
-// A6 P0 · usedPoiL / usedPoiS ERASED THEMSELVES, DEFEATING V9-10. The write was
-//    unconditional, na included — and poiTopL is na for every accepted long whose
-//    POI is an OTE leg, a BPR retest, an HTF FVG POI, or nothing at all (IB break
-//    · trendline sweep · trap). Such a signal WIPED the remembered POI and
-//    poiFreeL then returned true for everything, so "one POI, one primary entry"
-//    was defeated by any intervening non-zone signal — reopening precisely the
-//    repeat-entries-off-one-FVG spam it was built to stop. Only a real level may
-//    claim the slot. (MODULE 18)
-// A7 P1 · THE TRAP ENGINE'S LEVEL WAS SWAPPED UNDERNEATH A LIVE TRAP. The break
-//    memory expired after 5 bars and fell back to a LIVE lastRes — which, by the
-//    time a trap is waiting for confirmation (ltWaitBars = 25), is usually a
-//    different, newer swing high. qS's "close back below the level", LT-6's
-//    mandatory close-back rule and the invalidation all measure against it, so
-//    the v9 §14 trap-quality count was partly grading noise. The window now
-//    matches the arm's own life. lastRes stays only as the cold-start seed.
-//    NOTE — the audit also proposed per-pattern levels (LT-3 → its wick pool,
-//    LT-7 → its supply zone); on review that is WRONG and was not taken: both
-//    patterns are about an upside BREAKOUT being suspect, so the broken level is
-//    the correct reference and the pool / zone is only where rejection happens.
-//    (MODULE 16B)
-// A8 P1 · body[1] WAS JUDGED AGAINST THE CURRENT atr. dispUp / dispDn, p4DemTrig
-//    / p4SupTrig and f_dispQ's consecutive-expansion term all measured a PRIOR
-//    candle's body against the ATR live on THIS bar. Through a volatility
-//    expansion the standard rises after the fact, so the test fails exactly where
-//    displacement is real and zones stop being created in the moves that produce
-//    the best ones. atr[1] throughout. (MODULES 6 / 13 / 13C)
-// A9 P0 · THE TIER GRADED THE BAR, NOT THE SIGNAL. f_tier read only side-wide
-//    context (liqLong · poiLong · recentMssUp · sesQ · execQL · htfAlnL · pdPos ·
-//    pathL · poiTL); not one term asked WHICH producer fired, and ONE call per
-//    side served all twenty of them. So the inside-bar CONTINUATION break — which
-//    has no liquidity and no POI requirement of its own — inherited tier A / A+
-//    from a sweep, a zone and a CHoCH it had nothing to do with. This is V7-A6
-//    ("the machine's A+ was decided by unrelated state") never applied to anything
-//    but the machine, and it is the single highest-impact finding of the audit:
-//    the tier ladder the whole file is organised around, that tierMode filters on
-//    and that the A+ alertcondition fires on, was not a measure of the SIGNAL.
-//    FIXED: f_tier takes a PRODUCER CLASS and the ladder is
-//    called in MODULE 18, where every raw candidate is known — nothing between
-//    MODULE 16 and there ever read tierLong, so the move is free.
-//      0 NARRATIVE  SB / FVG4 — walks the narrative itself, no extra test
-//      1 REVERSAL-AT-LIQUIDITY  CRT · TBS · HTF CRT/TBS · doji · TL sweep · trap
-//        — needs a sweep actually IN PLAY, not merely scored
-//      2 POI RETEST  zone 50 % · FEM · QM / BRK — needs to be AT the POI
-//      3 CONTINUATION  inside-bar break — needs external structure AND the HTF
-//        bias already pointing its way, and may NEVER reach A+
-//    pcls is the STRONGEST class that raised a raw candidate on that side. The
-//    setup machine is deliberately absent: it already grades itself from its own
-//    memory (mcTierL), which is the pattern this change extends to everyone else.
-//    Residual, bounded and documented: on a mixed bar a weak producer rides the
-//    strongest one's class — but such a bar genuinely carries more evidence and
-//    says so as ·ev n on the label. A blunt "inside-bar caps at B" stopgap tried
-//    from this pass's first cut is REMOVED; the class ladder replaces it. (M16 / M18)
-// A11 P2 · P3Zone / P4Zone STILL READ GEOMETRY OUT OF THE DRAWING. v5.3 F2 fixed
-//    this for `Zone` and LISTED these two as NOT FIXED; four versions later they
-//    still were. max_boxes_count is 500 and every family shares it; past the cap
-//    TradingView deletes the OLDEST box and box.get_top/get_bottom return na, so
-//    the zone stays in the array with no price — and f_p4Life's own delete test
-//    (`close < zb` with zb = na → false) LEAKS it rather than failing loudly.
-//    Latent today, because the family FIFOs hold the total well under the cap —
-//    which is precisely why it is closed NOW, before any cap is raised, not
-//    after. Both types carry zTop / zBot; the box is render-only. Side benefit:
-//    eight drawing reads per bar leave the hot path, three of them inside per-bar
-//    array walks, on a script already near the 20 s cap. (MODULES 12C / 13C)
-// A12 P1 · THE SILVER BULLET MODEL IGNORED ITS OWN LIQUIDITY HIERARCHY. It armed
-//    on pdlSweep / pdhSweep alone, so the whole V8-10 ladder it sits on top of
-//    (swing · EQ · session · PD · ext swing · PW), graded and remembered per
-//    sweep, reached it for exactly one level type. A London raid of the Asia low
-//    into MSS and an FVG retrace inside the 10:00–11:00 window was not an SB.
-//    It now arms on the same graded sweep the setup machine does. (MODULE 16D)
-// A13 P2 · f_p7Sb's SHIFT stage was not gated on p7mSb — the one stage that was
-//    not. Harmless only while the arm gate holds; gated for symmetry. (M16D)
-// A10 P1 · THE REGIME READ THE DEALING RANGE, so `rangeSrc` — a control presented
-//    under "4 · POI — Dealing range / OTE" — silently re-wired the regime engine,
-//    the CHOP suppression, the v5RegUp tier floor and the premium/discount rule
-//    for every reversal candidate. Internal pivots sit closer together, so the
-//    measured range shrinks, extRngAtr falls under CHOP_RANGE_ATR far more often
-//    and CHOP switches on across the chart. Same class as v5.3 F1 (a switch whose
-//    stated scope is much smaller than its real one). The regime is an EXTERNAL-
-//    structure concept by ARCH-5's own definition and is pinned to the external
-//    swings. No change at the "External" default. (MODULE 11)
-//
-// KNOWN AND DELIBERATELY NOT CHANGED IN THIS PASS (see §3–§5 of the report):
-//    · the POI-location family (f_p3Nearest / f_p4Nearest) requires the gap to be
-//      strictly BELOW the close, so p6InFvgL can only ever mean "wicked into the
-//      next untouched gap and closed back above it" — a close INSIDE the gap is
-//      structurally unreachable, and poiTL == 2 with it. Defensible as a style,
-//      but it is not what the comments describe. DECIDE IT, do not drift into it.
-//    · same-session raids are still invisible: f_sesTrack freezes a level at
-//      session close, so NY AM raiding its own opening-range low is never a
-//      session-type sweep. V7-A2 fixed the ARMING side of this, not detection.
-//      Needs a running session extreme beside the frozen one, ~60 raw tokens.
-//    · "at a POI" has two definitions — f_tier's atPoi (no QM / OTE / BPR) and
-//      f_v5Gate's poiL (all of them) — so a QM entry clears the floor and is then
-//      refused by the tier, and the dashboard says "clear" and "tier<floor" at
-//      once. Unify behind one helper; decide FIRST whether QM / OTE should reach
-//      A, because the two gates currently answer that question differently.
-//    · labels are never deleted against max_labels_count = 500, so on a dense
-//      intraday chart the v9 journal tooltips on older signals are the first
-//      thing TradingView drops — the post-mortem feature loses to the ink it
-//      competes with.
-//
-// EXPECTED BEHAVIOUR CHANGE: FEWER A+ (A1 is a real tightening), fewer A on
-//    bare inside-bar breaks (A9), fewer spurious machine invalidations (A4),
-//    fewer "no target" refusals (A5), more surviving zones (A2). If the A+ count
-//    does NOT fall after A1, then A1 was not the binding constraint — which is
-//    itself worth knowing. NOT compiled locally — load in TradingView and report
-//    any error text verbatim.
-// ─────────────────────────────────────────────────────────────────────────────
-// v9 header follows (history).
-// ─────────────────────────────────────────────────────────────────────────────
-// v9 CHANGELOG. Sixth forensic audit (of v8) + INSTITUTIONAL ENTRY
+// v9 CHANGELOG — NEWEST. Sixth forensic audit (of v8) + INSTITUTIONAL ENTRY
 // ACCURACY upgrade. Brief: fewer, cleaner, CAUSALLY valid entries — true first
 // retest, true shift-leg FVG, protected structure, HTF validation, consumed
 // liquidity, score dedup. Full report: AUDIT-v9.md beside this file.
@@ -1169,7 +1003,7 @@
 // so a user-raised pivot length walks straight past 200 and re-opens RE1014x.
 // max_bars_back is a history-buffer declaration, not a per-bar cost: it cannot
 // change a single signal, only whether the script compiles at extreme inputs.
-indicator("Liquidity + S/D + Price Action [MTF] v9.2", "LQ-SD-PA v9.2", overlay = true,
+indicator("Liquidity + S/D + Price Action [MTF] v9", "LQ-SD-PA v9", overlay = true,
      max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500,
      max_bars_back = 300)
 
@@ -1897,29 +1731,21 @@ if array.size(eqlLvls) > 0
 // that rested there are gone, so it is no longer a valid TAKE-PROFIT target —
 // the RR gate, the clean-path test and the TP ladder skip it. A level is
 // fresh again only when it is REPLACED (new pivot · new day · new week).
-// v9.2 A5: the "level was REPLACED" reset was `lvl != lvl[1]`, which misses the
-// two cases that matter. (a) A new pivot at the SAME price as the previous one —
-// equal highs / lows, the exact pattern the EQ-pool engine exists for — left the
-// latch set, so a genuinely fresh level stayed marked CONSUMED forever. (b)
-// `na != na` evaluates to na (falsy), so the na → value transition never reset
-// either. A latched level is dropped from the target map, which fails the RR
-// gate and REFUSES otherwise valid signals with "no target" — a silent false
-// negative. The caller now says when the level was rewritten.
-f_taken(float lvl, bool isHi, bool isNew) =>
+f_taken(float lvl, bool isHi) =>
     var bool t = false
-    if isNew or lvl != lvl[1]
+    if lvl != lvl[1]
         t := false
     if confirmed and not na(lvl) and (isHi ? high > lvl : low < lvl)
         t := true
     t
-resTaken    = f_taken(lastRes, true,  not na(lastResBar) and lastResBar == bar_index - pivLen)
-supTaken    = f_taken(lastSup, false, not na(lastSupBar) and lastSupBar == bar_index - pivLen)
-extResTaken = f_taken(extRes, true,   not na(extResBar) and extResBar == bar_index - extPiv)
-extSupTaken = f_taken(extSup, false,  not na(extSupBar) and extSupBar == bar_index - extPiv)
-pdhTaken    = f_taken(pdh, true,  timeframe.change("D"))
-pdlTaken    = f_taken(pdl, false, timeframe.change("D"))
-pwhTaken    = f_taken(pwh, true,  timeframe.change("W"))
-pwlTaken    = f_taken(pwl, false, timeframe.change("W"))
+resTaken    = f_taken(lastRes, true)
+supTaken    = f_taken(lastSup, false)
+extResTaken = f_taken(extRes, true)
+extSupTaken = f_taken(extSup, false)
+pdhTaken    = f_taken(pdh, true)
+pdlTaken    = f_taken(pdl, false)
+pwhTaken    = f_taken(pwh, true)
+pwlTaken    = f_taken(pwl, false)
 pdhSweep = confirmed and not na(pdh) and high > pdh and close < pdh
 pdlSweep = confirmed and not na(pdl) and low  < pdl and close > pdl
 // v8 (V8-10): PDH/PDL, the external swing and the previous-week levels share one
@@ -2206,11 +2032,7 @@ f_dispQ(bool isL) =>
     int q = (isL ? bullBar : bearBar) and body >= BRK_BODY_ATR * atr ? 1 : 0
     if q == 1 and body >= dispFactor * atr and rng > 0 and body / rng >= 0.6 and (isL ? close >= high - STRONG_CLOSE_PCT * rng : close <= low + STRONG_CLOSE_PCT * rng)
         q := 2
-    // v9.2 A8: body[1] is judged against atr[1] — the volatility standard that
-    // candle actually faced. Measuring a prior body against the CURRENT ATR makes
-    // the test progressively harder through a volatility expansion, i.e. it fails
-    // exactly where displacement is real.
-    if q == 2 and ((isL ? low > high[2] : high < low[2]) or body >= 1.5 * dispFactor * atr or ((isL ? bullBar[1] : bearBar[1]) and body[1] >= BRK_BODY_ATR * atr[1]))
+    if q == 2 and ((isL ? low > high[2] : high < low[2]) or body >= 1.5 * dispFactor * atr or ((isL ? bullBar[1] : bearBar[1]) and body[1] >= BRK_BODY_ATR * atr))
         q := 3
     q
 dispQUp = f_dispQ(true)
@@ -2498,16 +2320,8 @@ f_htfPoi() =>
 // the bias filter: a lower-timeframe reversal AT an HTF POI is not counter-trend.
 htfLocL = htfLive and not na(hPoiBTop) and low <= hPoiBTop and close > hPoiBBot
 htfLocS = htfLive and not na(hPoiSTop) and high >= hPoiSBot and close < hPoiSTop
-// v9.2 A1: the HTF-POI term was a TAUTOLOGY. f_htfPoi deletes a bullish POI the
-// moment `close < bBot`, so `not na(hPoiBTop)` already implies `close >= hPoiBBot`
-// for the POI's whole life — the point was awarded whenever an HTF bull gap
-// existed anywhere below, not when price was at it. A+ needs htfAln >= v8ApHtf
-// (3 of 4), so the real bar was 2 of the 3 remaining terms, and the filter EMA +
-// daily EMA are heavily correlated. The term now reads htfLocL / htfLocS — the
-// entry candle INSIDE the POI — which is what the V8-09 tooltip claims and what
-// poiTL == 1 already uses. Mirror-identical for the short side.
-htfAlnL = (htfB > 0 ? 1 : 0) + (nz(hStruct) > 0 ? 1 : 0) + (htfLocL ? 1 : 0) + (bD > 0 ? 1 : 0)
-htfAlnS = (htfB < 0 ? 1 : 0) + (nz(hStruct) < 0 ? 1 : 0) + (htfLocS ? 1 : 0) + (bD < 0 ? 1 : 0)
+htfAlnL = (htfB > 0 ? 1 : 0) + (nz(hStruct) > 0 ? 1 : 0) + (htfLive and not na(hPoiBTop) and close >= hPoiBBot ? 1 : 0) + (bD > 0 ? 1 : 0)
+htfAlnS = (htfB < 0 ? 1 : 0) + (nz(hStruct) < 0 ? 1 : 0) + (htfLive and not na(hPoiSTop) and close <= hPoiSTop ? 1 : 0) + (bD < 0 ? 1 : 0)
 
 // ═════════════════════════════════════════════════════════════════ MODULE 10
 // DEALING RANGE — premium / discount + OTE (external swings by default)
@@ -2561,15 +2375,7 @@ regEChDn  = f_recent(lastEChDnBar,  REGIME_LOOK)
 // serve; this one is external-only.
 extChUpRec = f_recent(lastEChUpBar, TRIG_LOOK)
 extChDnRec = f_recent(lastEChDnBar, TRIG_LOOK)
-// v9.2 A6: the regime read the DEALING RANGE, which the `rangeSrc` input can
-// switch to Internal — so a control presented under "4 · POI — Dealing range /
-// OTE" silently re-wired the regime engine, the CHOP suppression, the v5RegUp
-// tier floor and the premium/discount rule. Internal pivots sit closer together,
-// so the measured range shrinks, extRngAtr drops under CHOP_RANGE_ATR far more
-// often and CHOP switches on across the chart. Same class as v5.3 F1. The regime
-// is an EXTERNAL-structure concept by ARCH-5's own definition, so it is pinned to
-// the external swings. No change at the "External" default.
-extRngAtr = not na(extRes) and not na(extSup) and extRes > extSup and atr > 0 ? (extRes - extSup) / atr : na
+extRngAtr = rangeOK and atr > 0 ? rngW / atr : na
 
 regTrending = (extDir == 1 and regEBosUp and not regEChDn) or (extDir == -1 and regEBosDn and not regEChUp)
 regTransition = not regTrending and (regEChUp or regEChDn)
@@ -2973,17 +2779,6 @@ type P3Zone
     int    barC
     bool   armed      // BPR type a: a CHoCH landed while the zone lived
     bool   tapped
-    // v9.2 A11: the same fault v5.3 F2 fixed for `Zone` and explicitly LISTED as
-    // NOT FIXED here — geometry lived only inside the drawing. max_boxes_count is
-    // 500 and every box family shares it; when the cap is exceeded TradingView
-    // deletes the OLDEST box and box.get_top/get_bottom then return na, so the
-    // zone stays in the array with no price and the lifecycle's own delete test
-    // (`close < zb` with zb = na → false) LEAKS it instead of failing loudly.
-    // Latent while the family FIFOs keep the total under the cap — which is
-    // exactly why it must be closed BEFORE any cap is raised, not after. Also
-    // removes two drawing reads per zone per bar from the hot path.
-    float  zTop
-    float  zBot
 
 var p3Bull  = array.new<P3Fvg>()
 var p3Bear  = array.new<P3Fvg>()
@@ -3074,7 +2869,7 @@ f_p3NewZone(bool isBull, float top_, float bot_) =>
          border_color = color.new(c, p3ShowBpr ? 40 : 100), bgcolor = color.new(c, p3ShowBpr ? 93 : 100),
          text = p3ShowBpr ? "BPR" + (isBull ? " ▲" : " ▼") : "", text_color = p8TxtCol, text_size = p8TxtSz,
          text_halign = text.align_right, text_valign = isBull ? text.align_bottom : text.align_top)
-    array.push(p3Zones, P3Zone.new(bx, isBull, bar_index, false, false, top_, bot_))   // v9.2 A11
+    array.push(p3Zones, P3Zone.new(bx, isBull, bar_index, false, false))
     if array.size(p3Zones) > 10
         z0 = array.get(p3Zones, 0)
         box.delete(z0.bx)
@@ -3174,29 +2969,22 @@ f_p3ZoneLife() =>
     if p3Enable and confirmed and array.size(p3Zones) > 0
         for i = array.size(p3Zones) - 1 to 0
             z = array.get(p3Zones, i)
-            float zt = z.zTop                   // v9.2 A11 (was box.get_top)
-            float zb = z.zBot
+            float zt = box.get_top(z.bx)
+            float zb = box.get_bottom(z.bx)
             if not z.armed and (z.isBull ? chochUp or eChochUp : chochDn or eChochDn)
                 z.armed := true                                     // lesson type a: pre-CHoCH BPR, traded after the CHoCH
                 if p3ShowBpr
                     box.set_text(z.bx, "BPR " + (z.isBull ? "▲" : "▼") + " ·CHoCH armed")
-            // v9.2 A3: the tap REQUIRED a confirmation candle, so one engulfing
-            // bar satisfied the POI layer (p3BprTapUp feeds poiTL and f_v5Gate's
-            // poiL) AND the EXEC layer (zoneBullConf is f_tier's hasExec and the
-            // subject of execQ). Same double count V9-06 / V9-07 closed one module
-            // over. Detection is now the tap alone — price entered the zone and
-            // held it; the confirmation candle stays a separate layer and only
-            // decides whether the ✓ chip is drawn.
             if bar_index > z.barC and not z.tapped
-                if z.isBull and low <= zt and close >= zb
+                if z.isBull and low <= zt and close >= zb and zoneBullConf
                     z.tapped := true
                     tapUp    := true
-                    if p3ShowBpr and zoneBullConf
+                    if p3ShowBpr
                         f_chip(true, "BPR ▲ retest ✓", color.new(COL_BULL, 30), color.white, mkSize)
-                if not z.isBull and high >= zb and close <= zt
+                if not z.isBull and high >= zb and close <= zt and zoneBearConf
                     z.tapped := true
                     tapDn    := true
-                    if p3ShowBpr and zoneBearConf
+                    if p3ShowBpr
                         f_chip(false, "BPR ▼ retest ✓", color.new(COL_BEAR, 30), color.white, mkSize)
             if (z.isBull and close < zb) or (not z.isBull and close > zt) or bar_index - z.barC > p3MaxAge
                 box.delete(z.bx)
@@ -3363,12 +3151,8 @@ f_zoneLoop() =>
     bool sdS = false
     float slL = na
     float slS = na
-    // v9.2 A4: the invU / invD registry-wide "a zone was violated" flags are GONE.
-    // They were read by nothing but the setup machine, and there they killed a
-    // healthy setup whenever ANY of up to six demand zones (plus OB companions,
-    // rejection blocks, breakers and mitigation blocks — all one array) finally
-    // broke, whether or not the machine had ever tapped it. The machine now tests
-    // its OWN anchor. Same class as v5.3 F4.
+    bool invU = false
+    bool invD = false
     if array.size(zones) > 0
         for i = array.size(zones) - 1 to 0
             z    = array.get(zones, i)
@@ -3384,6 +3168,10 @@ f_zoneLoop() =>
                 continue
             // ---- violation: flip once into a breaker / mitigation block, else drop
             if (sup ? close > top : close < bot) and confirmed
+                if sup
+                    invD := true
+                else
+                    invU := true
                 if not z.flipped
                     // BREAKER needs sweep + structure break before failure (FIX-14)
                     bool isBrk = sup ? recentSsl and recentStructUp : recentBsl and recentStructDn
@@ -3447,7 +3235,7 @@ f_zoneLoop() =>
                 z.signaled := true
                 if f_zVis(z.kind)                                     // v5.3 F1: ink only
                     box.set_bgcolor(z.bx, color.new(sup ? COL_BEAR : COL_BULL, 94))
-    [sdL, sdS, slL, slS]
+    [sdL, sdS, slL, slS, invU, invD]
 // declared here (not tuple-destructured) because later modules reassign them
 sigSDLong  = false
 sigSDShort = false
@@ -3464,18 +3252,19 @@ float slLtL  = na
 float slLtS  = na
 float slMcL  = na
 float slMcS  = na
-[zLg, zSh, zSlL, zSlS] = f_zoneLoop()
+bool zoneInvalidatedUp = false   // demand-side POI violated this bar (machine invalidation)
+bool zoneInvalidatedDn = false
+[zLg, zSh, zSlL, zSlS, zInvU, zInvD] = f_zoneLoop()
 sigSDLong  := zLg
 sigSDShort := zSh
 slEngL := zSlL
 slEngS := zSlS
+zoneInvalidatedUp := zInvU
+zoneInvalidatedDn := zInvD
 
 // ---- create S/D zones (FVG-imbalance geometry, V2 FIX-9) + OB companions ------
-// v9.2 A8: atr[1] — see the note in f_dispQ. p4DemTrig / p4SupTrig below carry
-// the identical test and are changed with it, so the v3 zone engine and the v4
-// corrected-OB engine keep firing off the same displacement leg.
-dispUp  = bullBar[1] and body[1] >= dispFactor * atr[1]
-dispDn  = bearBar[1] and body[1] >= dispFactor * atr[1]
+dispUp  = bullBar[1] and body[1] >= dispFactor * atr
+dispDn  = bearBar[1] and body[1] >= dispFactor * atr
 // v5.3 F1: DETECTION is ungated. `showZones` no longer decides whether a POI
 // exists — only whether you can see it. Same for the OB companion (showOB feeds
 // obNearL/obNearS in the trap engine), the rejection blocks and the breaker flip
@@ -3491,25 +3280,15 @@ f_pushZone(Zone z) =>
 // written out once per direction. Same rule: an overlapping zone of the same
 // side with an equal-or-better score and no signal yet blocks the new one;
 // otherwise the weaker zone is deleted and the new one replaces it.
-// v9.2 A2: this was ONE pass that both DECIDED and MUTATED. There was no break
-// after `dup := true` and the delete branch was not guarded by it, so a new zone
-// overlapping three live ones — one strong enough to block it, two weaker — was
-// REFUSED and still deleted the two weaker zones on its way out. Silent POI loss:
-// nbTop/nbBot, inDemand, poiLong, the machine's tapZone and the P7 BRK scan all
-// read a registry thinned by a zone that was never created. Two passes now —
-// decide first, evict only once the new zone is actually going to exist.
 f_zoneFree(bool isSup, float zTop, float zBot, int newScore) =>
     bool dup = false
     if array.size(zones) > 0
-        for i = array.size(zones) - 1 to 0                                  // pass 1: decide
+        for i = array.size(zones) - 1 to 0
             z = array.get(zones, i)
-            if z.isSupply == isSup and not (zBot > z.zTop or zTop < z.zBot) and z.score >= newScore and not z.signaled   // v5.3 F2
-                dup := true
-                break
-        if not dup
-            for i = array.size(zones) - 1 to 0                              // pass 2: evict the weaker
-                z = array.get(zones, i)
-                if z.isSupply == isSup and not (zBot > z.zTop or zTop < z.zBot)
+            if z.isSupply == isSup and not (zBot > z.zTop or zTop < z.zBot)   // v5.3 F2
+                if z.score >= newScore and not z.signaled
+                    dup := true
+                else
                     box.delete(z.bx)
                     line.delete(z.mid)
                     array.remove(zones, i)
@@ -3716,8 +3495,6 @@ type P4Zone
     bool   validated  // OB: BOS/CHoCH landed after formation
     bool   hp         // OB: post-sweep · BASE: trend + doji base + ≥2 leg FVGs
     bool   volTag     // KEY: volume confirmation
-    float  zTop       // v9.2 A11 — see the note on P3Zone. Three per-bar array
-    float  zBot       // walks read this; the box is render-only now.
 
 var p4Zones = array.new<P4Zone>()
 
@@ -3748,7 +3525,7 @@ f_p4New(string kind, bool isBull, float top_, float bot_, int x1, bool hp_, bool
     color c  = f_p4Col(kind, isBull)
     bool vis = f_p4Vis(kind)
     box bxNa = na
-    P4Zone z = P4Zone.new(bxNa, isBull, bar_index, kind, 0, false, false, hp_, vol_, top_, bot_)   // v9.2 A11
+    P4Zone z = P4Zone.new(bxNa, isBull, bar_index, kind, 0, false, false, hp_, vol_)
     z.bx := box.new(x1, top_, bar_index + 1, bot_,
          border_color = color.new(c, vis ? 45 : 100), border_style = line.style_dashed,
          bgcolor = color.new(c, vis ? 94 : 100), text = vis ? f_p4Txt(z) : "", text_color = p8TxtCol,
@@ -3763,8 +3540,8 @@ f_p4New(string kind, bool isBull, float top_, float bot_, int x1, bool hp_, bool
 // ---- corrected ORDER BLOCKS --------------------------------------------------------
 // same trigger as the v3 S/D engine (FVG + displacement leg) so condition 1
 // of OB validity (attached imbalance) holds by construction
-p4DemTrig = p4Enable and confirmed and bullFVG and bullBar[1] and body[1] >= dispFactor * atr[1]   // v5.3 F1 · v9.2 A8
-p4SupTrig = p4Enable and confirmed and bearFVG and bearBar[1] and body[1] >= dispFactor * atr[1]   // v5.3 F1 · v9.2 A8
+p4DemTrig = p4Enable and confirmed and bullFVG and bullBar[1] and body[1] >= dispFactor * atr   // v5.3 F1
+p4SupTrig = p4Enable and confirmed and bearFVG and bearBar[1] and body[1] >= dispFactor * atr   // v5.3 F1
 // CE10117 compression: demand and supply scans were mirror copies — one
 // direction-parameterized pass now serves both. Corrections are unchanged.
 f_p4ObScan(bool trig, bool isBull) =>
@@ -3795,7 +3572,7 @@ f_p4ObScan(bool trig, bool isBull) =>
             if array.size(p4Zones) > 0
                 for i = 0 to array.size(p4Zones) - 1
                     z = array.get(p4Zones, i)
-                    if z.kind == "OB" and z.isBull == isBull and not (obBot > z.zTop or obTop < z.zBot)   // v9.2 A11
+                    if z.kind == "OB" and z.isBull == isBull and not (obBot > box.get_top(z.bx) or obTop < box.get_bottom(z.bx))
                         dup := true
                         break
             if not dup
@@ -3887,8 +3664,8 @@ f_p4Life() =>
     if p4Enable and confirmed and array.size(p4Zones) > 0
         for i = array.size(p4Zones) - 1 to 0
             z = array.get(p4Zones, i)
-            float zt = z.zTop                   // v9.2 A11 (was box.get_top)
-            float zb = z.zBot
+            float zt = box.get_top(z.bx)
+            float zb = box.get_bottom(z.bx)
             if z.isBull ? close < zb : close > zt
                 box.delete(z.bx)          // v7: KEY (the only flipping kind) is gone → violated = deleted
                 array.remove(p4Zones, i)
@@ -3923,8 +3700,8 @@ f_p4Nearest() =>
     if p4Enable and array.size(p4Zones) > 0
         for i = 0 to array.size(p4Zones) - 1
             z = array.get(p4Zones, i)
-            float zt = z.zTop                   // v9.2 A11 (was box.get_top)
-            float zb = z.zBot
+            float zt = box.get_top(z.bx)
+            float zb = box.get_bottom(z.bx)
             bool okOb = z.kind == "OB" and z.state < 2 and (not p4ReqShift or z.validated)
             if okOb and z.isBull and zt <= close and (na(p4ObBullTop) or zt > p4ObBullTop)
                 p4ObBullTop := zt
@@ -4300,24 +4077,7 @@ scoreShort = ctxShort + liqShort + poiShort + trigShort + execShort
 //   A+ = A + filter EMA + HTF alignment ≥ v8ApHtf + CORE session + sweep grade
 //        ≥ 3 of type ≥ v8ApLiq + correct range side + exec ≥ v8ExecAp + clean
 //        path + no correlated conflict. The arbiter may still demote it.
-// v9.2 A9. f_tier read only
-// side-wide context — not one term asked WHICH producer fired — and one call per
-// side served all twenty of them, so every producer on a rich bar inherited the
-// side's best grade. That is V7-A6 ("the machine's A+ was decided by unrelated
-// state") never applied to anything but the machine.
-// pcls = the class of the STRONGEST producer that raised a raw candidate on this
-// side, and each class must supply its OWN core layer before it may reach A:
-//   0 NARRATIVE   SB / FVG4 — walks sweep → shift → POI itself, so no extra test
-//                 (the setup machine never comes here; it has mcTierL)
-//   1 REVERSAL-AT-LIQUIDITY  CRT · TBS · HTF CRT/TBS · doji · TL sweep · trap —
-//                 must have a sweep actually IN PLAY, not merely scored
-//   2 POI RETEST  zone 50 % · FEM · QM / BRK — must be AT the POI
-//   3 CONTINUATION  inside-bar break — must have external structure AND the HTF
-//                 bias already pointing its way, and may NEVER reach A+
-// The residual (a weak producer sharing a bar with a stronger one rides the
-// stronger one's class) is bounded: such a bar genuinely carries more evidence,
-// and it is reported as ·ev n on the label.
-f_tier(bool isL, int pcls) =>
+f_tier(bool isL) =>
     bool hasLiq  = (isL ? liqLong : liqShort) >= 10
     bool hasPoi  = (isL ? poiLong : poiShort) >= 5
     bool hasTrig = isL ? recentMssUp or recentChUp or recentCisdUp : recentMssDn or recentChDn or recentCisdDn
@@ -4327,18 +4087,16 @@ f_tier(bool isL, int pcls) =>
     bool atPoi   = isL ? inDemand or p6InObL or p6InFvgL : inSupply or p6InObS or p6InFvgS
     int  ex      = isL ? execQL : execQS
     bool hasExec = (isL ? zoneBullConf : zoneBearConf) and ex >= v8ExecA
-    bool ownCore = pcls == 0 ? true : pcls == 1 ? (isL ? sslInPlay : bslInPlay) : pcls == 2 ? atPoi : (isL ? extDir == 1 and htfB > 0 : extDir == -1 and htfB < 0)
     int tier = 1
     if hasTrig and (hasLiq or hasPoi)
         tier := 2
-    if hasLiq and atPoi and aTrig and hasExec and ownCore
+    if hasLiq and atPoi and aTrig and hasExec
         tier := 3
-    if tier == 3 and pcls <= 2 and (isL ? htfB > 0 : htfB < 0) and (isL ? htfAlnL : htfAlnS) >= v8ApHtf and sesPts >= 5 and (isL ? lastSslQual : lastBslQual) >= 3 and (isL ? lastSslType : lastBslType) >= v8ApLiq and rangeOK and (isL ? pdPos < 0.5 : pdPos >= 0.5) and ex >= v8ExecAp and (isL ? pathL : pathS) >= V8_PATH_AP and (isL ? corrB >= 0 : corrB <= 0) and (isL ? poiTL : poiTS) <= 2
+    if tier == 3 and (isL ? htfB > 0 : htfB < 0) and (isL ? htfAlnL : htfAlnS) >= v8ApHtf and sesPts >= 5 and (isL ? lastSslQual : lastBslQual) >= 3 and (isL ? lastSslType : lastBslType) >= v8ApLiq and rangeOK and (isL ? pdPos < 0.5 : pdPos >= 0.5) and ex >= v8ExecAp and (isL ? pathL : pathS) >= V8_PATH_AP and (isL ? corrB >= 0 : corrB <= 0) and (isL ? poiTL : poiTS) <= 2
         tier := 4
     tier
-// v9.2 A9: the ladder is now called in MODULE 18, where every raw candidate is
-// known, so it can be told which producer it is grading. Nothing between here and
-// there reads tierLong / tierShort.
+tierLong  = f_tier(true)
+tierShort = f_tier(false)
 minRank = tierMode == "A+ only" ? 4 : tierMode == "A and above" ? 3 : tierMode == "B and above" ? 2 : 1
 f_tierTxt(int t) => t == 4 ? "A+" : t == 3 ? "A" : t == 2 ? "B" : "C"
 
@@ -4420,18 +4178,11 @@ f_p7Models() =>
     bool f4S = false
     float slL = na
     float slS = na
-    // v9.2 A12: SB armed ONLY on pdlSweep / pdhSweep and ignored the entire
-    // V8-10 liquidity hierarchy it sits on top of — a London raid of the Asia low
-    // followed by MSS and an FVG retrace inside the 10:00–11:00 window was not an
-    // SB fire. It now arms on the same graded sweep the setup machine does, which
-    // is the correct ancestor: any level type, penetration-graded, quality at or
-    // above minArmQual. A13: the shift stage is gated on p7mSb too — it was the
-    // one stage that was not, which is only harmless while the arm gate holds.
-    [sbStL, sbL] = f_p7Sb(p7Enable and p7mSb and confirmed and sslInPlay and lastSslBar == bar_index and lastSslQual >= minArmQual,
-         p7Enable and p7mSb and confirmed and (mssUp or eChochUp),
+    [sbStL, sbL] = f_p7Sb(p7Enable and p7mSb and confirmed and pdlSweep,
+         p7Enable and confirmed and (mssUp or eChochUp),
          p7Enable and confirmed and p7mSb and (p6InFvgL or p6InObL) and rangeOK and pdPos < 0.5 and zoneBullConf and (not p7SbSes or not timeframe.isintraday or inSB))
-    [sbStS, sbS] = f_p7Sb(p7Enable and p7mSb and confirmed and bslInPlay and lastBslBar == bar_index and lastBslQual >= minArmQual,
-         p7Enable and p7mSb and confirmed and (mssDn or eChochDn),
+    [sbStS, sbS] = f_p7Sb(p7Enable and p7mSb and confirmed and pdhSweep,
+         p7Enable and confirmed and (mssDn or eChochDn),
          p7Enable and confirmed and p7mSb and (p6InFvgS or p6InObS) and rangeOK and pdPos >= 0.5 and zoneBearConf and (not p7SbSes or not timeframe.isintraday or inSB))
     if sbL
         slL := f_p7SlL(slL, math.min(low, nz(lastSslExt, low)) - SL_PAD_ATR * atr)
@@ -4697,15 +4448,7 @@ var int ltQS = 0
 
 string ltLArmTxt = f_p5Add(f_p5Add("", lt1Arm, "LT-1"), lt4Arm, "LT-4")
 string ltSArmTxt = f_p5Add(f_p5Add(f_p5Add(f_p5Add(f_p5Add("", lt2Arm, "LT-2"), lt3Arm, "LT-3"), lt5Arm, "LT-5"), lt6Arm, "LT-6"), lt7Arm, "LT-7")
-// v9.2 A7: the break memory expired after 5 bars and then fell back to a LIVE
-// lastRes — which, by the time a trap is waiting for its confirmation, is usually
-// a different, newer swing high. ltSLevel / ltLLevel is the level the arm was
-// about, and qS's "close back below the level", LT-6's mandatory close-back rule
-// and the invalidation `close > ltSLevel + ltInvAtr * atr` all measure against it.
-// The window now matches the arm's own life (ltWaitBars), so the reference can no
-// longer be swapped underneath a live trap. lastRes stays only as the cold-start
-// seed, before any break has ever been recorded.
-float  ltBrkLvlNow = not na(ltBrkUpLvl) and f_recent(ltBrkUpBar, ltWaitBars) ? ltBrkUpLvl : lastRes
+float  ltBrkLvlNow = not na(ltBrkUpLvl) and f_recent(ltBrkUpBar, 5) ? ltBrkUpLvl : lastRes
 
 if ltEnable and confirmed
     // ---- LONG trap machine (LT-1 / LT-4) --------------------------------------
@@ -4878,9 +4621,7 @@ if confirmed
         else if p1Enable and p1FlipDnEvt
             suL := 0
             suLReason := "v4 strong-low taken (bias flip down)"
-    // v9.2 A4: the machine's OWN zone anchor, not "any demand zone in the registry
-    // broke". Stage 3 has its own anchor test below, so this one is stage 2 only.
-    if suL == 2 and na(suLFvgBar) and not na(suLAnchorB) and close < suLAnchorB
+    if suL >= 2 and zoneInvalidatedUp and na(suLFvgBar)
         suL := 0
         suLReason := "POI violated"
     // stage expiry
@@ -4989,8 +4730,7 @@ if confirmed
         else if p1Enable and p1FlipUpEvt
             suS := 0
             suSReason := "v4 strong-high taken (bias flip up)"
-    // v9.2 A4 — mirror of the long side
-    if suS == 2 and na(suSFvgBar) and not na(suSAnchorT) and close > suSAnchorT
+    if suS >= 2 and zoneInvalidatedDn and na(suSFvgBar)
         suS := 0
         suSReason := "POI violated"
     if suS == 1 and bar_index - suSBar > liqWait
@@ -5248,17 +4988,6 @@ shortOK  = shortCtx and shortCdOK and poiFreeS
 rawL = sigMCLong  or sigSDLong  or sig3Long  or sig4Long  or sigTLLong  or sigCRTLong  or sigTBSLong  or sigHCrtLong  or sigHTbsLong  or sigFEMLong  or sigP7Long  or ltLongSig
 rawS = sigMCShort or sigSDShort or sig3Short or sig4Short or sigTLShort or sigCRTShort or sigTBSShort or sigHCrtShort or sigHTbsShort or sigFEMShort or sigP7Short or ltShortSig
 
-// v9.2 A9: WHICH producer the tier is grading. Strongest class wins the bar
-// (see the ladder at f_tier). The setup machine is absent on purpose — it grades
-// itself from its own memory (mcTierL), which is what V7-A6 established and what
-// this change extends to everyone else. A side with no candidate falls through to
-// 3; harmless, because tierLong is then read by nothing (f_rej runs only under
-// rawL, finTierL only under anyLong).
-pclsL = sigP7Long  and p7NarL ? 0 : sigCRTLong  or sigTBSLong  or sigHCrtLong  or sigHTbsLong  or sig4Long  or sigTLLong  or ltLongSig  ? 1 : sigSDLong  or sigFEMLong  or sigP7Long  ? 2 : 3
-pclsS = sigP7Short and p7NarS ? 0 : sigCRTShort or sigTBSShort or sigHCrtShort or sigHTbsShort or sig4Short or sigTLShort or ltShortSig ? 1 : sigSDShort or sigFEMShort or sigP7Short ? 2 : 3
-tierLong  = f_tier(true,  pclsL)
-tierShort = f_tier(false, pclsS)
-
 
 // machine entries. v7Quality: the machine grades ITSELF. A when the shift was
 // external (MSS / external CHoCH), B when only a CISD or an internal CHoCH
@@ -5301,11 +5030,6 @@ if confirmed and suS == 4 and suSBar == bar_index and not sigMCShort
 // deliberately NOT floored — it already walked sweep → POI → shift → retest.
 engTierOKL = tierLong  >= v5RankL and v5OkL
 engTierOKS = tierShort >= v5RankS and v5OkS
-// v9.2 A9: a blunt "inside-bar caps at B" stopgap was considered and dropped —
-// the producer-class ladder in f_tier replaces it. A continuation break now has to
-// supply its own core layer (external structure AND the HTF bias already pointing
-// its way) to reach A, and can never reach A+ at all, which is the principled
-// version of the same refusal. Every producer goes back through one gate.
 sigSDLong   := sigSDLong   and longOK and engTierOKL and pdOkL
 sig3Long    := sig3Long    and longOK and engTierOKL and pdOkL
 sig4Long    := sig4Long    and longOK and engTierOKL and pdOkL
@@ -5343,7 +5067,7 @@ anyShort = sigMCShort or sigSDShort or sig3Short or sig4Short or sigTLShort or s
 // the post-news state.
 clsL = sigMCLong  ? 0 : sigP7Long  and p7NarL ? 1 : 2
 clsS = sigMCShort ? 0 : sigP7Short and p7NarS ? 1 : 2
-finTierL = sigMCLong  ? mcTierL : tierLong    // v9.2 A9: tierLong is now producer-class aware
+finTierL = sigMCLong  ? mcTierL : tierLong
 finTierS = sigMCShort ? mcTierS : tierShort
 if finTierL == 4 and (na(v5RrL) or rawS or newsState == 2)
     finTierL := 3
@@ -5412,23 +5136,14 @@ if sigTBSLong and anyLong
     lastTbsLongBar := bar_index
 if sigTBSShort and anyShort
     lastTbsShortBar := bar_index
-// v9.2 A10: the write was unconditional, na included. poiTopL is na for every
-// accepted long whose POI is an OTE leg, a BPR retest, an HTF FVG POI or nothing
-// at all (IB break · trendline sweep · trap) — so such a signal WIPED the
-// remembered POI and poiFreeL then returned true for everything. V9-10 ("one POI,
-// one primary entry") was defeated by any intervening non-zone signal, which is
-// precisely the repeat-entries-off-one-FVG spam it exists to stop. Only a real
-// level may claim the slot; a signal without one leaves the memory standing.
 if anyLong
     lastLongSigBar := bar_index
-    if not na(poiTopL)
-        usedPoiL    := poiTopL
-        usedPoiBarL := bar_index
+    usedPoiL := poiTopL
+    usedPoiBarL := bar_index
 if anyShort
     lastShortSigBar := bar_index
-    if not na(poiTopS)
-        usedPoiS    := poiTopS
-        usedPoiBarS := bar_index
+    usedPoiS := poiTopS
+    usedPoiBarS := bar_index
 
 // ═════════════════════════════════════════════════════════════════ MODULE 18B
 // ◇ PHASE 7 (v4) — the CLS breakout-classifier labels were REMOVED in v8.
@@ -5762,7 +5477,7 @@ f_v4Dashboard() =>
          border_color = color.new(color.gray, 70), border_width = 1)
     if showDash and barstate.islast
         rowBg = color.new(color.gray, 85)
-        table.cell(dash, 0, 0, "LQ-SD-PA v9.2", bgcolor = color.new(color.gray, 60), text_color = color.white, text_size = dashSize)
+        table.cell(dash, 0, 0, "LQ-SD-PA v9", bgcolor = color.new(color.gray, 60), text_color = color.white, text_size = dashSize)
         table.cell(dash, 1, 0, cfgOK ? regime : "⚠ CONFIG: HTF ≤ chart", bgcolor = not cfgOK ? color.new(color.red, 30) : regime == "TRENDING" ? f_biasCol(extDir) : regime == "CHOP" ? color.new(color.red, 70) : rowBg,
              text_color = color.white, text_size = dashSize)
         f_dr(dash, 1, "HTF bias", (biasFilter == "Off" ? "filter off" : "filter " + biasFilter + " " + f_biasTxt(bFilt)) + "\n1H " + f_biasTxt(b60) + " · D " + f_biasTxt(bD), f_biasCol(htfB))

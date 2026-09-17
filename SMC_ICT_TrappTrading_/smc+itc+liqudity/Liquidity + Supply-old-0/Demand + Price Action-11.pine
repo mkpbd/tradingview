@@ -9,6 +9,41 @@
 // text verbatim. v10 itself was never compiled after its own V10-18 removals,
 // so the ~94,000-token estimate under it is UNVERIFIED; see the BUDGET note.
 //
+// v12 PATCH — PHASE 1 (SAFETY) of the forensic post-mortem audit. Two P0 items
+// only; no new producer, no new indicator, no visual redesign. See
+// Demand_Price_Action_v11_Forensic_Post_Mortem_Audit.md §27, §32 Phase 1.
+//
+// V12-01 P0 · THE RR GATE LICENSED A CANDIDATE THE TRADE DID NOT USE (audit
+//    P0-01). f_v5Gate (M17B) runs BEFORE the context gates, so its f_slPick read
+//    the RAW machine / model flags. When the machine raised a wide stop and then
+//    failed its OWN gate (tier < minRank · chase · premium/discount), an engine
+//    won the bar with a different stop — and the RR that licensed the entry
+//    belonged to a refused candidate. V11-01 fixed the DRAWN ladder and
+//    deliberately left the gate alone, so the display was honest while the
+//    licensing was not. A FINAL RR / PATH VALIDATION stage now runs in the
+//    arbiter, after the context gates and before the tier ladder, the clash
+//    resolution, the cooldown stamps and the POI consumption: the stop is picked
+//    from the POST-gate producer flags, f_tgt is re-run against it, and a failed
+//    RR or a blocked path VETOES the direction with its own refusal reason
+//    ("final RR x < y" · "final path blocked" · "final: no target"). A+ is now
+//    withdrawn on the FINAL target, and short-of-plan (≥ v5MinRr but < rrMult)
+//    also withdraws it. MODULE 19 reads the validated ladder instead of calling
+//    f_tgt a third time, so gate · label · alert · tracker cannot disagree.
+//    (MODULE 18 / 19 / 20)
+// V12-02 P0 · THE SCORE PAID ONE CAUSAL CHAIN SEVERAL TIMES (audit P0-02, §16,
+//    §17). v10's nine buckets were summed as if independent: a single sweep →
+//    MSS → displacement → FVG event collected shift 15 + displacement 10 AND POI
+//    15 + FVG 10 — half the score for one thing that happened. The score is now
+//    grouped into EVIDENCE FAMILIES with ONE MAXIMUM CONTRIBUTION EACH —
+//    liquidity 20 · structure (shift + displacement) 20 · location (POI +
+//    imbalance) 20 · entry (retest + execution quality) 20 · context (HTF +
+//    session) 10 · RR/path 10 = 100. One chain can now earn at most 60 and still
+//    needs an independent entry, context and target to reach A / A+. Execution
+//    quality joins the score for the first time (it was tier-only) because it is
+//    the one component that is NOT a descendant of the sweep. Grading INSIDE a
+//    family is unchanged; minScore / scoreA / scoreAp keep their defaults.
+//    (MODULE 18A)
+//
 // V11-01 P0 · THE TP LADDER WAS MEASURED AGAINST A DIFFERENT STOP THAN THE RR
 //    GATE. f_v5Gate (M17B) ran the target engine against the highest-ranked RAW
 //    candidate's stop — machine > model > engine — but MODULE 19 draws and
@@ -490,7 +525,7 @@ tierMode = input.string("A and above", "Show signal tiers (entry level)",
      options = ["A+ only", "A and above", "B and above", "All (incl. C)"], group = grpQ,
      tooltip = "v10 ENTRY LEVELS. C = bare technical trigger · B = LEVEL 1 AGGRESSIVE (POI touch + rejection, or trigger + liquidity) · A = LEVEL 2 CONFIRMED (liquidity + POI + causal shift + displacement + retest + execution) · A+ = LEVEL 3 INSTITUTIONAL (A + HTF + core session + strong sweep + shift-leg FVG + first retest + clean target + correct premium/discount). Default A and above = Level 2+.")
 minScore = input.int(60, "Min entry quality score (0 = off) — v10", minval = 0, maxval = 100, group = grpQ,
-     tooltip = "v10: the 0–100 ENTRY QUALITY SCORE (liquidity 15 · HTF 15 · POI 15 · shift 15 · displacement 10 · FVG 10 · retest 10 · target 5 · session 5). Below this = NO TRADE for every producer, the machine included. The score can only REMOVE a tier (A needs ≥ scoreA, A+ ≥ scoreAp); the hard gates stay hard.")
+     tooltip = "v12: the 0–100 ENTRY QUALITY SCORE, one capped contribution per EVIDENCE FAMILY — liquidity 20 · structure (shift + displacement) 20 · location (POI + imbalance) 20 · entry (retest + execution) 20 · context (HTF + session) 10 · RR/path 10. The caps stop one causal chain from being paid several times. Below this = NO TRADE for every producer, the machine included. The score can only REMOVE a tier (A needs ≥ scoreA, A+ ≥ scoreAp); the hard gates stay hard.")
 masterCd = input.int(10, "Global same-direction cooldown (bars, 0 = off)", minval = 0, group = grpQ)
 useRegime = input.bool(true, "Suppress entries in CHOP regime", group = grpQ,
      tooltip = "Exception: an INSTITUTIONAL-grade sweep (quality 4) may still arm a setup inside chop — the classic liquidity-reversal case.")
@@ -4047,47 +4082,65 @@ anyLong  = sigMCLong  or sigSDLong  or sig3Long  or sig4Long  or sigTLLong  or s
 anyShort = sigMCShort or sigSDShort or sig3Short or sig4Short or sigTLShort or sigCRTShort or sigTBSShort or sigHCrtShort or sigHTbsShort or sigFEMShort or sigP7Short
 
 // ═════════════════════════════════════════════════════════════════ MODULE 18A
-// v10 (V10-10): ENTRY QUALITY SCORE 0–100 — liquidity 15 · HTF 15 · POI 15 ·
-// shift 15 · displacement 10 · FVG 10 · retest 10 · target 5 · session 5.
-// Machine candidates score from the machine's OWN memory (its arming sweep, its
-// shift, its anchor, its visit); engine candidates from the live series and the
-// shift lineage. The score can only REMOVE a tier (A ≥ scoreA, A+ ≥ scoreAp)
-// and < minScore is NO TRADE — it never promotes: no bucket is reachable without
-// the hard gate behind it (a random impulse scores 0 displacement, a 2nd visit
-// scores 3 retest, a WEAK zone loses 8 POI points, a stale shift × 0.3).
+// v12 (V12-02, P0-02): ENTRY QUALITY SCORE 0–100 BY CAPPED EVIDENCE FAMILY.
+// v10 summed nine independent buckets — liquidity 15 · HTF 15 · POI 15 · shift
+// 15 · displacement 10 · FVG 10 · retest 10 · target 5 · session 5 — and that
+// arithmetic treats correlated evidence as independent confirmation. ONE sweep
+// → MSS → displacement → FVG event is a single causal story, but it paid the
+// shift bucket AND the displacement bucket (25) and the POI bucket AND the FVG
+// bucket (25): half the score for one thing that happened. The same defect made
+// the label look strongest exactly when several producers were descendants of
+// the same event ("confluence by coincidence"). Evidence is now grouped into
+// families, and EACH FAMILY HAS ONE MAXIMUM CONTRIBUTION:
+//   LIQUIDITY 20  the sweep / engineered pool that justifies the trade
+//   STRUCTURE 20  the shift AND the displacement that carried it (one chain)
+//   LOCATION  20  where price is: the POI AND the imbalance it sits in
+//   ENTRY     20  the retest — visit · dwell · depth — AND execution quality
+//   CONTEXT   10  HTF alignment · location · correlation · session
+//   RR / PATH 10  a real target with an acceptable multiple and a clean path
+// A single causal chain can now earn at most LIQUIDITY + STRUCTURE + LOCATION
+// (60) and still needs an independent entry, context and target to clear the
+// A / A+ floors. Machine candidates score from the machine's OWN memory (its
+// arming sweep, its shift, its anchor, its visit); engine candidates from the
+// live series and the shift lineage. The score can only REMOVE a tier
+// (A ≥ scoreA, A+ ≥ scoreAp) and < minScore is NO TRADE — it never promotes: no
+// bucket is reachable without the hard gate behind it (a random impulse scores
+// 0 displacement, a 2nd visit scores 3 retest, a WEAK zone loses 8 POI points,
+// a stale shift × 0.3).
 // ═════════════════════════════════════════════════════════════════════════
 f_score(bool isL) =>
     bool mc   = isL ? sigMCLong : sigMCShort
-    // LIQUIDITY 15 — sweep in play (machine: its arming sweep) 8 · grade ≥ 3 +4 · type ≥ 2 +3
+    // LIQUIDITY family, cap 20 — sweep in play (machine: its arming sweep) 10 · grade ≥ 3 +5 · type ≥ 2 +5
     bool liq  = mc or (isL ? sslInPlay : bslInPlay)
     int  lq   = mc ? (isL ? suLQual : suSQual) : (isL ? lastSslQual : lastBslQual)
     int  lt   = mc ? (isL ? suLType : suSType) : (isL ? lastSslType : lastBslType)
-    int  sLiq = liq ? 8 + (lq >= 3 ? 4 : 0) + (lt >= 2 ? 3 : 0) : 0
-    // HTF 15 — alignment 0–4 → 0 / 4 / 8 / 11 / 13 · HTF location +2 · bias conflict −5 · correlation +2 / −3
+    int  sLiq = liq ? 10 + (lq >= 3 ? 5 : 0) + (lt >= 2 ? 5 : 0) : 0
+    // CONTEXT family (with session), raw 0–20 → halved to a cap of 10 —
+    // alignment 0–4 → 0 / 4 / 8 / 11 / 13 · HTF location +2 · bias conflict −5 · correlation +2 / −3
     int  aln  = isL ? htfAlnL : htfAlnS
     int  sHtf = aln >= 4 ? 13 : aln == 3 ? 11 : aln == 2 ? 8 : aln == 1 ? 4 : 0
     sHtf += (isL ? htfLocL : htfLocS) ? 2 : 0
     sHtf -= (isL ? htfB < 0 : htfB > 0) ? 5 : 0
     sHtf += (isL ? corrB > 0 : corrB < 0) ? 2 : (isL ? corrB < 0 : corrB > 0) ? -3 : 0
     sHtf := math.max(0, math.min(15, sHtf))
-    // POI 15 — tier 1 HTF POI 15 · 2 OB / shift-leg FVG 12 · 3 OTE / QM / BPR 8 · 4 generic zone 5 · none 0; life 1st touch −2 · mitigated −4 · weak −8
+    // LOCATION family (with FVG), cap 20 — POI: tier 1 HTF POI 15 · 2 OB / shift-leg FVG 12 · 3 OTE / QM / BPR 8 · 4 generic zone 5 · none 0; life 1st touch −2 · mitigated −4 · weak −8
     int  pt   = mc ? (isL ? suLPoiT : suSPoiT) : (isL ? poiTL : poiTS)
     int  lf   = mc ? 0 : (isL ? (inDemand ? nbLife : 0) : (inSupply ? nsLife : 0))
     int  sPoi = pt == 1 ? 15 : pt == 2 ? 12 : pt == 3 ? 8 : pt == 4 ? 5 : 0
     sPoi := math.max(0, sPoi - (lf == 1 ? 2 : lf == 2 ? 4 : lf >= 3 ? 8 : 0))
-    // SHIFT 15 — grade 3 → 15 · 2 → 11 · 1 (CISD / CHoCH without a quality sweep) → 5, × age (≤ 1 bar 1.0 · A+ 0.85 · A 0.6 · stale 0.3)
+    // STRUCTURE family (with displacement), cap 20 — shift: grade 3 → 15 · 2 → 11 · 1 (CISD / CHoCH without a quality sweep) → 5, × age (≤ 1 bar 1.0 · A+ 0.85 · A 0.6 · stale 0.3)
     int  mq   = mc ? (isL ? suLMssQ : suSMssQ) : (isL ? shUpQ : shDnQ)
     int  ag   = mc ? f_ageQ(isL ? suLShiftBar : suSShiftBar) : (isL ? shAgeQL : shAgeQS)
     float agF = ag == 3 ? 1.0 : ag == 2 ? 0.85 : ag == 1 ? 0.6 : 0.3
     bool  hasSh = mc ? mq > 0 : not na(isL ? shUpBar : shDnBar)
     int  sMss = hasSh ? math.round((mq == 3 ? 15 : mq == 2 ? 11 : 5) * agF) : 0
-    // DISPLACEMENT 10 — the shift's OWN displacement 3 → 10 · 2 → 7 · 1 → 3; an unrelated impulse scores 0
+    // STRUCTURE family — displacement: the shift's OWN displacement 3 → 10 · 2 → 7 · 1 → 3; an unrelated impulse scores 0
     int  dq   = mc ? (isL ? suLDispQ : suSDispQ) : (not na(isL ? shUpDispBar : shDnDispBar) ? (isL ? shUpDispQ : shDnDispQ) : 0)
     int  sDsp = dq >= 3 ? 10 : dq == 2 ? 7 : dq == 1 ? 3 : 0
-    // FVG 10 — retesting the shift-leg FVG (machine: its anchor FVG) 10 · a zone anchor / another entry-grade FVG 4
+    // LOCATION family — imbalance: retesting the shift-leg FVG (machine: its anchor FVG) 10 · a zone anchor / another entry-grade FVG 4
     bool shFvg = mc ? not na(isL ? suLFvgBar : suSFvgBar) : (isL ? inShFvgL : inShFvgS)
     int  sFvg = shFvg ? 10 : (mc or (isL ? p6InFvgL : p6InFvgS)) ? 4 : 0
-    // RETEST 10 — machine: first visit 6 (later 3) · dwell ≤ 2 +2 / 3 +1 · depth optimal +2 / shallow +1 / deep 0; engines: a POI retest this bar 5
+    // ENTRY family (with execution quality), cap 20 — retest: machine: first visit 6 (later 3) · dwell ≤ 2 +2 / 3 +1 · depth optimal +2 / shallow +1 / deep 0; engines: a POI retest this bar 5
     int  sRet = 0
     if mc
         int   dw = isL ? suLDwell : suSDwell
@@ -4095,11 +4148,27 @@ f_score(bool isL) =>
         sRet := ((isL ? suLVisit : suSVisit) == 1 ? 6 : 3) + (dw <= 2 ? 2 : dw == 3 ? 1 : 0) + (dp >= retDepthLo and dp <= retDepthHi ? 2 : dp < retDepthLo ? 1 : 0)
     else
         sRet := (isL ? retestLong or p6InFvgL or p6InObL : retestShort or p6InFvgS or p6InObS) ? 5 : 0
-    // TARGET 5 — real TP2 with an acceptable RR and a clean path 5 · acceptable RR 3
-    int  sTgt = (isL ? v5RrOkL : v5RrOkS) ? ((isL ? pathL2 : pathS2) >= V8_PATH_AP ? 5 : 3) : 0
-    // SESSION 5 — core 5 · PM 3 · Asia / off-hours 0
+    // ENTRY family — execution quality of the confirmation candle, 0–100 → 0–10.
+    // This is the one part of the entry that is NOT a descendant of the sweep:
+    // the candle either did the work (body · close location · reclaim · wick) or
+    // it did not, whatever the narrative behind it says.
+    int  sExe = math.round((isL ? execQL : execQS) / 10.0)
+    // RR / PATH family, cap 10 — real TP2 at an acceptable multiple 6 · clean path to it 10
+    int  sTgt = (isL ? v5RrOkL : v5RrOkS) ? ((isL ? pathL2 : pathS2) >= V8_PATH_AP ? 10 : 6) : 0
+    // CONTEXT family — session: core 5 · PM 3 · Asia / off-hours 0
     int  sSes = sesQ == 4 ? 5 : sesQ == 3 ? 3 : 0
-    sLiq + sHtf + sPoi + sMss + sDsp + sFvg + sRet + sTgt + sSes
+    // v12 (V12-02): one maximum contribution per evidence family. The caps are
+    // what stops a single sweep → shift → displacement → FVG chain from being
+    // paid four times; the sums inside a family stay as they were so the
+    // relative grading within a family is unchanged.
+    int  fLiq = math.min(20, sLiq)
+    int  fStr = math.min(20, sMss + sDsp)
+    int  fLoc = math.min(20, sPoi + sFvg)
+    int  fEnt = math.min(20, sRet + sExe)
+    int  cRaw = math.round((sHtf + sSes) / 2.0)              // math.min(int, float) would be a float
+    int  fCtx = math.min(10, cRaw)
+    int  fRr  = math.min(10, sTgt)
+    fLiq + fStr + fLoc + fEnt + fCtx + fRr
 scoreLong  = f_score(true)
 scoreShort = f_score(false)
 // grade from the score — 4 ≥ scoreAp · 3 ≥ scoreA · 2 ≥ minScore · 0 = NO TRADE (minScore 0 = floor off, the cap still applies)
@@ -4117,6 +4186,34 @@ anyShort := anyShort and scoreOkS
 // else the engine ladder. A+ is withdrawn when the RR target is synthetic, when
 // the other side ALSO raised a raw candidate (directional conflict, §9) or in
 // the post-news state.
+// v12 (V12-01, P0-01): FINAL RR / PATH VALIDATION — the gate must judge the
+// trade that is actually taken. f_v5Gate (M17B) runs BEFORE the context gates,
+// so f_slPick there reads the RAW machine/model flags: when the machine raised
+// a wide stop and then failed its own gate (tier · chase · pd), an engine won
+// the bar with a completely different risk, and the RR that licensed the entry
+// belonged to a candidate that was already refused. V11-01 re-measured the
+// DRAWN ladder against the accepted stop but deliberately left the gate alone,
+// so the mismatch survived as a licensing bug. The pick is redone here against
+// the POST-gate producer flags, the target engine is re-run against that stop,
+// and a final RR / blocked-path failure VETOES the direction — before the tier
+// ladder, the clash, the cooldown stamps and the POI consumption. f_tgt is a
+// pure function of (side, entry, stop); MODULE 19 now reuses these numbers
+// instead of calling it a third time, so gate · label · alert · tracker can no
+// longer disagree by construction.
+sigSLLong  := f_slPick(sigMCLong,  sigP7Long,  slMcL, slP7L, slEngL)
+sigSLShort := f_slPick(sigMCShort, sigP7Short, slMcS, slP7S, slEngS)
+finSlL = not na(sigSLLong)  and sigSLLong  < close ? sigSLLong  : math.min(low,  low[1])  - SL_PAD_ATR * atr
+finSlS = not na(sigSLShort) and sigSLShort > close ? sigSLShort : math.max(high, high[1]) + SL_PAD_ATR * atr
+[fT1L, fT2L, fT3L, fRrL, fBlkL, fShL] = f_tgt(true,  close, finSlL)
+[fT1S, fT2S, fT3S, fRrS, fBlkS, fShS] = f_tgt(false, close, finSlS)
+fRrOkL = not na(fRrL) and not fBlkL and (v5MinRr == 0 or fRrL >= v5MinRr)
+fRrOkS = not na(fRrS) and not fBlkS and (v5MinRr == 0 or fRrS >= v5MinRr)
+finVetoL = anyLong  and not fRrOkL
+finVetoS = anyShort and not fRrOkS
+finWhyL = not finVetoL ? "" : fBlkL ? "final path blocked" : na(fRrL) ? "final: no target" : "final RR " + str.tostring(math.round(fRrL * 10) / 10) + " < " + str.tostring(v5MinRr)
+finWhyS = not finVetoS ? "" : fBlkS ? "final path blocked" : na(fRrS) ? "final: no target" : "final RR " + str.tostring(math.round(fRrS * 10) / 10) + " < " + str.tostring(v5MinRr)
+anyLong  := anyLong  and fRrOkL
+anyShort := anyShort and fRrOkS
 clsL = sigMCLong  ? 0 : sigP7Long  and p7NarL ? 1 : 2
 clsS = sigMCShort ? 0 : sigP7Short and p7NarS ? 1 : 2
 finTierL = sigMCLong  ? mcTierL : tierLong
@@ -4124,9 +4221,9 @@ finTierS = sigMCShort ? mcTierS : tierShort
 // v10 (V10-10): the score can only REMOVE a tier
 finTierL := math.min(finTierL, math.max(scTierL, 1))
 finTierS := math.min(finTierS, math.max(scTierS, 1))
-if finTierL == 4 and (na(v5RrL) or rawS or newsState == 2)
+if finTierL == 4 and (na(fRrL) or fShL or rawS or newsState == 2)
     finTierL := 3
-if finTierS == 4 and (na(v5RrS) or rawL or newsState == 2)
+if finTierS == 4 and (na(fRrS) or fShS or rawL or newsState == 2)
     finTierS := 3
 // a candidate graded BELOW the tier filter by the score is refused (the machine reads minRank, engines the regime-raised floor)
 rankL = sigMCLong  ? minRank : v5RankL
@@ -4161,7 +4258,7 @@ clsTxtS = contS ? "CONT" : "REV"
 // says WHY the ladder stopped below the floor (no external shift · no causal
 // displacement · stale shift · POI weak / dead · 2nd visit); the machine's own
 // reasons (path blocked · no target · RR · chase · tier) ride mcWhy.
-f_rej(bool bias, bool kz, bool news, bool chop, bool cd, bool tier, bool flr, string why, bool pd, bool clash, bool pu, bool sc, int score, bool rk, bool mc, string mcWhy, string cause) =>
+f_rej(bool bias, bool kz, bool news, bool chop, bool cd, bool tier, bool flr, string why, bool pd, bool clash, bool pu, bool sc, int score, bool rk, bool mc, string mcWhy, string cause, string finWhy) =>
     string w = ""
     w := f_p5Add(w, not cfgOK, "config: HTF ≤ chart")
     w := f_p5Add(w, not bias,  "HTF conflict")
@@ -4177,6 +4274,7 @@ f_rej(bool bias, bool kz, bool news, bool chop, bool cd, bool tier, bool flr, st
     w := f_p5Add(w, not pu,    "POI used")
     w := f_p5Add(w, not sc,    "score " + str.tostring(score) + " < " + str.tostring(minScore))
     w := f_p5Add(w, sc and not rk, "score-graded below the tier filter")
+    w := f_p5Add(w, finWhy != "", finWhy)                    // v12 (V12-01)
     w == "" ? "gated" : w
 f_cause(bool isL) =>
     string c = ""
@@ -4188,9 +4286,9 @@ f_cause(bool isL) =>
     c := f_p5Add(c, isL ? not sslInPlay : not bslInPlay, "no liquidity event")
     c
 if rawL and not anyLong
-    rejL := f_rej(biasFilter == "Off" or filtBias >= 0 or htfRevL, kzOK, newsOK, chopOKL, longCdOK,  tierLong  >= v5RankL, v5OkL, v5WhyL, pdOkL, v5Clash, poiFreeL, scoreOkL, scoreLong,  finTierL >= rankL, mcRawL, mcWhyL, f_cause(true))
+    rejL := f_rej(biasFilter == "Off" or filtBias >= 0 or htfRevL, kzOK, newsOK, chopOKL, longCdOK,  tierLong  >= v5RankL, v5OkL, v5WhyL, pdOkL, v5Clash, poiFreeL, scoreOkL, scoreLong,  finTierL >= rankL, mcRawL, mcWhyL, f_cause(true),  finWhyL)
 if rawS and not anyShort
-    rejS := f_rej(biasFilter == "Off" or filtBias <= 0 or htfRevS, kzOK, newsOK, chopOKS, shortCdOK, tierShort >= v5RankS, v5OkS, v5WhyS, pdOkS, v5Clash, poiFreeS, scoreOkS, scoreShort, finTierS >= rankS, mcRawS, mcWhyS, f_cause(false))
+    rejS := f_rej(biasFilter == "Off" or filtBias <= 0 or htfRevS, kzOK, newsOK, chopOKS, shortCdOK, tierShort >= v5RankS, v5OkS, v5WhyS, pdOkS, v5Clash, poiFreeS, scoreOkS, scoreShort, finTierS >= rankS, mcRawS, mcWhyS, f_cause(false), finWhyS)
 // v10: the machine's verdict, read by f_machine on the bar after its entry
 mcAccL := sigMCLong  and anyLong
 mcAccS := sigMCShort and anyShort
@@ -4199,9 +4297,9 @@ if anyLong
 if anyShort
     rejS := "—"
 
-// v8 (V8-07): the drawn / tracked stop belongs to the ACCEPTED producer
-sigSLLong  := f_slPick(sigMCLong,  sigP7Long,  slMcL, slP7L, slEngL)
-sigSLShort := f_slPick(sigMCShort, sigP7Short, slMcS, slP7S, slEngS)
+// v8 (V8-07): the drawn / tracked stop belongs to the ACCEPTED producer — the
+// pick moved UP into the final-RR block above (V12-01); sigSLLong / sigSLShort
+// already hold it here.
 // stamp cooldowns from FINAL signal state only
 if sigCRTLong and anyLong
     lastCrtLongBar := bar_index
@@ -4294,7 +4392,12 @@ if (anyLong or anyShort) and confirmed
         slP := not na(sigSLLong) and sigSLLong < entryP ? sigSLLong : math.min(low, low[1]) - SL_PAD_ATR * atr
     else
         slP := not na(sigSLShort) and sigSLShort > entryP ? sigSLShort : math.max(high, high[1]) + SL_PAD_ATR * atr
-// v11 (V11-01): RE-RUN THE TARGET ENGINE AGAINST THE STOP THE TRADE ACTUALLY USES.
+// v12 (V12-01): the ladder IS the validated ladder. V11-01 re-ran f_tgt here
+// against the accepted stop while the GATE still judged the raw candidate's;
+// the final-RR stage in MODULE 18 now runs that same call BEFORE the signal is
+// licensed, so the rows below simply read its result. Same numbers in the gate,
+// the E/SL/TP lines, the label, the alert and the tracker — no third call.
+// The original V11-01 note, kept because it explains what the mismatch was:
 // f_v5Gate (M17B) measured f_tgt against the highest-ranked RAW candidate's stop
 // — f_slPick runs machine > model > engine BEFORE the gates — while MODULE 19
 // draws, tracks and alerts on the ACCEPTED producer's stop. When the machine
@@ -4305,7 +4408,12 @@ if (anyLong or anyShort) and confirmed
 // re-running it here costs one call and no state, and na inputs propagate to na
 // targets exactly as the rows already handle. The GATE is deliberately NOT
 // changed — it must judge the candidate it ranked, not the one that won.
-[ldT1, ldT2, ldT3, ldRr, ldBlk, ldSh] = f_tgt(anyLong, entryP, slP)
+ldT1 = anyLong ? fT1L : fT1S
+ldT2 = anyLong ? fT2L : fT2S
+ldT3 = anyLong ? fT3L : fT3S
+ldRr = anyLong ? fRrL : fRrS
+ldSh = anyLong ? fShL : fShS
+ldBlk = anyLong ? fBlkL : fBlkS       // v12: always false at a signal — the final gate refuses a blocked path
 if (anyLong or anyShort) and confirmed
     float risk = math.abs(entryP - slP)
     // v10 (V10-04): the ladder is the SAME target engine the gate used (f_tgt, M17B):
@@ -4444,7 +4552,7 @@ f_jour(bool isL) =>
      "\nchain: liq " + f_ageTxt(mc ? (isL ? suLArmBar : suSArmBar) : (isL ? lastSslBar : lastBslBar)) + " → shift " + f_ageTxt(shB) + " q" + str.tostring(mq) + " → disp q" + str.tostring(dq) + (dq == 0 ? " (none causal)" : "") + " → FVG " + f_ageTxt(fvB) + (na(fvB) ? " (zone anchor)" : "") +
      " → retest #" + str.tostring(mc ? (isL ? suLVisit : suSVisit) : 1) + (mc ? " dwell " + str.tostring(isL ? suLDwell : suSDwell) + "b depth " + str.tostring((isL ? suLDepth : suSDepth) * 100, "#") + "%" : "") +
      "\nPOI tier " + str.tostring(mc ? (isL ? suLPoiT : suSPoiT) : (isL ? poiTL : poiTS)) + " @ " + str.tostring(isL ? poiTopL : poiTopS, format.mintick) + " · life " + f_lifeTxt(lf) + " · exec " + str.tostring(isL ? execQL : execQS) + " · path " + str.tostring(isL ? pathL2 : pathS2) +
-     "\nscore " + str.tostring(isL ? scoreLong : scoreShort) + " · L" + str.tostring(isL ? lvlL : lvlS) + " · RR " + (na(ldRr) ? "—" : str.tostring(math.round(ldRr * 10) / 10)) + " (gate " + (na(isL ? v5RrL : v5RrS) ? "—" : str.tostring(math.round((isL ? v5RrL : v5RrS) * 10) / 10)) + ")"
+     "\nscore " + str.tostring(isL ? scoreLong : scoreShort) + " · L" + str.tostring(isL ? lvlL : lvlS) + " · RR " + (na(ldRr) ? "—" : str.tostring(math.round(ldRr * 10) / 10)) + " (cand " + (na(isL ? v5RrL : v5RrS) ? "—" : str.tostring(math.round((isL ? v5RrL : v5RrS) * 10) / 10)) + ")"   // v12: RR is the FINAL gate figure; `cand` is what the ranked raw candidate proposed
 f_v4SigLabels() =>
     string longTxt = f_sigTxt(sigMCLong, sigSDLong, sig3Long, sig4Long, sigTLLong, sigCRTLong, sigTBSLong, sigHCrtLong, sigHTbsLong, sigFEMLong, sigP7Long, f_tierTxt(mcTierL), "Demand", inOTEbuy ? " +OTE" : "", p7TxtL)
     string shortTxt = f_sigTxt(sigMCShort, sigSDShort, sig3Short, sig4Short, sigTLShort, sigCRTShort, sigTBSShort, sigHCrtShort, sigHTbsShort, sigFEMShort, sigP7Short, f_tierTxt(mcTierS), "Supply", inOTEsell ? " +OTE" : "", p7TxtS)
