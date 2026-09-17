@@ -10,3 +10,5 @@
 | v8.0.1 funnel (after cut) | 2026-09-17 | compiles, est. ~98k | est. ~2k | cut 3 panel rows + 23 tooltips + dead vars · headroom thin — any new feature must cut first |
 | v8.0.3 funnel+MSS (before cut) | 2026-09-17 | **100,602** | −346 | cut opening lines, run chips, AMD/Judas, sesStory, Targets row → compiles |
 | v8.0.5 | 2026-09-17 | compile pending | est. ~0–500 | +MSS fallback loop, +array.sum, −7 helpers · net chars +28 |
+| v8.0.5 | 2026-09-17 | compiles | unknown, > 0 | user: XAU 5m OK |
+| v8.0.6 | 2026-09-17 | compile pending | est. thin | +fb loop always, +2nd kill reason · net chars +~400 |

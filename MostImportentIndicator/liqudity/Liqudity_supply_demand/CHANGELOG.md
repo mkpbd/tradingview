@@ -119,3 +119,8 @@
 - dispBodyAtr 1.3 → 1.0.
 - Gates row now shows total fails (`fail N: top ×n`) — ties between gates were invisible.
 - Cut 7 unused helpers (f_kindTxt, f_tick, f_tmTxt, f_rqTxt, f_biasTxt, f_paTxt, f_roomTxt) to pay for the MSS loop.
+
+## v8.0.6 — MSS nearest level + break definition, 2nd kill reason (V8_FULL.pine)
+- XAU 5m after v8.0.5: P→M unchanged at 21% (65→14). Two causes in the stage-4→5 code: (a) `st` fired only on the exact cross bar — a weak cross bar lost the MSS for good; (b) a confirmed pivot inside the window always won over the 8-bar-into-raid extreme, so the level to break was the far pivot, not the nearest lower-high/higher-low.
+- Level = NEAREST of the confirmed internal pivot and the MSS_STH_LOOK extreme (long: lower, short: higher). Break = close through it with `min(close[1], open)` on the wrong side (cross, or open-below/close-above) and a displaced body.
+- Funnel row shows the top TWO kill reasons (f_topIx takes a skip index) — the P→M kill was hidden behind "setup expired".
