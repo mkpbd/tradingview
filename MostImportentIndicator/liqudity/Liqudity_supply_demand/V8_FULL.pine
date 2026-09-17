@@ -51,7 +51,6 @@ showStruct = input.bool(true,  "Label BOS / CHoCH", group = grpM)
 structFilt = input.bool(false, "Filter signals by structure direction", group = grpM)
 structDisp = input.float(0.5, "Structural break body ≥ ATR × (0 = any close)", step = 0.1, minval = 0, group = grpM)
 showProt   = input.bool(true,  "Plot protected swing (external)", group = grpM)
-showRuns   = input.bool(false, "Mark weak close-throughs as runs", group = grpM)
 
 // ── ④ Liquidity ───────────────────────────────────────────────────────────
 grpLQ        = "④ Liquidity"
@@ -185,7 +184,6 @@ paintKZ   = input.bool(false, "Shade killzones", group = grpK)
 asiaSes   = input.session("2000-0000", "Asia", group = grpK)
 lonSes    = input.session("0200-0500", "London", group = grpK)
 nySes     = input.session("0700-1000", "New York AM", group = grpK)
-showOpens = input.bool(true, "00:00 midnight + 08:30 open lines", group = grpK)
 
 // ── ⑭ Silver Bullet (1.txt arming path + 2..txt filter) ───────────────────
 grpSB        = "⑭ Silver Bullet"
@@ -824,12 +822,6 @@ if showStruct and confirmed
         f_chip(true, chochUp ? "iCHoCH" : "ibos", color.new(color.gray, 35), color.new(COL_BULL, 0), mkSize)
     if bosDn or chochDn
         f_chip(false, chochDn ? "iCHoCH" : "ibos", color.new(color.gray, 35), color.new(COL_BEAR, 0), mkSize)
-if showRuns and confirmed
-    if runUp or eRunUp
-        f_chip(true, "run", color.new(COL_NEU, 45), color.white, mkSize)
-    if runDn or eRunDn
-        f_chip(false, "run", color.new(COL_NEU, 45), color.white, mkSize)
-
 // ═══════════════════════════════════════════════════════════ M5 · SESSIONS · KILLZONES · SILVER BULLET CLOCK
 // Session state is computed ALWAYS; display toggles only affect drawing.
 f_inSes(simple string ses) =>
@@ -881,10 +873,6 @@ sbActive = sbOn and sbWinNow != SBW_NONE          // inside a window (filter rol
 sbCtx    = sbArmPath and sbCtxWin != SBW_NONE      // inside, or in the arming grace (arming role)
 sbGate   = not sbOnlyIn or not timeframe.isintraday or inSB
 
-sbEndMinNow = sbWinNow == SBW_LO ? sbEndLO : sbWinNow == SBW_AM ? sbEndAM : sbWinNow == SBW_PM ? sbEndPM : na
-sbRemMin    = sbActive and not na(sbEndMinNow) and not na(sbNowMin) ? math.max(0, sbEndMinNow - sbNowMin) : na
-sbRemBar    = na(sbRemMin) ? na : math.floor(sbRemMin / sbTfMin)
-
 // per-window CLOSE edges (closed bars) — the exit clock and the window-close kill
 sbEndLOEvt = sbOn and confirmed and not inSbLO and inSbLO[1]
 sbEndAMEvt = sbOn and confirmed and not inSbAM and inSbAM[1]
@@ -894,32 +882,6 @@ f_sbEndEvt(int w) => w == SBW_LO ? sbEndLOEvt : w == SBW_AM ? sbEndAMEvt : w == 
 // NY AM carries the most weight; London demands the strongest raid instead
 sbWinPts  = sbCtxWin == SBW_AM ? 6 : sbCtxWin == SBW_PM ? 5 : sbCtxWin == SBW_LO ? 4 : 0
 sbMinRq   = sbCtxWin == SBW_LO ? sbQualLO : sbCtxWin == SBW_AM ? sbQualAM : sbCtxWin == SBW_PM ? sbQualPM : RQ_A
-
-// ---- opening prices: 00:00 midnight + 08:30 NY (drawing only) ----------------------
-inMidWin = f_inSes("0000-0005")
-in830Win = f_inSes("0830-0835")
-newMid   = inMidWin and not inMidWin[1]
-new830   = in830Win and not in830Win[1]
-var line  midLn      = na
-var label midLb      = na
-var line  ny830Ln    = na
-var label ny830Lb    = na
-var int   lastMidBar = na
-var int   last830Bar = na
-if timeframe.isintraday and newMid and (na(lastMidBar) or lastMidBar != bar_index)
-    lastMidBar := bar_index
-    if showOpens
-        line.delete(midLn)
-        label.delete(midLb)
-        midLn := line.new(bar_index, open, bar_index + 1, open, color = color.new(color.white, 45), style = line.style_dotted, extend = extend.right)
-        midLb := label.new(bar_index, open, "00:00", style = label.style_label_left, color = color.new(color.gray, 45), textcolor = color.white, size = infoSize)
-if timeframe.isintraday and new830 and (na(last830Bar) or last830Bar != bar_index)
-    last830Bar := bar_index
-    if showOpens
-        line.delete(ny830Ln)
-        label.delete(ny830Lb)
-        ny830Ln := line.new(bar_index, open, bar_index + 1, open, color = color.new(color.orange, 45), style = line.style_dotted, extend = extend.right)
-        ny830Lb := label.new(bar_index, open, "08:30", style = label.style_label_left, color = color.new(color.orange, 45), textcolor = color.white, size = infoSize)
 
 // ---- session extremes: tracked live, FROZEN on the session close ------------------------
 // The frozen level is resting liquidity and is handed to the pool registry (M7).
@@ -2326,23 +2288,6 @@ atrRel = atr / math.max(nz(ta.sma(atr, 50), atrSafe), syminfo.mintick)
 regime = congMeasured ? RG_CHOP : atrRel >= 1.4 ? RG_EXP :
      extDir != 0 and rangeOK and (extDir > 0 ? pdPos >= 0.5 : pdPos <= 0.5) ? RG_TREND : RG_RANGE
 
-// ---- AMD / Judas — CONTEXT descriptors on the liquidity event, never a trigger --------------------
-amdKz    = timeframe.isintraday and (inLon or inNY or inSB)
-amdSes   = anyLoKind == PK_SES or anyHiKind == PK_SES or anyLoKind == PK_PD or anyHiKind == PK_PD
-amdManip = amdKz and amdSes and ((sslInPlay and f_recent(anyLoBar, 8)) or (bslInPlay and f_recent(anyHiBar, 8)))
-amdDist  = amdKz and not amdManip and (recentDispUp or recentDispDn) and (recentMssUp or recentMssDn)
-judasL   = amdManip and sslInPlay and f_recent(anyLoBar, 8) and anyLoRq >= RQ_B and f_poolState(anyLoPool) == PS_REACT
-judasS   = amdManip and bslInPlay and f_recent(anyHiBar, 8) and anyHiRq >= RQ_B and f_poolState(anyHiPool) == PS_REACT
-if confirmed
-    if judasL
-        f_evTag(anyLoPool, "JUDAS")
-    if judasS
-        f_evTag(anyHiPool, "JUDAS")
-    if run.cls == RN_EXH and run.dir == -1
-        f_evTag(anyLoPool, "RUN EXH")
-    if run.cls == RN_EXH and run.dir == 1
-        f_evTag(anyHiPool, "RUN EXH")
-
 // ---- V8 · PENALTY COUNTER — the five soft downgrades are COUNTED, then capped ----------------------
 // room · congestion · run-fade · HTF conflict · regime policy. Hard modes are gates in M16, not here.
 f_penalty(bool roomBad, bool cong, bool runFade, bool hconf, bool regDown) =>
@@ -2962,8 +2907,6 @@ f_sideStage(array<Setup> arr) =>
 // nothing is read from a global event memory. RANKS what already passed the hard gates.
 //   CONTEXT 25 · LIQUIDITY 25 · POI 20 · TRIGGER 20 · EXECUTION 10 · descriptors ≤ 6 · SB context ≤ 15 · clamp 100
 sesPts = not timeframe.isintraday ? 4 : inSB or inNY or inLon ? 4 : inAsia ? 2 : 0
-f_sesStory(string tag, int kind) =>
-    timeframe.isintraday and tag != "" and ((inLon and str.contains(tag, "Asia")) or ((inNY or inSbAM or inSbPM) and str.contains(tag, "Lon")) or (inSB and kind == PK_SES) or ((inLon or inNY) and kind == PK_PD))
 
 f_score(bool isL, int tier, bool isHtfPoi, bool fresh, int retQ, bool rejOk, int rq, int rkind, int touches, bool rev, bool mssCh, bool mssOk, int dispQ, int mssB, int dispB, float fvgAtr, bool story, int descN, bool cong, bool induced, int oteQ, bool atHtfArr, bool dispOut, int sbW) =>
     int ctx = (isL ? htfDir > 0 : htfDir < 0) ? 10 : rev ? 4 : 0
@@ -3313,8 +3256,8 @@ rrL   = (tp2L - entryPxL) / riskL
 rrS   = (entryPxS - tp2S) / riskS
 
 // ---- score · regime policy · grade ----------------------------------------------------------------
-scoreLong  = f_score(true,  tierL, prodL == PR_FEM, freshL, retQL, zoneBullConf or bullPin, rqL, rkindL, f_poolTouch(evPoolL), revL, mssChL, mssOkL, dispQL, mssBL, dispBL, fvgAtrL, prodL > 0 and f_sesStory(evTagL, rkindL), f_poolDescN(evPoolL), congMeasured, indL, oteQL, atHtfPoiL, prodL <= PR_MACH and f_setupDispOut(winL), sbWL)
-scoreShort = f_score(false, tierS, prodS == PR_FEM, freshS, retQS, zoneBearConf or bearPin, rqS, rkindS, f_poolTouch(evPoolS), revS, mssChS, mssOkS, dispQS, mssBS, dispBS, fvgAtrS, prodS > 0 and f_sesStory(evTagS, rkindS), f_poolDescN(evPoolS), congMeasured, indS, oteQS, atHtfPoiS, prodS <= PR_MACH and f_setupDispOut(winS), sbWS)
+scoreLong  = f_score(true,  tierL, prodL == PR_FEM, freshL, retQL, zoneBullConf or bullPin, rqL, rkindL, f_poolTouch(evPoolL), revL, mssChL, mssOkL, dispQL, mssBL, dispBL, fvgAtrL, false, f_poolDescN(evPoolL), congMeasured, indL, oteQL, atHtfPoiL, prodL <= PR_MACH and f_setupDispOut(winL), sbWL)
+scoreShort = f_score(false, tierS, prodS == PR_FEM, freshS, retQS, zoneBearConf or bearPin, rqS, rkindS, f_poolTouch(evPoolS), revS, mssChS, mssOkS, dispQS, mssBS, dispBS, fvgAtrS, false, f_poolDescN(evPoolS), congMeasured, indS, oteQS, atHtfPoiS, prodS <= PR_MACH and f_setupDispOut(winS), sbWS)
 regDownL = regPolicy and ((regime == RG_TREND and revL) or (regime == RG_RANGE and not discOK))
 regDownS = regPolicy and ((regime == RG_TREND and revS) or (regime == RG_RANGE and not premOK))
 roomBadL = useOppLiq and not oppLiqHard and not na(roomL) and roomL < oppLiqMult
@@ -3450,7 +3393,6 @@ f_closeTrade(int kind) =>
 
 // ---- 1 · manage the OPEN trade on this bar (runs BEFORE a new signal can replace it) ----------
 tradeEvt = 0          // exit kind fired this bar (dashboard / alerts)
-beEvt    = false
 if trackTrade and trd.dir != 0
     bool  isL   = trd.dir == 1
     float sg    = isL ? 1.0 : -1.0
@@ -3485,7 +3427,6 @@ if trackTrade and trd.dir != 0
                 if sg * (nsl - trd.sl) > 0
                     trd.sl   := nsl
                     trd.beOn := true
-                    beEvt    := true
         if trd.tp1Hit and not trd.tp2Hit and sg * (tgtX - trd.tp2) >= 0
             trd.tp2Hit := true
             cntTP2 += 1
@@ -3495,7 +3436,6 @@ if trackTrade and trd.dir != 0
                 if sg * (nsl2 - trd.sl) > 0
                     trd.sl   := nsl2
                     trd.beOn := true
-                    beEvt    := true
         // trail behind the PROTECTED external swing after TP2 — never through the last two bars' extreme
         if trd.tp2Hit and trailAfterTp2
             float prot = isL ? protLowE : protHighE
@@ -3679,7 +3619,7 @@ if barstate.islast
 // funnel read-outs at global scope (tuple destructure never inside a local block)
 [kIx, kN] = f_topIx(killCnt, 1)
 [gIx, gN] = f_topIx(gateCnt, 1)
-var table dash = table.new(position.top_right, 2, 11, border_width = 1, frame_color = color.new(color.gray, 60), border_color = color.new(color.gray, 80))
+var table dash = table.new(position.top_right, 2, 10, border_width = 1, frame_color = color.new(color.gray, 60), border_color = color.new(color.gray, 80))
 f_dRow(int r, string k, string v, color vc) =>
     table.cell(dash, 0, r, k, text_color = color.new(color.gray, 10), text_size = dashSize, bgcolor = color.new(color.black, 60), text_halign = text.align_left)
     table.cell(dash, 1, r, v, text_color = vc, text_size = dashSize, bgcolor = color.new(color.black, 60), text_halign = text.align_left)
@@ -3687,23 +3627,22 @@ f_dRow(int r, string k, string v, color vc) =>
 if showDash and barstate.islast
     color  cHtf   = htfState == HS_BULL ? COL_BULL : htfState == HS_BEAR ? COL_BEAR : htfState == HS_CONF ? color.orange : color.gray
     color  cReg   = regime == RG_TREND ? COL_BULL : regime == RG_CHOP ? color.orange : color.gray
-    string sbTxt  = sbOn ? (sbActive ? "◆ " + f_sbWinTxt(sbWinNow) + (not na(sbRemBar) ? " · " + str.tostring(sbRemBar) + "b" : "") : sbCtx ? "pre " + f_sbWinTxt(sbCtxWin) : "—") : "off"
+    string sbTxt  = sbOn ? (sbActive ? "◆ " + f_sbWinTxt(sbWinNow) : sbCtx ? "pre " + f_sbWinTxt(sbCtxWin) : "—") : "off"
     string trdTxt = trd.dir == 0 ? (trd.exitKind != 0 ? "closed " + f_exitTxt(trd.exitKind) : "—") : (trd.dir == 1 ? "LONG " : "SHORT ") + f_grTxt(trd.grade) + (trd.tp1Hit ? " TP1✓" : "") + (trd.tp2Hit ? " TP2✓" : "") + (trd.beOn ? " BE" : "")
     string cnt    = str.tostring(cntSig) + " sig · " + str.tostring(cntTP1) + " TP1 · " + str.tostring(cntTP2) + " TP2 · " + str.tostring(cntSL) + " SL · " + str.tostring(cntBE) + " BE"
     f_dRow(0, "HTF " + htfCtxTf, f_hsTxt(htfState) + " · PD " + (na(htfPd) ? "—" : str.tostring(math.round(htfPd * 100)) + "%"), cHtf)
     f_dRow(1, "Regime",          f_rgTxt(regime) + " · run " + f_rnTxt(run.cls) + " · cong " + str.tostring(congN) + "/4", cReg)
     f_dRow(2, "Range",           rangeOK ? (pdPos < 0.5 ? "DISCOUNT " : "PREMIUM ") + str.tostring(math.round(pdPos * 100)) + "%" : "—", rangeOK and pdPos < 0.5 ? COL_BULL : COL_BEAR)
-    f_dRow(3, "Targets",         "▲ " + (tgtBuyTag == "" ? "—" : tgtBuyTag) + " · ▼ " + (tgtSellTag == "" ? "—" : tgtSellTag), color.white)
-    f_dRow(4, "Setup ▲ " + str.tostring(array.size(upSetups)), f_stTxt(stageL) + (showDebug ? " · " + blkL : ""), stageL >= ST_FVG ? COL_BULL : color.gray)
-    f_dRow(5, "Setup ▼ " + str.tostring(array.size(dnSetups)), f_stTxt(stageS) + (showDebug ? " · " + blkS : ""), stageS >= ST_FVG ? COL_BEAR : color.gray)
-    f_dRow(6, "Silver Bullet",   sbTxt, sbActive ? COL_SB : color.gray)
-    f_dRow(7, "Trade",           trdTxt, trd.dir == 1 ? COL_BULL : trd.dir == -1 ? COL_BEAR : color.gray)
-    f_dRow(8, "Count",           cnt, color.white)
+    f_dRow(3, "Setup ▲ " + str.tostring(array.size(upSetups)), f_stTxt(stageL) + (showDebug ? " · " + blkL : ""), stageL >= ST_FVG ? COL_BULL : color.gray)
+    f_dRow(4, "Setup ▼ " + str.tostring(array.size(dnSetups)), f_stTxt(stageS) + (showDebug ? " · " + blkS : ""), stageS >= ST_FVG ? COL_BEAR : color.gray)
+    f_dRow(5, "Silver Bullet",   sbTxt, sbActive ? COL_SB : color.gray)
+    f_dRow(6, "Trade",           trdTxt, trd.dir == 1 ? COL_BULL : trd.dir == -1 ? COL_BEAR : color.gray)
+    f_dRow(7, "Count",           cnt, color.white)
     // FUNNEL: setups that reached each stage since load · top kill reason · candidates vs top gate failure
     string fun = "T" + str.tostring(array.get(stageReach, ST_TGT)) + " R" + str.tostring(array.get(stageReach, ST_RAID)) + " P" + str.tostring(array.get(stageReach, ST_POI)) +
          " M" + str.tostring(array.get(stageReach, ST_MSS)) + " D" + str.tostring(array.get(stageReach, ST_DISP)) + " F" + str.tostring(array.get(stageReach, ST_FVG)) + " E" + str.tostring(array.get(stageReach, ST_ENTRY))
-    f_dRow(9,  "Funnel",  fun + " · kill: " + (kN > 0 ? f_killTxt(kIx) + " ×" + str.tostring(kN) : "—"), color.new(color.yellow, 0))
-    f_dRow(10, "Gates",   "cand " + str.tostring(array.get(gateCnt, 0)) + " · fail: " + (gN > 0 ? f_gateTxt(gIx) + " ×" + str.tostring(gN) : "—"), color.new(color.yellow, 0))
+    f_dRow(8,  "Funnel",  fun + " · kill: " + (kN > 0 ? f_killTxt(kIx) + " ×" + str.tostring(kN) : "—"), color.new(color.yellow, 0))
+    f_dRow(9, "Gates",   "cand " + str.tostring(array.get(gateCnt, 0)) + " · fail: " + (gN > 0 ? f_gateTxt(gIx) + " ×" + str.tostring(gN) : "—"), color.new(color.yellow, 0))
 
 // ═══════════════════════════════════════════════════════════ M20 · ALERTS
 // alertcondition: user picks "Once per bar close". alert(): structured payload, once per bar close.
