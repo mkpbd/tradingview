@@ -132,3 +132,14 @@
 - Entry label head now carries the entry price: `▲ LONG B @ 4312.5`.
 - Releases: every version is now also saved as `releases/V8_FULL_vX.Y.Z.pine` (v8.0.4–v8.0.7 exported from git) so an older build can be restored without git.
 - Guide rewritten for v8.0.7: single file, releases/ restore, entry price on the label, Funnel/Gates reading table with per-stage pass-rate targets, gate-reason table, updated tuning sheet and report template.
+
+## v8.1.0 step 1 — detection is no longer gated by display toggles (V8_FULL_v8.1.pine)
+New working file `V8_FULL_v8.1.pine`; `V8_FULL.pine` stays at v8.0.7 as the fallback.
+- BUG (silent, largest): three `show*` inputs changed DETECTION, not just drawing, so an acceptance test that flips them changed the signal count.
+  - `showOB` gated the ORDER BLOCK's creation (`array.push`), not its box. Off = no OB POIs = fewer stage-4 bindings. Now the OB is always built; `f_zoneHide` makes it invisible instead.
+  - `showFlip` off sent every violated zone down the `else` branch, which REMOVES it from `zones`. No breaker or mitigation POI could ever exist with the toggle off. The flip is now unconditional; `zFlipDraw = showZones and showFlip` gates only its colours and text.
+  - `showBPR` gated `z.pa := PA_BPR`, and `pa` feeds `f_paRank` in the stage-3→4 POI ranking. The class is now always set; the toggle gates the box text.
+  - `showRB` was read nowhere at all (dead input). It now hides the rejection block instead of doing nothing.
+- BUG: the pass-2 overlap sweep in `f_mkZone` DELETED a breaker that a new displacement FVG overlapped — destroying the ICT "unicorn" instead of building it. An overlapped breaker is now promoted to T1, tagged UNICORN, and protected by `dup`.
+- BUG: premium/discount was unbounded — `f_htfCtx` keeps the last pivot high and last pivot low whenever they printed, never re-anchors. Live dashboards read PD 114 / 204 / 183 / 127 %, which made `htfContLong/Short` and `htfRevLong/Short` (they decide which side may arm at all) guesswork. Both `_pd` and the LTF `pdPos` are now clamped to [0,1]: outside the range = full premium / full discount, which is the correct reading.
+- BUG: `needHtfAlign` off did nothing. The clause was `not needHtfAlign and not htfIsRevLong`, and `htfIsRevLong` is true in exactly the case the toggle exists for. It now stands alone; `revBlk` in `f_runSide` still stops counter-HTF setups when `allowRev` is off.
