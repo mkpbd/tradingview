@@ -81,3 +81,7 @@
 - C8 ◬ trap engine LT-1…LT-7 (1.txt M16B lineage): wick pools, LT-4 shadow-high watcher, two machines, score, labels, dynamic alert(), optional PREVIEW. OB term replaced by HTF POI interaction.
 - C9 14-row context panel. C10 4 alertcondition + 2 alert() streams.
 - request.security = 10 (cap 12). Plot outputs = 2.
+
+## 2026-09-17 — compile verification
+- User compiled V8_ENGINE.pine and V8_CONTEXT.pine on TradingView: no compile error, no CE10117, no runtime error on first load. Token probe numbers still to be recorded.
+- Added V8_USER_GUIDE_BN.md: setup, reading the chart, alert setup, acceptance-test checklist with report template.
