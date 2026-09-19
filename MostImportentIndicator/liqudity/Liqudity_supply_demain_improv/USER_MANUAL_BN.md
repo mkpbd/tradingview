@@ -1,4 +1,4 @@
-# LQ-SD-PA v3.2.0 — ইউজার ম্যানুয়াল (বাংলা)
+# LQ-SD-PA v3.2.1 — ইউজার ম্যানুয়াল (বাংলা)
 
 > ফাইল: `version_02_fixed.pine`
 > টাইমফ্রেম: **M5 / M15** (এটাই ডিজাইন)
@@ -47,11 +47,12 @@
 ### জোন (বক্স)
 | লেবেল | অর্থ |
 |---|---|
-| **DEMAND / SUPPLY** | FVG-imbalance জোন। `★HP` = সুইপ-ভিত্তিক, উচ্চ মানের |
+| **DEMAND / SUPPLY** | FVG-imbalance জোন। `★HP` = যে displacement ক্যান্ডেল জোনটা বানিয়েছে সেটা শেষ swing ভেঙেছে (BOS-grade origin) — উচ্চ মানের |
 | **OB ▲ / OB ▼** | Order Block — displacement leg-এর আগের বিপরীত ক্যান্ডেল (পাতলা বক্স) |
 | **REJECTION ▲/▼** | Rejection block — swept pivot wick |
 | **BREAKER ▲/▼** | ভাঙা জোন যা সুইপ + structure break নিয়ে ফ্লিপ হয়েছে (ভালো) |
 | **MITIGATION ▲/▼** | ভাঙা জোন, কিন্তু সুইপ/ব্রেক ছাড়া ফ্লিপ (দুর্বল) |
+| **IFVG ▲/▼** | v3.2.1। ক্লোজ-ভেদ হওয়া FVG যা এখন উল্টো দিকের POI (inverted FVG)। FVG বক্স নিজে রং বদলায় + zone হিসেবে যোগ হয় |
 | **·tested** | দাম একবার ছুঁয়েছে |
 | **·spent** | বারবার টেস্ট হয়ে শেষ — আর POI নয় |
 
@@ -60,7 +61,7 @@
 NEXT BUY T3 • 4332.945-4340.095 (0.09% below) ·fresh
 NEXT SELL T2 MIT • 4357.720-4361.370 (price INSIDE)
 ```
-- `T2 / T3` = জোনের গ্রেড (T3 = সুইপ-ভিত্তিক, ভালো)
+- `T2 / T3` = জোনের গ্রেড (T3 = ★HP, displacement ক্যান্ডেল swing ভেঙেছে — ভালো; BREAKER-ও T3)
 - `MIT / BRK / OB / RB` = জোনের ধরন (SD হলে দেখায় না)
 - `·fresh` = এখনো টাচ হয়নি
 - `(price INSIDE)` = দাম এই মুহূর্তে জোনের ভেতরে
@@ -83,7 +84,7 @@ NEXT SELL T2 MIT • 4357.720-4361.370 (price INSIDE)
 | সারি | কী দেখায় | কীভাবে পড়বে |
 |---|---|---|
 | **হেডার** | Regime | TRENDING ভালো · TRANSITION ঠিক আছে · RANGING সাবধান · **CHOP = বসে থাকো** |
-| **HTF bias** | ৫ টাইমফ্রেমের bias | যত বেশি একদিকে, তত ভালো। 1H+4H একমত না হলে সাবধান |
+| **HTF bias** | ৫ টাইমফ্রেমের EMA bias + **তৃতীয় লাইন: `struct 60 ▲ Bull · STRUCT+EMA → ▲ Bull`** | v3.2.1: তৃতীয় লাইন = bias TF-এর **structure** দিক, mode, আর চূড়ান্ত bias (→)। `→ —` = neutral (EMA আর structure একমত নয়) — কিছু ব্লক হয় না, বোনাসও নেই |
 | **Structure** | int / ext দিক | **ext**-টাই আসল। int = ছোট নয়েজ |
 | **Sweep in play** | SSL/BSL + গ্রেড | `none` = কোনো লিকুইডিটি ইভেন্ট নেই → ট্রেড নেই |
 | **Range pos** | Premium/Discount % | **BUY = Discount (<50%) · SELL = Premium (≥50%)**। `·tight` মানে leg খুব সরু, বিশ্বাস করো না |
@@ -100,6 +101,7 @@ NEXT SELL T2 MIT • 4357.720-4361.370 (price INSIDE)
 | **Verdict** | সিগন্যাল বা **কেন নেই** | ⭐ সবচেয়ে গুরুত্বপূর্ণ সারি |
 | **◆ Silver Bullet** | off-window / pre-window / ACTIVE 23m left | |
 | **◆ SB setup** | SB-tagged সেটআপের অবস্থা | |
+| **ADR · HTF POI** | `132% of ADR ·exhausted ·no chase ▲ · HTF POI 2▲ 1▼` | v3.2.1। `·no chase ▲` = এখন LONG চেজ করলে −10 স্কোর, A+ নয়। শেষ অংশ = দিক-প্রতি লাইভ HTF FVG POI সংখ্যা (max 3) |
 
 ### Verdict কী বলতে পারে
 | বার্তা | মানে | কী করবে |
@@ -137,7 +139,7 @@ E 4359.71 · RR 2.0 (plan, not promise)
 SL 4348.20
 TP1 4371.22   ← 1R
 TP2 4382.73   ← rrMult R, বিপরীত POI-তে clamp হতে পারে
-TP3 4394.24   ← liquidity target বা 3R
+TP3 4394.24   ← liquidity target, না হলে max(3, rrMult+1) R — সবসময় TP2-র উপরে
 ```
 
 ---
@@ -203,10 +205,12 @@ Session = London বা NY AM
 | ইনপুট | ডিফল্ট | ব্যাখ্যা |
 |---|---|---|
 | **HTF bias filter** | 60 | ⭐ counter-trend entry ব্লক করে। `Off` = ব্লক করবে না (শুধু স্কোর) |
+| **HTF bias source** | Structure + EMA | v3.2.1। `EMA only` = আগের আচরণ · `Structure only` = HTF BOS/CHoCH দিক · `Structure + EMA` = দুটো একমত হলে bias, না হলে **neutral** (ব্লক নেই, বোনাস নেই) |
+| HTF structure pivot length | 5 | bias TF-এ swing-এর আকার। 1H-এ 5 = ৫-ঘণ্টার swing |
 | HTF CRT + Turtle-soup | ON | HTF trigger candidate |
 | HTF for CRT/TBS/POI | Auto | 5m → 60m, 15m → 240m |
 | HTF POI max age | 40 | HTF ক্যান্ডেলে POI-র বয়স |
-| HTF POI max touch | 3 | কতবার ঢোকার পর spent |
+| **HTF POI spent after N separate visits** | 2 | v3.2.1: visit = বাইরে থেকে ঢোকা (chart-TF zone-এর মতো)। আগে "ভেতরে থাকা ক্যান্ডেল" গোনা হত — ৩ বার consolidate করলেই spent। ইঞ্জিন এখন প্রতি দিকে **৩টা** HTF POI রাখে, **নিকটতম untested**-টা দিয়ে কাজ করে |
 
 **পরামর্শ:** 5m চার্টে `60` রাখো। খুব কম সিগন্যাল পেলে `15` করে দেখো। `Off` করবে না — এটাই সবচেয়ে সস্তা ফিল্টার।
 
@@ -232,6 +236,7 @@ Session = London বা NY AM
 | Label BOS/CHoCH/MSS | ON | |
 | **Structural break body ≥ ATR ×** | 0.5 | ব্রেক ক্যান্ডেলের ন্যূনতম বডি। 0 = যেকোনো ক্লোজ |
 | Plot protected swing | ON | trail-এর ভিত্তি |
+| **MSS requires EXTERNAL CHoCH** | ON | doctrine। OFF = internal CHoCH-ও MSS (v3.1.1 আচরণ, বেশি MSS, কম মান) |
 | Order-flow zigzag | OFF | চার্ট এলোমেলো করে |
 
 ---
@@ -242,6 +247,7 @@ Session = London বা NY AM
 | Draw live FVGs | ON |
 | Max live FVGs per side | 4 |
 | FVG max age | 120 bars |
+| **Flip violated FVGs into IFVG** | ON | v3.2.1। ক্লোজ ভেদ করা FVG মুছে না গিয়ে **উল্টো দিকের POI** হয় (IFVG)। wick-only fill = শুধু মুছে যায়। দ্বিতীয় ভেদ = ডিলিট |
 
 ---
 
@@ -269,6 +275,7 @@ Session = London বা NY AM
 | Show distance (%) | ON | |
 | Line extends back | 60 bars | |
 | **Label position** | Middle of the line | `Right edge` করলে ড্যাশবোর্ডের সাথে ওভারল্যাপ করবে |
+| **Include HTF FVG POI as NEXT candidate** | ON | v3.2.1। HTF POI-ও প্রতিযোগী — নিকটতম জেতে। লেবেলে kind `HTF`, grade T3 |
 
 ---
 
@@ -453,6 +460,43 @@ Session = London বা NY AM
 
 ---
 
+### Volume confirmation (optional) — v3.2.1
+| ইনপুট | ডিফল্ট | ব্যাখ্যা |
+|---|---|---|
+| **Require relative volume on displacement** | OFF | ON = জোন বানানো displacement ক্যান্ডেলে volume ≥ SMA × multiplier লাগবে। **Crypto / indices / futures / stocks-এ ON করো।** Spot-FX-এ tick volume দুর্বল — OFF রাখো |
+| Volume SMA length | 20 | |
+| Displacement volume ≥ SMA × | 1.3 | |
+| Raid candle with volume earns +1 grade | ON | শুধু উপরের ON থাকলে। গ্রেড 3-এ cap — 4 শুধু MSS upgrade-এর |
+
+Volume ডেটা নেই এমন সিম্বলে (কিছু CFD) গেট এমনিতেই pass করে — কিছু ভাঙবে না।
+
+---
+
+### Advanced tuning — v3.2.1
+আগে hardcoded ছিল, এখন ইনপুট। **ডিফল্ট = আগের আচরণ।** না বুঝে ছোঁবে না।
+
+| ইনপুট | ডিফল্ট | কোথায় লাগে |
+|---|---|---|
+| 'At the level' tolerance | 0.25 ATR | doji-at-level, trendline touch, sweep firm-reclaim |
+| Stop padding beyond structure | 0.25 ATR | **wide-spread সিম্বলে বাড়াও** (0.4–0.5) |
+| Sweep stays in play within | 3.0 ATR | ভোলাটাইল সিম্বলে 4–5 |
+| 'Near the POI' distance | 1.5 ATR | স্কোরের near-POI বোনাস |
+| Shift / CISD live trigger | 10 bars | **M5 = 10 · M15 = 6–8 · M1 = 12–15** |
+| CHOP: external range narrower than | 6.0 ATR | regime classifier |
+
+---
+
+### ADR exhaustion (intraday) — v3.2.1
+| ইনপুট | ডিফল্ট | ব্যাখ্যা |
+|---|---|---|
+| **Penalise chasing an exhausted daily range** | ON | দিন ইতিমধ্যে ADR-এর ১২০% চললে, দিনের **উপরের ৩০%-এ LONG** বা **নিচের ৩০%-এ SHORT** = chasing → context স্কোর −10, **A+ নয়**। উল্টো দিকের reversal সেটআপে কোনো প্রভাব নেই |
+| ADR length (days) | 10 | |
+| Exhausted when day range ≥ ADR × | 1.2 | |
+
+ড্যাশবোর্ডের **ADR · HTF POI** সারি (১৯ নম্বর) দেখায়: `132% of ADR ·exhausted ·no chase ▲ · HTF POI 2▲ 1▼`।
+
+---
+
 ### Dashboard / Debug / UI
 | ইনপুট | ডিফল্ট |
 |---|---|
@@ -526,6 +570,43 @@ Min alignment score      = 0   ← SB নিজের গেট নিজে র
 ### ⚠️ বাধ্যতামূলক সেটিং
 - **Condition:** `Once per bar close` — অন্য কিছু নয়, নইলে repaint হবে
 - **আলাদা করে একটা:** `Any alert() function call` → এতে Silver Bullet আর Liquidity Trap-এর বিস্তারিত বার্তা আসে (window, CE-vs-edge, tier, score, পুরো exit plan)
+
+---
+
+## ৮ক. Backtest — `version_02_strategy.pine` (Strategy Tester)
+
+ইন্ডিকেটর ফাইল সিগন্যাল দেখায়, কিন্তু "এই সেটিংসে কত % জেতে, RR কত" — সেটা TradingView-এর **Strategy Tester** ছাড়া জানা যায় না। তাই একটা যমজ ফাইল দেওয়া আছে: `version_02_strategy.pine`।
+
+### দুই ফাইলের সম্পর্ক
+| | `version_02_fixed.pine` | `version_02_strategy.pine` |
+|---|---|---|
+| কাজ | চার্ট + অ্যালার্ট (লাইভ) | শুধু Strategy Tester (সংখ্যা) |
+| ডিটেকশন কোড | মূল | **বাইট-টু-বাইট এক** |
+| আলাদা কী | — | হেডার লাইন, ড্যাশবোর্ড শিরোনাম "ST", MODULE 19S (অর্ডার) |
+| চার্টে রাখবে? | হ্যাঁ | ব্যাকটেস্টের সময় শুধু; দুটো একসাথে রাখলে drawing দ্বিগুণ |
+
+### কীভাবে চালাবে
+1. Pine Editor → নতুন স্ক্রিপ্ট → `version_02_strategy.pine` পেস্ট → **Add to chart**
+2. নিচে **Strategy Tester** ট্যাব খোলো → Overview / Performance / List of trades
+3. প্রথমে **Min alignment score = 0** করো (ইন্ডিকেটরের মতোই) — নইলে ০ ট্রেড
+4. তারপর score ধাপে ধাপে ৪০ → ৫০ → ৬০ বাড়াও, প্রতিবার Profit factor / Win rate / Max drawdown নোট করো। যেখানে **Profit factor বাড়ে কিন্তু ট্রেড সংখ্যা এখনো ≥ ৫০**, সেটাই তোমার threshold
+5. `strategy.entry` কমেন্টে tier · score · SB লেখা থাকে → List of trades-এ কোন tier কত জেতে দেখতে পাবে
+
+### ◆ Strategy (backtest only) সেটিংস
+| ইনপুট | ডিফল্ট | কী করে |
+|---|---|---|
+| Place orders | ON | OFF করলে ফাইলটা ইন্ডিকেটরের মতো আচরণ করে |
+| Risk per trade (% of equity) | 1.0 | entry → SL দূরত্ব দিয়ে qty হিসাব (fixed fractional) |
+| Take 50% at TP1, rest at TP2 / TP3 | ON | OFF = পুরো পজিশন TP2 (SB হলে TP3)-এ |
+| Trade longs / Trade shorts | ON/ON | একদিক বন্ধ করে দিক-ভিত্তিক bias যাচাই |
+
+Properties ট্যাবে: Initial capital 10000, commission 0.02%, slippage 2 tick — **নিজের ব্রোকারের মান বসাও**।
+
+### সততার সাথে যা জানা দরকার
+- **Entry = সিগন্যাল বারের close-এ market order।** ইন্ডিকেটরের plan price CE / zone edge — close থেকে সর্বোচ্চ `Slippage guard` ATR দূরে। CE-তে limit দিলে যেসব ট্রেডে দাম ফিরে আসেনি সেগুলো নিঃশব্দে হারিয়ে যেত; market-at-close রক্ষণশীল ও তুলনাযোগ্য
+- **Exit** MODULE 19 বার-বাই-বার অনুসরণ করে: `trdSL` (BE / trail সহ) stop, TP1-এ ৫০%, বাকিটা TP2/TP3। SB window শেষ, বিপরীত MSS/CISD — এসব কারণে ইন্ডিকেটর flat হলে পরের open-এ `close_all`
+- ইন্ডিকেটরের Debug টেবিলের counter (TP1/TP2/SL হিট) যান্ত্রিক গণনা — **Strategy Tester-এর সংখ্যাই আসল**
+- Bar magnifier / intrabar ছাড়া একই বারে SL ও TP দুটোই ছুঁলে TradingView ধরে নেয় SL আগে — রক্ষণশীল, ঠিকই আছে
 
 ---
 

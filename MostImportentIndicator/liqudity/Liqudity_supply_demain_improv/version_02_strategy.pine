@@ -294,23 +294,22 @@
 //             run sweep → POI → shift → retest before anything fires. Built
 //             from line/box/label objects because the 64-output budget is full.
 //
-// v3.2.1 — PHASE D (verification)
-//   FIX-F9    STRATEGY TWIN. `version_02_strategy.pine` is this file with the
-//             `indicator()` line swapped for `strategy()` and one added module
-//             (19S) that hands MODULE 19's tracked trade to the broker
-//             emulator: market entry at the signal bar's close, fixed
-//             fractional risk, 50% at TP1, remainder at TP2 (TP3 for SB),
-//             `trdSL` re-issued every bar so break-even / trail is honoured,
-//             `close_all` when the indicator flattens for a non-price reason.
-//             Detection code is byte-identical — the Strategy Tester measures
-//             the same signals this chart shows. THIS file stays the chart /
-//             alert tool; the twin is for numbers only.
+// v3.2.1 — PHASE D (verification) — THIS IS THE STRATEGY TWIN
+//   FIX-F9    Same detection as `version_02_fixed.pine` (diff = the header
+//             line, the dashboard title and MODULE 19S). Use it ONLY in the
+//             Strategy Tester; keep the indicator on the chart for alerts.
+//             Execution model and its one honest deviation (market-at-close
+//             instead of the CE limit) are documented at MODULE 19S.
+//             Set "Min alignment score" = 0 first, then raise it and watch
+//             the Strategy Tester — that is how the threshold gets calibrated.
 //
 // Signals evaluate on CLOSED bars only — use "Once per bar close" alerts.
 // The confluence score is NARRATIVE ALIGNMENT, not win probability.
 // Educational tool, not financial advice. Backtest before live use.
 // ─────────────────────────────────────────────────────────────────────────────
-indicator("Liquidity + S/D + Price Action [MTF] v3.2.1", "LQ-SD-PA v3.2.1", overlay = true,
+strategy("Liquidity + S/D + Price Action [MTF] v3.2.1 — STRATEGY", "LQ-SD-PA v3.2.1 ST", overlay = true,
+     initial_capital = 10000, commission_type = strategy.commission.percent, commission_value = 0.02, slippage = 2,
+     pyramiding = 0, calc_on_every_tick = false, process_orders_on_close = true,
      max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
 
 // ═════════════════════════════════════════════════════════════════ MODULE 1
@@ -4121,6 +4120,63 @@ if (anyLong or anyShort) and confirmed
         else if finalTierS >= 3
             cntA += 1
 
+// ═════════════════════════════════════════════════════════════════ MODULE 19S
+// ◆ STRATEGY EXECUTION — the backtest twin (v3.2.1 phase D, FIX-F9)
+// This file is `version_02_fixed.pine` with ONE header line changed and this
+// module added. Every detection / gate / plan above is byte-identical to the
+// indicator, so the Strategy Tester measures the SAME signals the chart shows.
+// Execution model, stated honestly:
+//   · ENTRY: market order at the signal bar's CLOSE (process_orders_on_close).
+//     The indicator's plan price is the CE / anchor edge, which can differ from
+//     the close by up to `slipGuard` ATR (0.5 default) — the guard is what
+//     keeps that gap bounded. A limit at the CE would be more faithful when it
+//     fills and would silently drop every trade where price never came back;
+//     market-at-close is the conservative, always-comparable choice.
+//   · SIZE: fixed fractional risk — `stRiskPct` of equity divided by the
+//     distance to the structural stop. Notional units, no pip-value model.
+//   · EXITS mirror MODULE 19 bar by bar: `trdSL` (break-even / trail already
+//     applied by the indicator) as the stop, 50% at TP1 (optional), the
+//     remainder at TP2 (non-SB) or TP3 (SB). When the indicator flattens for a
+//     NON-price reason — SB window close, opposing MSS / CISD, bar conflict —
+//     the position is closed at the next open.
+//   · Commission 0.02% / slippage 2 ticks are placeholders — set your broker's.
+// Counters in the debug table remain the indicator's own mechanical counts;
+// the Strategy Tester's numbers are the ones to trust.
+// ═════════════════════════════════════════════════════════════════════════
+grpST     = "◆ Strategy (backtest only)"
+stEnable  = input.bool(true,  "Place orders",                          group = grpST)
+stRiskPct = input.float(1.0,  "Risk per trade (% of equity)", step = 0.25, minval = 0.1, maxval = 10, group = grpST)
+stUseTp1  = input.bool(true,  "Take 50% at TP1, rest at TP2 / TP3",    group = grpST)
+stLongs   = input.bool(true,  "Trade longs",                           group = grpST)
+stShorts  = input.bool(true,  "Trade shorts",                          group = grpST)
+
+// entry — on the bar the indicator arms a NEW tracked trade
+if stEnable and trackNew and not na(entryP) and not na(slP)
+    float stRiskDist = math.abs(entryP - slP)
+    float stQty      = stRiskDist > 0 ? (strategy.equity * stRiskPct / 100.0) / stRiskDist : na
+    if not na(stQty) and stQty > 0
+        string stCmt = f_tierTxt(anyLong ? finalTierL : finalTierS) + " · " + str.tostring(anyLong ? scoreLong : scoreShort) + (sbFireL or sbFireS ? " · SB" : "")
+        if anyLong and stLongs
+            strategy.entry("L", strategy.long,  qty = stQty, comment = "▲ " + stCmt)
+        if anyShort and stShorts
+            strategy.entry("S", strategy.short, qty = stQty, comment = "▼ " + stCmt)
+
+// exits — re-issued every bar so the indicator's live stop (BE / trail) is honoured.
+// Placed on the entry bar too: with process_orders_on_close the stop / limit can only
+// fill at that close if price already crossed them, which the plan gate excludes.
+if stEnable and trdDir != 0   // includes the entry bar: SL/TP are armed from the fill onward
+    string stFrom  = trdDir == 1 ? "L" : "S"
+    float  stFinal = trdIsSb ? trdTP3 : trdTP2
+    if stUseTp1 and not trdTp1Hit
+        strategy.exit("TP1", from_entry = stFrom, qty_percent = 50, limit = trdTP1, stop = trdSL, comment_profit = "TP1", comment_loss = "SL")
+    else
+        strategy.cancel("TP1")   // indicator already booked TP1 — no stale partial left pending
+    strategy.exit("X", from_entry = stFrom, limit = stFinal, stop = trdSL, comment_profit = trdIsSb ? "TP3" : "TP2", comment_loss = "SL")
+
+// the indicator flattened for a non-price reason → follow it
+if stEnable and strategy.position_size != 0 and trdDir == 0
+    strategy.close_all(comment = sbTimeExitEvt ? "SB time exit" : sbStructExitEvt ? "SB struct exit" : "indicator flat")
+
 // ═════════════════════════════════════════════════════════════════ MODULE 20
 // VISUALIZATION
 // ═════════════════════════════════════════════════════════════════════════
@@ -4523,7 +4579,7 @@ f_dash() =>
     if showDash and barstate.islast
         hdrBg = color.new(color.gray, 60)
         rowBg = color.new(color.gray, 85)
-        table.cell(dash, 0, 0, "LQ-SD-PA v3.2.1", bgcolor = hdrBg, text_color = color.white, text_size = dashSize)
+        table.cell(dash, 0, 0, "LQ-SD-PA v3.2.1 ST", bgcolor = hdrBg, text_color = color.white, text_size = dashSize)
         table.cell(dash, 1, 0, regime, bgcolor = regime == "TRENDING" ? f_biasCol(extDir) : regime == "CHOP" ? color.new(color.red, 70) : rowBg,
              text_color = color.white, text_size = dashSize)
         table.cell(dash, 0, 1, "HTF bias", bgcolor = rowBg, text_color = color.white, text_size = dashSize)
