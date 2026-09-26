@@ -1,5 +1,25 @@
 # IMPROVEMENT PLAN — SMC Suite v8.2.1 → v8.3.0
 
+## STATUS (2026-09-26) — all 13 steps applied to `SMC.txt`, one commit each (`git log --oneline -14`)
+
+| Step | Commit | Deviations from the plan below |
+|---|---|---|
+| 0 | bfd93cb | as planned |
+| 1 | 4a13e1f | as planned |
+| 2 | ab967eb | as planned; origin later moved INTO `f_structure` (step 4) so one call serves structure, mv and zones |
+| 3 | 2456e77 | as planned |
+| 4 | a1dabd8 | no separate `Str` type: new state lives in `Sx` (`stPend*`, `stBrk*`, `stFail`, `hiType/loType`), pivots stay in `Ctx`; displacement gate = breaking candle only ("Candle" / "Off"), the "Move" option was not built |
+| 5 | 25b42a2 | no `Liq.qual` field — qualification computed at sweep time; internal sweeps reuse `ctx.intSwpBull/Bear` |
+| 6 | 6adabfc | `seq` tie-break dropped (it is direction-level, identical for every candidate on a side, so it cannot break ties); ties → declaration order |
+| 7 | 7e7f82c | as planned (+ `ft.pdBeyond`) |
+| 8 | 5c12f98 | as planned |
+| 9 | a76c12c | as planned (`ZS` type, `ft.zb` / `ft.zs`); arrival strength keyed on the bull slot when both sides touch |
+| 10 | 337a80d | as planned; refs live in `Sx` (`cisdUpRef/…Used`), `cisdUpSet/DnSet` removed from `Ctx` |
+| 11 | 9f20961 | as planned; tapped-zone snapshot restored into the slot while armed; FVG-only taps confirm via `reactBull` |
+| 12 | 674c2ca | as planned |
+
+**Not verified**: no Pine compiler or chart in this environment — compile, token count and every replay gate in the table at the end are still open. First thing to do: paste `SMC.txt` into the Pine editor and fix any compile error, then run the step-0 object-count check and the step-4 structure counts.
+
 Source of findings: `FORENSIC_AUDIT_SMC_v8.2.1.md` (B1-B15, T1-T14, RC1-RC7).
 Rule: one step = one commit = one compile = one replay check. Never two steps in one commit.
 Baseline first: copy `SMC.txt` → `SMC_v8.2.1.backup.txt` before step 1.
