@@ -423,6 +423,23 @@ type Ctx
     int   legIdx = 0
     float legPx = na
 
+// S9 — the zone price is reacting to, one per side (bull = demand / support, bear = supply / resistance).
+// Declared before Sx / Feat, which hold fields of this type.
+type ZS
+    string kind      = ""
+    int    touches   = 0
+    bool   sweepReq  = false
+    bool   fifty     = false
+    bool   idm       = false
+    bool   hp        = false
+    int    kl        = 0
+    bool   flipped   = false
+    bool   nearSwept = false
+    bool   depStrong = false
+    float  top       = na
+    float  bottom    = na
+    bool   prop      = false
+
 // L6 S–AB state machines (split from Ctx: UDT constructor limit 254 external elements, num/bool = 2 each)
 type Sx
     int   dtDir = 0
@@ -492,22 +509,6 @@ type Sx
     float poiHighS = na
     bool  poiFvgS = false
     ZS    poiZs = na
-
-// S9 — the zone price is reacting to, one per side (bull = demand / support, bear = supply / resistance)
-type ZS
-    string kind      = ""
-    int    touches   = 0
-    bool   sweepReq  = false
-    bool   fifty     = false
-    bool   idm       = false
-    bool   hp        = false
-    int    kl        = 0
-    bool   flipped   = false
-    bool   nearSwept = false
-    bool   depStrong = false
-    float  top       = na
-    float  bottom    = na
-    bool   prop      = false
 
 // L2..L5 per-bar flags (feature vector) — setups read ONLY cd / st / ft
 type Feat
