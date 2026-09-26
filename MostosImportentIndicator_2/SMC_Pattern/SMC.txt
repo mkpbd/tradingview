@@ -21,6 +21,8 @@
 //      HP-OB / M41 / M45 / M54 / CISD-reliability / f_conf chain; pivot wicks are internal (M49 / M53).
 //  S6  one score: module TIER (1-4) × 2 + f_conf. Base-score bonuses (liq / HP / M20) removed — f_conf
 //      already counts them. Grade thresholds and min score are inputs (A+ ≥ 11, A ≥ 8, show ≥ 6).
+//  S7  PD array = the current leg (protected swing → extreme since it); beyond-leg closes are flagged
+//      as expansion instead of reading "outside swing" for most of every trend.
 //  spec : INDICATOR_DEV_SPEC_BN.md   rules : BUILD_PROTOCOL_BN.md (R1 call-once, R2 one Cfg, R3 state in Ctx)
 //  audit: FORENSIC_AUDIT_BN.md — this build implements stages 1, 2 and the cheap part of 3.
 //  layers: L0 candle · L1 structure · L2 FVG/strength · L3 liquidity · L4 zones · L5 HTF · L6 setups · L7 trade
@@ -571,6 +573,7 @@ type Feat
     float  pdPct = 0.5
     bool   inDiscount = false
     bool   inPremium = false
+    bool   pdBeyond = false       // S7 — close outside the leg range (expansion)
     int    dispScore = 0
     int    dispDir = 0
 
@@ -2131,14 +2134,25 @@ ft.gateDn := f_gate(cfg, ft.htfBias, gateTrend, false)
 // short +1, in an uptrend. All four review charts read exactly "100% premium" while price was
 // printing highs. Price outside the swing is EXPANSION, which is neither premium nor discount, so
 // it scores and gates neutral rather than maximally hostile.
-pdHi = ctx.curHigh
-pdLo = ctx.curLow
-pdIn = not na(pdHi) and not na(pdLo) and pdHi > pdLo and close <= pdHi and close >= pdLo
-ft.pdPct      := pdIn ? (close - pdLo) / (pdHi - pdLo) : 0.5
-ft.inDiscount := pdIn and ft.pdPct <= 0.5
-ft.inPremium  := pdIn and ft.pdPct >= 0.5
-// only gate INSIDE a range - outside it both flags are false and a hard gate would block both sides
-if i_pdGate and pdIn
+// S7 (audit B6) · v8.3 · the dealing range is the CURRENT LEG: from the protected swing (majorLow in
+// a bull trend, the price origin of the leg per S4) to the extreme printed since it. The v8.2.1 pivot
+// pair was a few bars wide, so a trend spent most of its time "outside" and PD contributed nothing
+// exactly where buying premium is the mistake. In RANGE the last pivot pair is used.
+pdSpanB = math.min(math.max(bar_index - ctx.majorLowIdx, 0), 490) + 1
+pdSpanS = math.min(math.max(bar_index - ctx.majorHighIdx, 0), 490) + 1
+pdHiB   = ta.highest(high, pdSpanB)
+pdLoS   = ta.lowest(low, pdSpanS)
+bullPD  = st.trend == "BULLISH" and not na(ctx.majorLow)
+bearPD  = st.trend == "BEARISH" and not na(ctx.majorHigh)
+pdHi = bullPD ? pdHiB : bearPD ? ctx.majorHigh : ctx.curHigh
+pdLo = bullPD ? ctx.majorLow : bearPD ? pdLoS : ctx.curLow
+pdIn = not na(pdHi) and not na(pdLo) and pdHi > pdLo
+ft.pdBeyond   := pdIn and (close > pdHi or close < pdLo)
+ft.pdPct      := pdIn ? math.max(0.0, math.min(1.0, (close - pdLo) / (pdHi - pdLo))) : 0.5
+ft.inDiscount := pdIn and not ft.pdBeyond and ft.pdPct <= 0.5
+ft.inPremium  := pdIn and not ft.pdBeyond and ft.pdPct >= 0.5
+// only gate INSIDE the leg - beyond it both flags are false and a hard gate would block both sides
+if i_pdGate and pdIn and not ft.pdBeyond
     if not ft.inDiscount
         ft.gateUp := 0
     if not ft.inPremium
@@ -3500,7 +3514,7 @@ f_panel(tb, cx, fv, stc, v, sgl, sgs, hL, hS, tfHtf) =>
     table.cell(tb, 0, 11, "Signal",        text_color = v.txt, bgcolor = lab)
     table.cell(tb, 1, 11, bestSig.name == "" ? "—" : bestSig.name + " " + str.tostring(bestSig.score) + " (" + f_gradeTxt(bestSig.score) + ")", text_color = v.txt, bgcolor = color.new(bestSig.name == "" ? v.neut : bestSig.dir == 1 ? v.bull : v.bear, 40))
     // NEW rows — the two filters that were declared in the type but never implemented
-    pdTxt = not (fv.inPremium or fv.inDiscount) ? "outside swing (expansion)" : str.tostring(fv.pdPct * 100, "#") + "% · " + (fv.pdPct > 0.5 ? "premium (sell side)" : fv.pdPct < 0.5 ? "discount (buy side)" : "equilibrium")
+    pdTxt = fv.pdBeyond ? "beyond leg (expansion)" : not (fv.inPremium or fv.inDiscount) ? "—" : str.tostring(fv.pdPct * 100, "#") + "% of leg · " + (fv.pdPct > 0.5 ? "premium (sell side)" : fv.pdPct < 0.5 ? "discount (buy side)" : "equilibrium")
     table.cell(tb, 0, 12, "PD array",      text_color = v.txt, bgcolor = lab)
     table.cell(tb, 1, 12, pdTxt, text_color = fv.pdPct > 0.5 ? v.bear : fv.pdPct < 0.5 ? v.bull : chart.fg_color)
     table.cell(tb, 0, 13, "Session",       text_color = v.txt, bgcolor = lab)
