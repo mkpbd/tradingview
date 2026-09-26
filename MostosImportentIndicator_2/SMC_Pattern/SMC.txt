@@ -33,6 +33,12 @@
 //      in the slot for the SL / score. Applies to the zone / FVG modules only; trap modules unchanged.
 //  S12 names: M02 "pin-bar continuation", M45 note says which form fired; legend updated; event
 //      lines whose anchor is older than the drawing buffer are drawn dotted.
+//  R1  live review (BTCUSDT.P / XAUUSD / NAS100, 5m): M10 tier 2 on POOL (3 only on PD/PW/SES) and
+//      min score 6 → 8 (tier 3 passed with zero confluence and flooded both sides) · HTF bias could
+//      stick at BULL when hMajorLow was na (gold fell 160 pts under "BULL") — pivot fallback · LTF
+//      sat in RANGE inside trends: displacement also = close beyond level by 0.3 ATR, range gate
+//      0.8 → 0.6 ATR, and only trend-aligned weak breaks feed the failed-follow-through counter ·
+//      opposite-side override needs +2 · weak RJB no longer created · panel prints KL not SR.
 //  Removed inputs: Wyckoff lookback / width, hidden-liquidity candles / wick. New inputs: structure
 //      displacement gate, follow-through window, failed-follow-throughs, CISD sweep gate, session
 //      timezone, sweep qualification, grade thresholds, zone entry trigger + window.
@@ -690,7 +696,10 @@ i_rangeBars = input.int(20,  "Bars without BOS/CHoCH → RANGE", minval = 5, gro
 i_dispGate  = input.string("Candle", "Structure needs displacement", options = ["Candle", "Off"], group = gS, inline = "d",
      tooltip = "Candle = the breaking candle must have body ≥ the ratio and range ≥ the ATR multiple below · Off = v8.2 behaviour (any close through the swing changes structure)")
 i_dispBody  = input.float(0.5, "body/range ≥", minval = 0.2, maxval = 0.9, step = 0.05, group = gS, inline = "d")
-i_dispRng   = input.float(0.8, "range ≥ × ATR", minval = 0.2, step = 0.1, group = gS, inline = "d")
+i_dispRng   = input.float(0.6, "range ≥ × ATR", minval = 0.2, step = 0.1, group = gS, inline = "d")
+// R1 (live review) — a close that clears the level by a real distance is displacement too, even
+// when the candle's body ratio is modest. Without this, 5m gold / NAS spent most of a trend in RANGE.
+i_dispDist  = input.float(0.3, "…or close beyond level ≥ × ATR", minval = 0.0, step = 0.05, group = gS)
 i_pendBars  = input.int(3, "Weak break: follow-through window (bars)", minval = 1, maxval = 10, group = gS)
 i_failMax   = input.int(2, "Failed follow-throughs → RANGE", minval = 1, maxval = 5, group = gS)
 i_cisdSweep = input.bool(true, "CISD only after a qualified liquidity sweep (within armed bars)", group = gS,
@@ -949,7 +958,7 @@ f_pend(sx, dir, kind, lvl, fromIdx) =>
 //   RANGE     = two consecutive breaks that closed back through their level, or the old bar count
 // The protected swing is the price origin of the leg that made the break (f_legOrigin), stored in
 // majorLow (bull trend) / majorHigh (bear trend) so every downstream reader keeps its name.
-f_structure(cf, cx, sx, swH, swL, aN, dispOk, pendBars, failMax) =>
+f_structure(cf, cx, sx, swH, swL, aN, dispOk, dDist, pendBars, failMax) =>
     s = Struct.new()
     pIdx = bar_index - cf.swingLen
     if not na(swH)
@@ -1004,18 +1013,23 @@ f_structure(cf, cx, sx, swH, swL, aN, dispOk, pendBars, failMax) =>
             sx.stPendDir := 0
     chUp = cx.trend == "BEARISH" and not na(cx.majorHigh) and close > cx.majorHigh
     chDn = cx.trend == "BULLISH" and not na(cx.majorLow)  and close < cx.majorLow
+    // R1 — displacement = strong candle OR a close that clears the level by dDist
+    dBrkUp = dispOk or (not na(cx.curHigh)   and close - cx.curHigh   >= dDist)
+    dChUp  = dispOk or (not na(cx.majorHigh) and close - cx.majorHigh >= dDist)
+    dBrkDn = dispOk or (not na(cx.curLow)    and cx.curLow  - close   >= dDist)
+    dChDn  = dispOk or (not na(cx.majorLow)  and cx.majorLow - close  >= dDist)
     evtAny = s.bullBOS or s.bearBOS or s.bullCHoCH or s.bearCHoCH
     // bull side
     if (brkUp or chUp) and not evtAny
         if chUp
-            if dispOk
+            if dChUp
                 s.bullCHoCH := true
             else
                 s.weakBullBOS := true
                 f_pend(sx, 1, 2, cx.majorHigh, cx.majorHighIdx)
         else if cx.trend == "BEARISH"
             s.internalBullBOS := true
-        else if dispOk
+        else if dBrkUp
             s.bullBOS := true
         else
             s.weakBullBOS := true
@@ -1024,14 +1038,14 @@ f_structure(cf, cx, sx, swH, swL, aN, dispOk, pendBars, failMax) =>
     // bear side
     if (brkDn or chDn) and not evtAny and not s.weakBullBOS and not s.internalBullBOS
         if chDn
-            if dispOk
+            if dChDn
                 s.bearCHoCH := true
             else
                 s.weakBearBOS := true
                 f_pend(sx, -1, 2, cx.majorLow, cx.majorLowIdx)
         else if cx.trend == "BULLISH"
             s.internalBearBOS := true
-        else if dispOk
+        else if dBrkDn
             s.bearBOS := true
         else
             s.weakBearBOS := true
@@ -1070,21 +1084,25 @@ f_structure(cf, cx, sx, swH, swL, aN, dispOk, pendBars, failMax) =>
         if s.bearCHoCH
             cx.loBroken := true
             cx.hiBroken := false
-    // weak / internal breaks: measure the leg (for mv) and track the level for the failure counter
+    // weak / internal breaks: measure the leg (for mv). Only a WEAK (trend-aligned) break feeds the
+    // failure counter — R1: a counter-trend internal break failing is what a trend looks like, and
+    // counting it sent 5m gold / NAS into RANGE inside clean trends.
     if s.weakBullBOS or s.internalBullBOS
         [oi, op] = f_legOrigin(true, cx.curHighIdx)
         cx.legIdx   := oi
         cx.legPx    := op
-        sx.stBrkDir := 1
-        sx.stBrkLvl := cx.curHigh
-        sx.stBrkBar := bar_index
+        if s.weakBullBOS
+            sx.stBrkDir := 1
+            sx.stBrkLvl := cx.curHigh
+            sx.stBrkBar := bar_index
     if s.weakBearBOS or s.internalBearBOS
         [oi, op] = f_legOrigin(false, cx.curLowIdx)
         cx.legIdx   := oi
         cx.legPx    := op
-        sx.stBrkDir := -1
-        sx.stBrkLvl := cx.curLow
-        sx.stBrkBar := bar_index
+        if s.weakBearBOS
+            sx.stBrkDir := -1
+            sx.stBrkLvl := cx.curLow
+            sx.stBrkBar := bar_index
     if not (s.bullBOS or s.bearBOS or s.bullCHoCH or s.bearCHoCH)
         cx.barsSinceEvt := cx.barsSinceEvt + 1
         if cx.barsSinceEvt > cf.rangeBarsThresh
@@ -1735,18 +1753,18 @@ f_zones(cf, cx, v, fv, aV, swH, swL, bullBOS, bearBOS, bullCHoCH, bearCHoCH, mvS
         dw1 = rr1 > 0 ? (math.min(open[1], close[1]) - low[1]) / rr1 : 0.0
         if uw1 >= cf.rjbWickMin
             zb = math.max(open[1], close[1])
-            if high < zb or (close < zb and open < zb)
+            // R1 — a "weak" RJB (next candle re-entered the wick) was never tradable (R5) but still got a
+            // box, IDM✓ and ★★ text on the review charts. Only create the block when the next candle held out.
+            if high < zb
                 z = f_zAdd(cf, cx, v, aV, "RJB", false, high[1], zb, bar_index - 1, onRjb)
                 z.confirmed := false
-                z.weak      := high >= zb
                 z.pendFvg   := 2
                 f_zStyle(v, z)
         if dw1 >= cf.rjbWickMin
             zt = math.min(open[1], close[1])
-            if low > zt or (close > zt and open > zt)
+            if low > zt
                 z = f_zAdd(cf, cx, v, aV, "RJB", true, zt, low[1], bar_index - 1, onRjb)
                 z.confirmed := false
-                z.weak      := low <= zt
                 z.pendFvg   := 2
                 f_zStyle(v, z)
 
@@ -2030,8 +2048,13 @@ f_htf(cf, cx, fv, isNew, o1, h1, l1, c1, o2, h2, l2, c2, ph, pl) =>
             cx.hHiBroken := true
         if sBrk
             cx.hLoBroken := true
-        chUpH = cx.hTrend == "BEAR" and not na(cx.hMajorHigh) and c1 > cx.hMajorHigh
-        chDnH = cx.hTrend == "BULL" and not na(cx.hMajorLow)  and c1 < cx.hMajorLow
+        // R1 — the first BULL BOS of a chart can happen before any HTF pivot low exists, which left
+        // hMajorLow = na and the bias stuck at BULL through a two-week decline (gold review chart).
+        // Fall back to the last pivot as the protected swing.
+        protH = nz(cx.hMajorHigh, cx.hCurHigh)
+        protL = nz(cx.hMajorLow,  cx.hCurLow)
+        chUpH = cx.hTrend == "BEAR" and not na(protH) and c1 > protH
+        chDnH = cx.hTrend == "BULL" and not na(protL) and c1 < protL
         if dispH
             if chUpH
                 cx.hTrend    := "BULL"
@@ -2049,10 +2072,14 @@ f_htf(cf, cx, fv, isNew, o1, h1, l1, c1, o2, h2, l2, c2, ph, pl) =>
             cx.hPrevHigh := cx.hCurHigh
             cx.hCurHigh  := ph
             cx.hHiBroken := false
+            if cx.hTrend == "BEAR" and na(cx.hMajorHigh)
+                cx.hMajorHigh := ph
         if not na(pl)
             cx.hPrevLow  := cx.hCurLow
             cx.hCurLow   := pl
             cx.hLoBroken := false
+            if cx.hTrend == "BULL" and na(cx.hMajorLow)
+                cx.hMajorLow := pl
     fv.htfBias    := cx.hTrend
     fv.htfSweepUp := cx.hBarCount - cx.sweepUpAt < cf.sweepValidHTF
     fv.htfSweepDn := cx.hBarCount - cx.sweepDnAt < cf.sweepValidHTF
@@ -2115,7 +2142,7 @@ cd = f_candle(cfg, atrV, refLo, refHi)
 f_fvg(cfg, ctx, vis, ft, atrV, d_fvg, d_fvgMit)
 // S4 — displacement gate for structure: the breaking candle itself
 dispOk = i_dispGate == "Off" or (cd.bodyRatio >= i_dispBody and cd.rng >= atrV * i_dispRng)
-st = f_structure(cfg, ctx, sx, swingHi, swingLo, atrV, dispOk, i_pendBars, i_failMax)
+st = f_structure(cfg, ctx, sx, swingHi, swingLo, atrV, dispOk, atrV * i_dispDist, i_pendBars, i_failMax)
 // S5 — a wick through the last pivot is an INTERNAL sweep (M49 / M53); it no longer arms the
 // HP-OB / M41 / M45 / M54 chain, which wants a qualified liquidity level
 if st.bullSweep
@@ -2794,7 +2821,11 @@ f_bid(bL, s06 and arrOkBull and pbOk, "M06", 1, "Multiple pin bars on pullback +
 f_bid(bL, s07b, "M07", 1, "Multi pin bars on impulse → liquidity built above, reversal candle at top (counter-trend)")
 f_bid(bL, s08 and arrOkBull and pbOk and rtOk, "M08", 2, "Trend + support/demand + bullish pin bar")
 f_bid(bL, s09 and arrOkBull, "M09", 3, "HIGH QUALITY: strong pin bar at level with ≥2 liquidity targets above")
-f_bid(bL, s10, "M10", 3, "Liquidity SWEEP reversal (IMMEDIATE): swept " + ft.sweptKindLo + ", closed back above. SL below sweep low")
+// R1 — M10 on a POOL level is tier 2; only a PD / PW / session level sweep is tier 3. At tier 3 the
+// module cleared the minimum score with zero confluence and flooded every 5m chart both ways.
+m10TierL = str.contains(ft.sweptKindLo, "PD") or str.contains(ft.sweptKindLo, "PW") or str.contains(ft.sweptKindLo, "SES") ? 3 : 2
+m10TierS = str.contains(ft.sweptKindHi, "PD") or str.contains(ft.sweptKindHi, "PW") or str.contains(ft.sweptKindHi, "SES") ? 3 : 2
+f_bid(bL, s10, "M10", m10TierL, "Liquidity SWEEP reversal (IMMEDIATE): swept " + ft.sweptKindLo + ", closed back above. SL below sweep low")
 f_bid(bL, s11, "M11", 1, "Doji at level + next candle broke doji high AND the level")
 f_bid(bL, s12 and arrOkBull, "M12", 1, "Confluence: flipped zone + key level + reversal candle")
 f_bid(bL, s14, "M14", 1, "Dip below flipped level, rejection, bullish pin close → breakout confirmed")
@@ -2823,7 +2854,7 @@ f_bid(bS, s06b and arrOkBear and pbOk, "M06", 1, "Multiple pin bars on pullback 
 f_bid(bS, s07, "M07", 1, "Multi pin bars on impulse → liquidity below, shooting star / engulfing at top")
 f_bid(bS, s08b and arrOkBear and pbOk and rtOk, "M08", 2, "Trend + resistance/supply + bearish pin bar")
 f_bid(bS, s09b and arrOkBear, "M09", 3, "HIGH QUALITY: strong pin bar at level with ≥2 liquidity targets below")
-f_bid(bS, s10b, "M10", 3, "Liquidity SWEEP reversal (IMMEDIATE): swept " + ft.sweptKindHi + ", closed back below. SL above sweep high")
+f_bid(bS, s10b, "M10", m10TierS, "Liquidity SWEEP reversal (IMMEDIATE): swept " + ft.sweptKindHi + ", closed back below. SL above sweep high")
 f_bid(bS, s11b, "M11", 1, "Doji at level + next candle broke doji low AND the level")
 f_bid(bS, s12b and arrOkBear, "M12", 1, "Confluence: flipped zone + key level + reversal candle")
 f_bid(bS, s14b, "M14", 1, "Pop above flipped level, rejection, bearish pin close")
@@ -3160,7 +3191,9 @@ i_fixedRm   = input.float(2.0,  "Fixed R multiple (TP1; TP2 = +1R)", minval = 0.
 i_rrReal    = input.bool(true,  "Require a REAL target (zone / FVG / liquidity) at Min R:R", group = gT,
      tooltip = "On = a signal shows only when an actual opposite zone, FVG or liquidity level sits at least Min R:R away. Off = a synthetic Min R:R target is used, which may point at empty space.")
 // S6 — score = tier × 2 (2..8) + confluence (−5..+11). Thresholds are inputs.
-i_minScore  = input.int(6,      "Min score to show", minval = 0, maxval = 20, group = gT, inline = "t3")
+// R1 — 6 let any tier-3 module through with no confluence (tier 3 = 6 + base 1). 8 needs two
+// confluence points at tier 3, four at tier 2; tier-4 sequence modules still show on their own.
+i_minScore  = input.int(8,      "Min score to show", minval = 0, maxval = 20, group = gT, inline = "t3")
 i_gradeAp   = input.int(11,     "A+ ≥", minval = 1, maxval = 20, group = gT, inline = "t3g")
 i_gradeA    = input.int(8,      "A ≥",  minval = 1, maxval = 20, group = gT, inline = "t3g")
 i_sigGap    = input.int(10,     "Min bars between signals (both sides)", minval = 0, maxval = 100, group = gT,
@@ -3393,10 +3426,11 @@ if okL and okS
         okL  := false
 // inside the gap only a stronger OPPOSITE-side signal gets through (a genuine reversal)
 gapOk = bar_index - sigBar >= i_sigGap
-if okL and not gapOk and not (sigDir == -1 and sigL.score > sigScore)
+// R1 — the override needs a clear margin (+2), otherwise one consolidation printed ▲M10 / ▼M10 pairs
+if okL and not gapOk and not (sigDir == -1 and sigL.score >= sigScore + 2)
     sigL := Sig.new()
     okL  := false
-if okS and not gapOk and not (sigDir == 1 and sigS.score > sigScore)
+if okS and not gapOk and not (sigDir == 1 and sigS.score >= sigScore + 2)
     sigS := Sig.new()
     okS  := false
 if barstate.isconfirmed and (okL or okS)
@@ -3624,8 +3658,8 @@ f_panel(tb, cx, fv, stc, v, sgl, sgs, hL, hS, tfHtf) =>
     table.cell(tb, 0, 5,  "Move phase",    text_color = v.txt, bgcolor = lab)
     table.cell(tb, 1, 5,  stc.movePhase, text_color = chart.fg_color)
     table.cell(tb, 0, 6,  "Active zone",   text_color = v.txt, bgcolor = lab)
-    zbT = fv.zb.kind == "" ? "" : "Bull " + fv.zb.kind + (fv.zb.touches <= 1 ? " (fresh)" : " (×" + str.tostring(fv.zb.touches) + ")") + (fv.zb.sweepReq ? " ⚠SWEEP REQ" : "")
-    zsT = fv.zs.kind == "" ? "" : "Bear " + fv.zs.kind + (fv.zs.touches <= 1 ? " (fresh)" : " (×" + str.tostring(fv.zs.touches) + ")") + (fv.zs.sweepReq ? " ⚠SWEEP REQ" : "")
+    zbT = fv.zb.kind == "" ? "" : "Bull " + (fv.zb.kind == "SR" ? (fv.zb.kl >= 4 ? "KL★" : "KL") : fv.zb.kind) + (fv.zb.touches <= 1 ? " (fresh)" : " (×" + str.tostring(fv.zb.touches) + ")") + (fv.zb.sweepReq ? " ⚠SWEEP REQ" : "")
+    zsT = fv.zs.kind == "" ? "" : "Bear " + (fv.zs.kind == "SR" ? (fv.zs.kl >= 4 ? "KL★" : "KL") : fv.zs.kind) + (fv.zs.touches <= 1 ? " (fresh)" : " (×" + str.tostring(fv.zs.touches) + ")") + (fv.zs.sweepReq ? " ⚠SWEEP REQ" : "")
     table.cell(tb, 1, 6,  zbT == "" and zsT == "" ? "—" : zbT + (zbT != "" and zsT != "" ? " · " : "") + zsT, text_color = chart.fg_color)
     table.cell(tb, 0, 7,  "Arrival",       text_color = v.txt, bgcolor = lab)
     table.cell(tb, 1, 7,  fv.zb.kind == "" and fv.zs.kind == "" ? "—" : fv.arrivalWeak ? "WEAK ✅" : fv.arrivalStrong ? "STRONG ❌" : "—", text_color = chart.fg_color)
