@@ -19,6 +19,8 @@
 //      majorLow / majorHigh. HTF bias follows the same rules. movePhase is trend-aware.
 //  S5  sweep qualification: only pool / PDH-PDL / PWH-PWL / SESH-SESL (+ext, opt-in) sweeps arm the
 //      HP-OB / M41 / M45 / M54 / CISD-reliability / f_conf chain; pivot wicks are internal (M49 / M53).
+//  S6  one score: module TIER (1-4) × 2 + f_conf. Base-score bonuses (liq / HP / M20) removed — f_conf
+//      already counts them. Grade thresholds and min score are inputs (A+ ≥ 11, A ≥ 8, show ≥ 6).
 //  spec : INDICATOR_DEV_SPEC_BN.md   rules : BUILD_PROTOCOL_BN.md (R1 call-once, R2 one Cfg, R3 state in Ctx)
 //  audit: FORENSIC_AUDIT_BN.md — this build implements stages 1, 2 and the cheap part of 3.
 //  layers: L0 candle · L1 structure · L2 FVG/strength · L3 liquidity · L4 zones · L5 HTF · L6 setups · L7 trade
@@ -2653,13 +2655,11 @@ p6   = en_M38 and ft.breakDn and ft.swLoInLeg >= 2 and cd.isBear and cd.bodyRati
 p6b  = en_M38 and ft.breakUp and ft.swHiInLeg >= 2 and cd.isBull and cd.bodyRatio >= 0.5
 
 // ── score & pick the best LONG and best SHORT (one signal per side per bar) ──
-liqBonusL = ft.bslAbove >= 1 ? 1 : 0
-liqBonusS = ft.sslBelow >= 1 ? 1 : 0
-m20L = ft.zDepStrong and ft.arrivalWeak ? 2 : 0
-m20S = m20L
-hpB  = ft.zHp ? 1 : 0
-
-// strictly greater, so an equal score keeps the earlier candidate (see the M13 note in the header)
+// S6 (audit B7 / RC2) — one scoring system. Each module bids a TIER (4 = full sweep→displacement→
+// structure→POI sequence · 3 = POI with one proof · 2 = break / pattern with a level · 1 = candle-
+// only) and the final score is tier × 2 + f_conf. The old per-module base score was discarded after
+// the pick, so an M03 and an M37 showed the same grade; and its liquidity / HP / M20 bonuses are
+// already counted by f_conf. Strictly greater: an equal tier keeps the earlier (higher-quality) candidate.
 f_bid(b, cond, name, sc, note) =>
     if cond and sc > b.s
         b.n := name
@@ -2670,62 +2670,62 @@ bL = Best.new()
 bS = Best.new()
 
 // LONG candidates
-f_bid(bL, s02 and arrOkBull, "M02", 4 + liqBonusL, "Pin-bar liquidity trap: shrinking upper wicks after breakout → LONG, TP = jammed liquidity above")
-f_bid(bL, s01b and arrOkBull, "M01", 4 + liqBonusL, "Breakout rejection trap (mirror): growing lower wicks then strong close back above")
-f_bid(bL, s03, "M03", 3 + liqBonusL, "Inside-bar breakout: close above the inside bar (IB held above 50% of breakout candle)")
-f_bid(bL, s04b and arrOkBull and pbOk, "M04", 3 + (bullTrend ? 1 : 0) + m20L, "Doji move reversal at strong level: weak arrival (dojis) + reversal candle")
-f_bid(bL, s05, "M05", 3 + liqBonusL, "Pin bar right after breakout: flipped support held")
-f_bid(bL, s06 and arrOkBull and pbOk, "M06", 4 + m20L + liqBonusL, "Multiple pin bars on pullback + pin bar at support/demand")
-f_bid(bL, s07b, "M07", 3, "Multi pin bars on impulse → liquidity built above, reversal candle at top (counter-trend)")
-f_bid(bL, s08 and arrOkBull and pbOk and rtOk, "M08", 3 + m20L + liqBonusL, "Trend + support/demand + bullish pin bar")
-f_bid(bL, s09 and arrOkBull, "M09", 6 + m20L, "HIGH QUALITY: strong pin bar at level with ≥2 liquidity targets above")
-f_bid(bL, s10, "M10", 5 + liqBonusL, "Liquidity SWEEP reversal (IMMEDIATE): swept " + ft.sweptKindLo + ", closed back above. SL below sweep low")
-f_bid(bL, s11, "M11", 3, "Doji at level + next candle broke doji high AND the level")
-f_bid(bL, s12 and arrOkBull, "M12", 4 + m20L, "Confluence: flipped zone + key level + reversal candle")
-f_bid(bL, s14, "M14", 3 + liqBonusL, "Dip below flipped level, rejection, bullish pin close → breakout confirmed")
-f_bid(bL, s15, "M15", 4 + liqBonusL, "Breakout candle is itself a bullish pin bar (took liquidity below first)")
-f_bid(bL, s21b and arrOkBull, "M21", 6, "Support volume reversal: strong departure, weak arrival, reversal candle + high volume")
-f_bid(bL, s22, "M22", 4 + (ft.brkTimeOk ? 1 : 0), "REAL breakout: weak approach, strong body + volume spike")
-f_bid(bL, s23 and arrOkBull, "M23", 3 + m20L, "Volume fading on pullback + reversal at support (real pullback)")
-f_bid(bL, s24b, "M24", 4, "Displacement trap reversed: fake breakdown after strong arrival → LONG")
-f_bid(bL, s25b, "M25", 3, "FOMO trap (mirror): exhaustion sell-off, reversal candle")
-f_bid(bL, s29b, "M29", 3, "Strong-move trap: big candles without FVG → reversal, TP = their highs")
-f_bid(bL, s33 and rtOk, "M33", 6 + liqBonusL, "Zone flip model: strong breakout → weak retest → refusal, trend + HTF aligned")
-f_bid(bL, s36 and pbOk, "M36", 5 + hpB + liqBonusL, "Weak retracement into valid OB + bullish reversal")
-f_bid(bL, s37, "M37", 7 + hpB + liqBonusL, "Inducement block: EQL swept before the OB tap + reversal (highest quality)")
-f_bid(bL, p1, "M38-P1", 4, "Compression→expansion: real breakout with imbalance — buy the retest")
-f_bid(bL, p3b or p5b, "M38-P3/5", 3, "Wick-bias trap during breakdown → reversal LONG")
-f_bid(bL, p2b or p7b, "M38-P2/7", 4, "Fake breakdown (weak move / demand right below) → LONG")
-f_bid(bL, p6b, "M38-P6", 4, "Structural breakout trap (mirror): several swing highs stepped into the level → liquidity above → LONG on the close through")
+f_bid(bL, s02 and arrOkBull, "M02", 2, "Pin-bar liquidity trap: shrinking upper wicks after breakout → LONG, TP = jammed liquidity above")
+f_bid(bL, s01b and arrOkBull, "M01", 2, "Breakout rejection trap (mirror): growing lower wicks then strong close back above")
+f_bid(bL, s03, "M03", 1, "Inside-bar breakout: close above the inside bar (IB held above 50% of breakout candle)")
+f_bid(bL, s04b and arrOkBull and pbOk, "M04", 1, "Doji move reversal at strong level: weak arrival (dojis) + reversal candle")
+f_bid(bL, s05, "M05", 2, "Pin bar right after breakout: flipped support held")
+f_bid(bL, s06 and arrOkBull and pbOk, "M06", 1, "Multiple pin bars on pullback + pin bar at support/demand")
+f_bid(bL, s07b, "M07", 1, "Multi pin bars on impulse → liquidity built above, reversal candle at top (counter-trend)")
+f_bid(bL, s08 and arrOkBull and pbOk and rtOk, "M08", 2, "Trend + support/demand + bullish pin bar")
+f_bid(bL, s09 and arrOkBull, "M09", 3, "HIGH QUALITY: strong pin bar at level with ≥2 liquidity targets above")
+f_bid(bL, s10, "M10", 3, "Liquidity SWEEP reversal (IMMEDIATE): swept " + ft.sweptKindLo + ", closed back above. SL below sweep low")
+f_bid(bL, s11, "M11", 1, "Doji at level + next candle broke doji high AND the level")
+f_bid(bL, s12 and arrOkBull, "M12", 1, "Confluence: flipped zone + key level + reversal candle")
+f_bid(bL, s14, "M14", 1, "Dip below flipped level, rejection, bullish pin close → breakout confirmed")
+f_bid(bL, s15, "M15", 2, "Breakout candle is itself a bullish pin bar (took liquidity below first)")
+f_bid(bL, s21b and arrOkBull, "M21", 1, "Support volume reversal: strong departure, weak arrival, reversal candle + high volume")
+f_bid(bL, s22, "M22", 1, "REAL breakout: weak approach, strong body + volume spike")
+f_bid(bL, s23 and arrOkBull, "M23", 1, "Volume fading on pullback + reversal at support (real pullback)")
+f_bid(bL, s24b, "M24", 1, "Displacement trap reversed: fake breakdown after strong arrival → LONG")
+f_bid(bL, s25b, "M25", 1, "FOMO trap (mirror): exhaustion sell-off, reversal candle")
+f_bid(bL, s29b, "M29", 1, "Strong-move trap: big candles without FVG → reversal, TP = their highs")
+f_bid(bL, s33 and rtOk, "M33", 3, "Zone flip model: strong breakout → weak retest → refusal, trend + HTF aligned")
+f_bid(bL, s36 and pbOk, "M36", 3, "Weak retracement into valid OB + bullish reversal")
+f_bid(bL, s37, "M37", 4, "Inducement block: EQL swept before the OB tap + reversal (highest quality)")
+f_bid(bL, p1, "M38-P1", 1, "Compression→expansion: real breakout with imbalance — buy the retest")
+f_bid(bL, p3b or p5b, "M38-P3/5", 1, "Wick-bias trap during breakdown → reversal LONG")
+f_bid(bL, p2b or p7b, "M38-P2/7", 1, "Fake breakdown (weak move / demand right below) → LONG")
+f_bid(bL, p6b, "M38-P6", 1, "Structural breakout trap (mirror): several swing highs stepped into the level → liquidity above → LONG on the close through")
 
 // SHORT candidates
-f_bid(bS, s01 and arrOkBear, "M01", 4 + liqBonusS, "Breakout rejection trap: growing upper wicks after breakout, strong close back below → SHORT")
-f_bid(bS, s02b and arrOkBear, "M02", 4 + liqBonusS, "Pin-bar liquidity trap (mirror): shrinking lower wicks → SHORT")
-f_bid(bS, s03b, "M03", 3 + liqBonusS, "Inside-bar breakdown: close below the inside bar")
-f_bid(bS, s04 and arrOkBear and pbOk, "M04", 3 + (bearTrend ? 1 : 0) + m20S, "Doji move reversal at strong resistance")
-f_bid(bS, s05b, "M05", 3 + liqBonusS, "Pin bar right after breakdown")
-f_bid(bS, s06b and arrOkBear and pbOk, "M06", 4 + m20S + liqBonusS, "Multiple pin bars on pullback + pin bar at resistance/supply")
-f_bid(bS, s07, "M07", 3, "Multi pin bars on impulse → liquidity below, shooting star / engulfing at top")
-f_bid(bS, s08b and arrOkBear and pbOk and rtOk, "M08", 3 + m20S + liqBonusS, "Trend + resistance/supply + bearish pin bar")
-f_bid(bS, s09b and arrOkBear, "M09", 6 + m20S, "HIGH QUALITY: strong pin bar at level with ≥2 liquidity targets below")
-f_bid(bS, s10b, "M10", 5 + liqBonusS, "Liquidity SWEEP reversal (IMMEDIATE): swept " + ft.sweptKindHi + ", closed back below. SL above sweep high")
-f_bid(bS, s11b, "M11", 3, "Doji at level + next candle broke doji low AND the level")
-f_bid(bS, s12b and arrOkBear, "M12", 4 + m20S, "Confluence: flipped zone + key level + reversal candle")
-f_bid(bS, s14b, "M14", 3 + liqBonusS, "Pop above flipped level, rejection, bearish pin close")
-f_bid(bS, s15b, "M15", 4 + liqBonusS, "Breakdown candle is itself a bearish pin bar")
-f_bid(bS, s21 and arrOkBear, "M21", 6, "Resistance volume reversal")
-f_bid(bS, s22b, "M22", 4 + (ft.brkTimeOk ? 1 : 0), "REAL breakdown: weak approach, strong body + volume spike")
-f_bid(bS, s23b and arrOkBear, "M23", 3 + m20S, "Volume fading on pullback + reversal at resistance")
-f_bid(bS, s24, "M24", 4, "Displacement trap: high-volume breakout after STRONG arrival → smart money exit → SHORT")
-f_bid(bS, s25, "M25", 3, "FOMO trap: ≥3 green + spike + no BOS → reversal candle")
-f_bid(bS, s29, "M29", 3, "Strong-move trap: big candles without FVG → reversal, TP = their lows")
-f_bid(bS, s33b and rtOk, "M33", 6 + liqBonusS, "Zone flip model (bearish)")
-f_bid(bS, s36b and pbOk, "M36", 5 + hpB + liqBonusS, "Weak retracement into valid bearish OB + reversal")
-f_bid(bS, s37b, "M37", 7 + hpB + liqBonusS, "Inducement block (bearish): EQH swept before OB tap")
-f_bid(bS, p1b, "M38-P1", 4, "Compression→expansion breakdown with imbalance — sell the retest")
-f_bid(bS, p3 or p5, "M38-P3/5", 3, "Wick-bias trap during breakout → reversal SHORT")
-f_bid(bS, p2 or p7, "M38-P2/7", 4, "Fake breakout (weak move / supply right above) → SHORT")
-f_bid(bS, p6, "M38-P6", 4, "Structural breakout trap: several swing lows stepped into the level → liquidity below → SHORT on the close through")
+f_bid(bS, s01 and arrOkBear, "M01", 2, "Breakout rejection trap: growing upper wicks after breakout, strong close back below → SHORT")
+f_bid(bS, s02b and arrOkBear, "M02", 2, "Pin-bar liquidity trap (mirror): shrinking lower wicks → SHORT")
+f_bid(bS, s03b, "M03", 1, "Inside-bar breakdown: close below the inside bar")
+f_bid(bS, s04 and arrOkBear and pbOk, "M04", 1, "Doji move reversal at strong resistance")
+f_bid(bS, s05b, "M05", 2, "Pin bar right after breakdown")
+f_bid(bS, s06b and arrOkBear and pbOk, "M06", 1, "Multiple pin bars on pullback + pin bar at resistance/supply")
+f_bid(bS, s07, "M07", 1, "Multi pin bars on impulse → liquidity below, shooting star / engulfing at top")
+f_bid(bS, s08b and arrOkBear and pbOk and rtOk, "M08", 2, "Trend + resistance/supply + bearish pin bar")
+f_bid(bS, s09b and arrOkBear, "M09", 3, "HIGH QUALITY: strong pin bar at level with ≥2 liquidity targets below")
+f_bid(bS, s10b, "M10", 3, "Liquidity SWEEP reversal (IMMEDIATE): swept " + ft.sweptKindHi + ", closed back below. SL above sweep high")
+f_bid(bS, s11b, "M11", 1, "Doji at level + next candle broke doji low AND the level")
+f_bid(bS, s12b and arrOkBear, "M12", 1, "Confluence: flipped zone + key level + reversal candle")
+f_bid(bS, s14b, "M14", 1, "Pop above flipped level, rejection, bearish pin close")
+f_bid(bS, s15b, "M15", 2, "Breakdown candle is itself a bearish pin bar")
+f_bid(bS, s21 and arrOkBear, "M21", 1, "Resistance volume reversal")
+f_bid(bS, s22b, "M22", 1, "REAL breakdown: weak approach, strong body + volume spike")
+f_bid(bS, s23b and arrOkBear, "M23", 1, "Volume fading on pullback + reversal at resistance")
+f_bid(bS, s24, "M24", 1, "Displacement trap: high-volume breakout after STRONG arrival → smart money exit → SHORT")
+f_bid(bS, s25, "M25", 1, "FOMO trap: ≥3 green + spike + no BOS → reversal candle")
+f_bid(bS, s29, "M29", 1, "Strong-move trap: big candles without FVG → reversal, TP = their lows")
+f_bid(bS, s33b and rtOk, "M33", 3, "Zone flip model (bearish)")
+f_bid(bS, s36b and pbOk, "M36", 3, "Weak retracement into valid bearish OB + reversal")
+f_bid(bS, s37b, "M37", 4, "Inducement block (bearish): EQH swept before OB tap")
+f_bid(bS, p1b, "M38-P1", 1, "Compression→expansion breakdown with imbalance — sell the retest")
+f_bid(bS, p3 or p5, "M38-P3/5", 1, "Wick-bias trap during breakout → reversal SHORT")
+f_bid(bS, p2 or p7, "M38-P2/7", 1, "Fake breakout (weak move / supply right above) → SHORT")
+f_bid(bS, p6, "M38-P6", 1, "Structural breakout trap: several swing lows stepped into the level → liquidity below → SHORT on the close through")
 
 // warnings (not trades) — priority label only
 warnUp = w07 ? "⚠M07 liq below" : w25 ? "⚠M25 FOMO" : w29 ? "⚠M29 weak move" : w24 ? "⚠M24 trap?" : ft.runUp and en_M10 and (d_liqAll or ft.runMajor) ? "RUN — avoid" : ""
@@ -2811,38 +2811,38 @@ if s54b
     ctx.m54StageB := 0
 
 // continue the LONG bids
-f_bid(bL, s39 and arrOkBull, "M39", 5 + liqBonusL, "Reclaimed block retest + bullish reversal")
-f_bid(bL, s40, "M40", 4 + liqBonusL, "Rejection block (wick zone) retest + reversal")
-f_bid(bL, s41, "M41", 6 + liqBonusL, "Sweep + FVG confluence: low swept, STRONG move left FVG, retrace reversal")
-f_bid(bL, s42, "M42", 6 + (ft.zNearSwept ? 2 : 0) + hpB, "High-probability demand: strong departure · 50% tapped · weak arrival" + (ft.zNearSwept ? " · ★★ near-miss then sweep (strongest)" : ""))
-f_bid(bL, s44 and arrOkBull, "M44", 5 + m20L, "Key level approach: choppy / build-up / depletion → reversal")
-f_bid(bL, s45, "M45", 6 + liqBonusL + (m45Strong ? 1 : 0), "Sweep → BOS/CHoCH → breaker/OB retest (★ = the CHoCH form, +1)")
-f_bid(bL, s46, "M46", 5 + liqBonusL + (ft.cisdRel >= 2 ? 1 : 0), "CISD (early reversal) with reliability → zone reaction. SL beyond zone")
-f_bid(bL, s47, "M47", 3, "Manipulated breakdown: sweep candle below LL in bearish trend → LONG, TP nearest reaction zone (trail after TP1)")
-f_bid(bL, s48, "M48", 5, "Fake CHoCH: LTF broke major low but HTF still BULL (inducement) → OB rejection LONG")
-f_bid(bL, s49, "M49", 4 + liqBonusL, "Internal liquidity gap: internal low swept, reaction zone reversal")
-f_bid(bL, s50, "M50", 5, "Range manipulation: range broke DOWN against trend → OB / FVG reversal. TP = external liquidity above range")
-f_bid(bL, s51 and pbOk, "M51", 5 + liqBonusL, "Smart BOS: aggressive BOS with FVG → OB/support retest")
-f_bid(bL, s52, "M52", 5, "Smart reversal (mirror): demand rejection → CHoCH up → retrace reversal")
-f_bid(bL, s53 or s53alt, "M53", s53alt ? 3 : 5, s53alt ? "Smart pullback trap — alternative range break-UP entry" : "Smart pullback trap: bearish pullback → range → break down → reversal at recent low")
-f_bid(bL, s54, "M54", 6 + liqBonusL, "Smart S&D trap: demand reject → stop hunt → BOS up → retrace reversal")
+f_bid(bL, s39 and arrOkBull, "M39", 3, "Reclaimed block retest + bullish reversal")
+f_bid(bL, s40, "M40", 2, "Rejection block (wick zone) retest + reversal")
+f_bid(bL, s41, "M41", 4, "Sweep + FVG confluence: low swept, STRONG move left FVG, retrace reversal")
+f_bid(bL, s42, "M42", 4, "High-probability demand: strong departure · 50% tapped · weak arrival" + (ft.zNearSwept ? " · ★★ near-miss then sweep (strongest)" : ""))
+f_bid(bL, s44 and arrOkBull, "M44", 1, "Key level approach: choppy / build-up / depletion → reversal")
+f_bid(bL, s45, "M45", m45Strong ? 4 : 3, "Sweep → BOS/CHoCH → breaker/OB retest (★ = the CHoCH form, +1)")
+f_bid(bL, s46, "M46", 3, "CISD (early reversal) with reliability → zone reaction. SL beyond zone")
+f_bid(bL, s47, "M47", 1, "Manipulated breakdown: sweep candle below LL in bearish trend → LONG, TP nearest reaction zone (trail after TP1)")
+f_bid(bL, s48, "M48", 1, "Fake CHoCH: LTF broke major low but HTF still BULL (inducement) → OB rejection LONG")
+f_bid(bL, s49, "M49", 1, "Internal liquidity gap: internal low swept, reaction zone reversal")
+f_bid(bL, s50, "M50", 1, "Range manipulation: range broke DOWN against trend → OB / FVG reversal. TP = external liquidity above range")
+f_bid(bL, s51 and pbOk, "M51", 3, "Smart BOS: aggressive BOS with FVG → OB/support retest")
+f_bid(bL, s52, "M52", 1, "Smart reversal (mirror): demand rejection → CHoCH up → retrace reversal")
+f_bid(bL, s53 or s53alt, "M53", 1, s53alt ? "Smart pullback trap — alternative range break-UP entry" : "Smart pullback trap: bearish pullback → range → break down → reversal at recent low")
+f_bid(bL, s54, "M54", 4, "Smart S&D trap: demand reject → stop hunt → BOS up → retrace reversal")
 
 // continue the SHORT bids
-f_bid(bS, s39b and arrOkBear, "M39", 5 + liqBonusS, "Reclaimed block retest + bearish reversal")
-f_bid(bS, s40b, "M40", 4 + liqBonusS, "Rejection block (wick zone) retest + reversal")
-f_bid(bS, s41b, "M41", 6 + liqBonusS, "Sweep + FVG confluence: high swept, STRONG move left FVG, retrace reversal")
-f_bid(bS, s42b, "M42", 6 + (ft.zNearSwept ? 2 : 0) + hpB, "High-probability supply: strong departure · 50% tapped · weak arrival" + (ft.zNearSwept ? " · ★★ near-miss then sweep (strongest)" : ""))
-f_bid(bS, s44b and arrOkBear, "M44", 5 + m20S, "Key level approach: choppy / build-up / depletion → reversal")
-f_bid(bS, s45b, "M45", 6 + liqBonusS + (m45Strong ? 1 : 0), "Sweep → BOS/CHoCH → breaker/OB retest (★ = the CHoCH form, +1)")
-f_bid(bS, s46b, "M46", 5 + liqBonusS + (ft.cisdRel >= 2 ? 1 : 0), "CISD (early reversal) with reliability → zone reaction. SL beyond zone")
-f_bid(bS, s47b, "M47", 3, "Manipulated breakout: sweep candle above HH in bullish trend → SHORT, TP nearest reaction zone (trail after TP1)")
-f_bid(bS, s48b, "M48", 5, "Fake CHoCH (mirror): LTF broke major high but HTF still BEAR → OB rejection SHORT")
-f_bid(bS, s49b, "M49", 4 + liqBonusS, "Internal liquidity gap (mirror)")
-f_bid(bS, s50b, "M50", 5, "Range manipulation (mirror): range broke UP against trend → supply / FVG reversal")
-f_bid(bS, s51b and pbOk, "M51", 5 + liqBonusS, "Smart BOS (bearish): aggressive BOS with FVG → OB/resistance retest")
-f_bid(bS, s52b, "M52", 5, "Smart reversal: supply rejection → CHoCH down → retrace to FVG/supply/OB → SHORT")
-f_bid(bS, s53b, "M53", 5, "Smart pullback trap (mirror)")
-f_bid(bS, s54b, "M54", 6 + liqBonusS, "Smart S&D trap (mirror): supply reject → stop hunt → BOS down → retrace")
+f_bid(bS, s39b and arrOkBear, "M39", 3, "Reclaimed block retest + bearish reversal")
+f_bid(bS, s40b, "M40", 2, "Rejection block (wick zone) retest + reversal")
+f_bid(bS, s41b, "M41", 4, "Sweep + FVG confluence: high swept, STRONG move left FVG, retrace reversal")
+f_bid(bS, s42b, "M42", 4, "High-probability supply: strong departure · 50% tapped · weak arrival" + (ft.zNearSwept ? " · ★★ near-miss then sweep (strongest)" : ""))
+f_bid(bS, s44b and arrOkBear, "M44", 1, "Key level approach: choppy / build-up / depletion → reversal")
+f_bid(bS, s45b, "M45", m45Strong ? 4 : 3, "Sweep → BOS/CHoCH → breaker/OB retest (★ = the CHoCH form, +1)")
+f_bid(bS, s46b, "M46", 3, "CISD (early reversal) with reliability → zone reaction. SL beyond zone")
+f_bid(bS, s47b, "M47", 1, "Manipulated breakout: sweep candle above HH in bullish trend → SHORT, TP nearest reaction zone (trail after TP1)")
+f_bid(bS, s48b, "M48", 1, "Fake CHoCH (mirror): LTF broke major high but HTF still BEAR → OB rejection SHORT")
+f_bid(bS, s49b, "M49", 1, "Internal liquidity gap (mirror)")
+f_bid(bS, s50b, "M50", 1, "Range manipulation (mirror): range broke UP against trend → supply / FVG reversal")
+f_bid(bS, s51b and pbOk, "M51", 3, "Smart BOS (bearish): aggressive BOS with FVG → OB/resistance retest")
+f_bid(bS, s52b, "M52", 1, "Smart reversal: supply rejection → CHoCH down → retrace to FVG/supply/OB → SHORT")
+f_bid(bS, s53b, "M53", 1, "Smart pullback trap (mirror)")
+f_bid(bS, s54b, "M54", 4, "Smart S&D trap (mirror): supply reject → stop hunt → BOS down → retrace")
 
 // extra warnings from J–R
 warnUp := warnUp != "" ? warnUp : w41 and ctx.m41Dir == 9 ? "M41 NO TRADE (no FVG)" : w51 ? "⚠M51 weak BOS — consolidation risk" : ""
@@ -3010,26 +3010,26 @@ s73  = en_M73 and ft.atProp and ft.atDemand and ft.zFifty and revBull
 s73b = en_M73 and ft.atProp and ft.atSupply and ft.zFifty and revBear
 
 // LONG chain → bL
-f_bid(bL, s58, "M58", 4 + (ft.zKl >= 4 ? 1 : 0), "Double bottom: neckline broken on close")
-f_bid(bL, s62, "M62", 4 + liqBonusL, "Fakeout trap: break failed within 1–2 bars → level tap + reversal against the break")
-f_bid(bL, s63, "M63", 5 + liqBonusL, "Direct breakout (no retest) level revisited → rejection in breakout direction")
-f_bid(bL, s65, "M65", 6, "Trendline + flipped/key level confluence → reversal → counter-move broken")
-f_bid(bL, s68, "M68", 6 + liqBonusL, "HTF sweep of low + LTF CHoCH up → zone/FVG reaction → LONG (SL beyond FVG, TP nearest swing)")
-f_bid(bL, s69, "M69", 5 + liqBonusL, "IFC candle at zone: close above IFC high → BUY (TP just below nearest swing high)")
-f_bid(bL, s70, "M70", 5 + liqBonusL, "Quasimodo left-leg demand + bullish candle (TP1 = CHoCH high)")
-f_bid(bL, s72, "M72", 5, "Operator trap (mirror): breakdown → consolidation under level with lower wicks → strong bullish close back above")
-f_bid(bL, s73, "M73", 7, "Propulsion Block: zone made a strong move, was retraced into, departed again with an imbalance — now tapped at 50% + bullish reversal")
+f_bid(bL, s58, "M58", 2, "Double bottom: neckline broken on close")
+f_bid(bL, s62, "M62", 2, "Fakeout trap: break failed within 1–2 bars → level tap + reversal against the break")
+f_bid(bL, s63, "M63", 1, "Direct breakout (no retest) level revisited → rejection in breakout direction")
+f_bid(bL, s65, "M65", 2, "Trendline + flipped/key level confluence → reversal → counter-move broken")
+f_bid(bL, s68, "M68", 4, "HTF sweep of low + LTF CHoCH up → zone/FVG reaction → LONG (SL beyond FVG, TP nearest swing)")
+f_bid(bL, s69, "M69", 1, "IFC candle at zone: close above IFC high → BUY (TP just below nearest swing high)")
+f_bid(bL, s70, "M70", 2, "Quasimodo left-leg demand + bullish candle (TP1 = CHoCH high)")
+f_bid(bL, s72, "M72", 2, "Operator trap (mirror): breakdown → consolidation under level with lower wicks → strong bullish close back above")
+f_bid(bL, s73, "M73", 4, "Propulsion Block: zone made a strong move, was retraced into, departed again with an imbalance — now tapped at 50% + bullish reversal")
 
 // SHORT chain → bS
-f_bid(bS, s58b, "M58", 4 + (ft.zKl >= 4 ? 1 : 0), "Double top: neckline broken on close")
-f_bid(bS, s62b, "M62", 4 + liqBonusS, "Fakeout trap: failed breakout → level tap + reversal SHORT")
-f_bid(bS, s63b, "M63", 5 + liqBonusS, "Direct breakdown level revisited → rejection SHORT")
-f_bid(bS, s65b, "M65", 6, "Trendline + flipped/key level confluence (bearish)")
-f_bid(bS, s68b, "M68", 6 + liqBonusS, "HTF sweep of high + LTF CHoCH down → zone/FVG reaction → SHORT")
-f_bid(bS, s69b, "M69", 5 + liqBonusS, "IFC candle at zone: close below IFC low → SELL")
-f_bid(bS, s70b, "M70", 5 + liqBonusS, "Quasimodo left-leg supply + bearish candle")
-f_bid(bS, s72b, "M72", 5, "Operator trap: breakout → consolidation above level with upper wicks → strong bearish close back below")
-f_bid(bS, s73b, "M73", 7, "Propulsion Block: zone made a strong move, was retraced into, departed again with an imbalance — now tapped at 50% + bearish reversal")
+f_bid(bS, s58b, "M58", 2, "Double top: neckline broken on close")
+f_bid(bS, s62b, "M62", 2, "Fakeout trap: failed breakout → level tap + reversal SHORT")
+f_bid(bS, s63b, "M63", 1, "Direct breakdown level revisited → rejection SHORT")
+f_bid(bS, s65b, "M65", 2, "Trendline + flipped/key level confluence (bearish)")
+f_bid(bS, s68b, "M68", 4, "HTF sweep of high + LTF CHoCH down → zone/FVG reaction → SHORT")
+f_bid(bS, s69b, "M69", 1, "IFC candle at zone: close below IFC low → SELL")
+f_bid(bS, s70b, "M70", 2, "Quasimodo left-leg supply + bearish candle")
+f_bid(bS, s72b, "M72", 2, "Operator trap: breakout → consolidation above level with upper wicks → strong bearish close back below")
+f_bid(bS, s73b, "M73", 4, "Propulsion Block: zone made a strong move, was retraced into, departed again with an imbalance — now tapped at 50% + bearish reversal")
 
 // ── L7 TRADE ENGINE — §9.1 entry · §9.2 SL priority · §9.3 TP · §9.4 confluence score ──
 gT = "14 · Trade (L7)"
@@ -3044,7 +3044,10 @@ i_fixedR    = input.bool(false, "Fixed-R mode", group = gT, inline = "t2")
 i_fixedRm   = input.float(2.0,  "Fixed R multiple (TP1; TP2 = +1R)", minval = 0.5, step = 0.5, group = gT, inline = "t2")
 i_rrReal    = input.bool(true,  "Require a REAL target (zone / FVG / liquidity) at Min R:R", group = gT,
      tooltip = "On = a signal shows only when an actual opposite zone, FVG or liquidity level sits at least Min R:R away. Off = a synthetic Min R:R target is used, which may point at empty space.")
-i_minScore  = input.int(3,      "Min confluence score to show", minval = 0, maxval = 10, group = gT, inline = "t3")
+// S6 — score = tier × 2 (2..8) + confluence (−5..+11). Thresholds are inputs.
+i_minScore  = input.int(6,      "Min score to show", minval = 0, maxval = 20, group = gT, inline = "t3")
+i_gradeAp   = input.int(11,     "A+ ≥", minval = 1, maxval = 20, group = gT, inline = "t3g")
+i_gradeA    = input.int(8,      "A ≥",  minval = 1, maxval = 20, group = gT, inline = "t3g")
 i_sigGap    = input.int(10,     "Min bars between signals (both sides)", minval = 0, maxval = 100, group = gT,
      tooltip = "Only the LABELS were spaced before; the signal, its trade lines and its alerts were not. One swing through one zone emitted a fresh signal on every reversal candle, so the same move counted as many trades. An opposite-side signal with a strictly HIGHER score still overrides - a real reversal is not blocked.")
 i_entryMode = input.string("IMMEDIATE", "M10 entry mode", options = ["IMMEDIATE", "RETEST", "BOTH"], group = gT, inline = "t3")
@@ -3143,7 +3146,7 @@ f_stop(cf, cx, fv, isLong, aV, bufA, maxA) =>
     sl
 
 // build one Sig (entry / SL / TP1 / TP2 / score / grade)
-f_sig(cf, cx, fv, trendStr, name, note, isLong, aV, eMode, slBufA, maxSLA, fixedR, fixedRm, minRR, maxRR, rrReal) =>
+f_sig(cf, cx, fv, trendStr, name, tier, note, isLong, aV, eMode, slBufA, maxSLA, fixedR, fixedRm, minRR, maxRR, rrReal) =>
     g = Sig.new()
     g.name  := name
     g.dir   := isLong ? 1 : -1
@@ -3203,7 +3206,7 @@ f_sig(cf, cx, fv, trendStr, name, note, isLong, aV, eMode, slBufA, maxSLA, fixed
         tpC = f_nearestLiq(cx, isLong, na(g.tp2) ? g.entry : g.tp2)
         g.tp3 := not na(tpC) and ((isLong and tpC >= g.tp2 + risk) or (not isLong and tpC <= g.tp2 - risk)) ? tpC : (isLong ? g.tp2 + risk : g.tp2 - risk)
     g.rr    := risk > 0 and not na(g.tp1) ? math.abs(g.tp1 - g.entry) / risk : 0.0
-    g.score := f_conf(fv, trendStr, isLong)
+    g.score := tier * 2 + f_conf(fv, trendStr, isLong)      // S6
     g.note  := g.note + note
     // an empty name hides the signal everywhere: label, trade lines, alerts and the panel
     g.name  := okRR ? name : ""
@@ -3215,7 +3218,7 @@ sigL := Sig.new()
 sigS := Sig.new()
 // `ft.sbSessOk` is the NEW killzone filter (open unless the user switched it on)
 if bL.n != "" and ft.gateUp > 0 and ft.sbSessOk
-    sigL := f_sig(cfg, ctx, ft, gateTrend, bL.n, bL.t, true, atrV, i_entryMode, i_slBuf, i_maxSL, i_fixedR, i_fixedRm, i_minRR, i_maxRR, i_rrReal)
+    sigL := f_sig(cfg, ctx, ft, gateTrend, bL.n, bL.s, bL.t, true, atrV, i_entryMode, i_slBuf, i_maxSL, i_fixedR, i_fixedRm, i_minRR, i_maxRR, i_rrReal)
     if ft.gateUp == 1
         sigL.score := sigL.score - 1
         sigL.note  := sigL.note + " · ⚠vs HTF/trend"
@@ -3229,7 +3232,7 @@ if bL.n != "" and ft.gateUp > 0 and ft.sbSessOk
     if sigL.score < i_minScore
         sigL := Sig.new()
 if bS.n != "" and ft.gateDn > 0 and ft.sbSessOk
-    sigS := f_sig(cfg, ctx, ft, gateTrend, bS.n, bS.t, false, atrV, i_entryMode, i_slBuf, i_maxSL, i_fixedR, i_fixedRm, i_minRR, i_maxRR, i_rrReal)
+    sigS := f_sig(cfg, ctx, ft, gateTrend, bS.n, bS.s, bS.t, false, atrV, i_entryMode, i_slBuf, i_maxSL, i_fixedR, i_fixedRm, i_minRR, i_maxRR, i_rrReal)
     if ft.gateDn == 1
         sigS.score := sigS.score - 1
         sigS.note  := sigS.note + " · ⚠vs HTF/trend"
@@ -3307,7 +3310,7 @@ f_add(x, rank, cond, tag, tip, col) =>
         x.c := col
         x.r := rank
 
-f_gradeTxt(sc) => sc >= 6 ? "A+" : sc >= 4 ? "A" : "B"
+f_gradeTxt(sc) => sc >= i_gradeAp ? "A+" : sc >= i_gradeA ? "A" : "B"
 
 var array<label> labs   = array.new<label>()
 var array<line>  lns    = array.new<line>()
@@ -3333,8 +3336,8 @@ f_tpTip(sg) =>
      "\nscore " + str.tostring(sg.score) + " (" + f_gradeTxt(sg.score) + ")"
 sigTipL = f_tpTip(sigL)
 sigTipS = f_tpTip(sigS)
-modTxtL = (sigL.score >= 6 ? "▲▲ " : sigL.score >= 4 ? "▲ " : "· ") + sigL.name + " " + f_gradeTxt(sigL.score) + str.tostring(sigL.score) + " · " + str.tostring(sigL.rr, "#.#") + "R"
-modTxtS = (sigS.score >= 6 ? "▼▼ " : sigS.score >= 4 ? "▼ " : "· ") + sigS.name + " " + f_gradeTxt(sigS.score) + str.tostring(sigS.score) + " · " + str.tostring(sigS.rr, "#.#") + "R"
+modTxtL = (sigL.score >= i_gradeAp ? "▲▲ " : sigL.score >= i_gradeA ? "▲ " : "· ") + sigL.name + " " + f_gradeTxt(sigL.score) + str.tostring(sigL.score) + " · " + str.tostring(sigL.rr, "#.#") + "R"
+modTxtS = (sigS.score >= i_gradeAp ? "▼▼ " : sigS.score >= i_gradeA ? "▼ " : "· ") + sigS.name + " " + f_gradeTxt(sigS.score) + str.tostring(sigS.score) + " · " + str.tostring(sigS.rr, "#.#") + "R"
 sigTxtL = modTxtL
 sigTxtS = modTxtS
 // §3.4 / M45: a CHoCH that followed a liquidity sweep is the stronger variant — mark it ✕
@@ -3395,8 +3398,8 @@ priDn = xD.r >= 1 and xD.r <= 5
 // bypass it is what produced the tight overlapping clusters on a 3m chart.
 // v8.2.1 · the bypass now keeps a two-bar floor. Every A+ skipping the cooldown is what still
 // produced overlapping label pairs on the review charts, and KL★ / PROP inflation made A+ common.
-apL = hasL and sigL.score >= 6 and (lastUp < 0 or bar_index - lastUp >= 2)
-apS = hasS and sigS.score >= 6 and (lastDn < 0 or bar_index - lastDn >= 2)
+apL = hasL and sigL.score >= i_gradeAp and (lastUp < 0 or bar_index - lastUp >= 2)
+apS = hasS and sigS.score >= i_gradeAp and (lastDn < 0 or bar_index - lastDn >= 2)
 if barstate.isconfirmed
     if xU.t != "" and (lastUp < 0 or bar_index - lastUp >= cfg.minGapBars or apL or priUp)
         // decay one step per quiet gap instead of only resetting after a long one, otherwise the
@@ -3549,7 +3552,7 @@ if barstate.isconfirmed and hasS
 // setup that no longer exists at the close, leaving no label, no trade line and no alert() to match
 alertcondition(hasL and barstate.isconfirmed, "Setup: LONG signal",  "SMC Suite: LONG setup")
 alertcondition(hasS and barstate.isconfirmed, "Setup: SHORT signal", "SMC Suite: SHORT setup")
-alertcondition(barstate.isconfirmed and ((hasL and sigL.score >= 6) or (hasS and sigS.score >= 6)), "Setup: Any A+ signal", "SMC Suite: A+ signal")
+alertcondition(barstate.isconfirmed and ((hasL and sigL.score >= i_gradeAp) or (hasS and sigS.score >= i_gradeAp)), "Setup: Any A+ signal", "SMC Suite: A+ signal")
 alertcondition(barstate.isconfirmed and ((hasL and ft.gateUp == 1) or (hasS and ft.gateDn == 1)), "Warning: Counter-HTF signal", "SMC Suite: counter-HTF/trend signal")
 // S1 (audit B4) — event conditions are evaluated on every tick and rolled back; a "once per bar"
 // alert fired on the first tick that satisfied them and could not be un-fired when the close did
