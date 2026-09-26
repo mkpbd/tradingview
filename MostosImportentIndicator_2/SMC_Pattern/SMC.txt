@@ -26,6 +26,8 @@
 //  S8  TP1 targets must be scored KL / confirmed non-weak zones / FVG / qualified liquidity.
 //  S9  zone slot per side (ft.zb bull / ft.zs bear): an overlapping opposite zone no longer hides
 //      the tradable one; f_conf / f_stop / panel read the trade's own side.
+//  S10 CISD = close through the open of the candle series that delivered the leg extreme, only after
+//      a qualified sweep (input); consumed on trigger; the mother-candle heuristic is gone.
 //  spec : INDICATOR_DEV_SPEC_BN.md   rules : BUILD_PROTOCOL_BN.md (R1 call-once, R2 one Cfg, R3 state in Ctx)
 //  audit: FORENSIC_AUDIT_BN.md — this build implements stages 1, 2 and the cheap part of 3.
 //  layers: L0 candle · L1 structure · L2 FVG/strength · L3 liquidity · L4 zones · L5 HTF · L6 setups · L7 trade
@@ -130,6 +132,7 @@ type Cfg
     float  runCloseMinATR  = 0.25
     float  sweepWickMin    = 0.40
     bool   sweepExtOk      = false
+    bool   cisdNeedSweep   = true
     int    failedCloseBars = 2
     int    extLookback     = 50
     int    maxLevels       = 30
@@ -325,10 +328,8 @@ type Ctx
     float loMakerLow = na
     float loMakerHigh = na
     bool  pbDnArmed = false
-    bool  cisdUpSet = false
     float cisdUpOpen = na
     int   cisdUpBar = 0
-    bool  cisdDnSet = false
     float cisdDnOpen = na
     int   cisdDnBar = 0
     int   sweptHighBar = -999
@@ -463,6 +464,13 @@ type Sx
     float stBrkLvl = na
     int   stBrkBar = -999
     int   stFail = 0          // consecutive failed follow-throughs → RANGE at 2
+    // S10 CISD reference = open of the series that delivered the leg extreme
+    float cisdUpRef = na
+    int   cisdUpRefBar = 0
+    bool  cisdUpUsed = true
+    float cisdDnRef = na
+    int   cisdDnRefBar = 0
+    bool  cisdDnUsed = true
 
 // S9 — the zone price is reacting to, one per side (bull = demand / support, bear = supply / resistance)
 type ZS
@@ -663,6 +671,8 @@ i_dispBody  = input.float(0.5, "body/range ≥", minval = 0.2, maxval = 0.9, ste
 i_dispRng   = input.float(0.8, "range ≥ × ATR", minval = 0.2, step = 0.1, group = gS, inline = "d")
 i_pendBars  = input.int(3, "Weak break: follow-through window (bars)", minval = 1, maxval = 10, group = gS)
 i_failMax   = input.int(2, "Failed follow-throughs → RANGE", minval = 1, maxval = 5, group = gS)
+i_cisdSweep = input.bool(true, "CISD only after a qualified liquidity sweep (within armed bars)", group = gS,
+     tooltip = "S10. The CISD reference is the open of the candle series that made the leg extreme; a close through it counts only if a major level was swept recently. Off = any close through it.")
 
 i_fvgMin    = input.float(0.10, "Min FVG height × ATR", minval = 0.0, step = 0.05, group = gF)
 i_fvgMode   = input.string("TOUCH", "FVG mitigation mode", options = ["TOUCH", "50%", "FULL"], group = gF)
@@ -823,7 +833,7 @@ var Cfg cfg = Cfg.new(pinWickMult = i_pinMult, pinWickRatioMin = i_pinRatio, doj
      strongBodyEff = i_bodyEff, strongMixMax = i_mixMax, strongSpeedMin = i_speedMin, maxMoveBars = i_maxMove,
      eqTolATR = i_eqTol, touchTolATR = i_touchTol, touchCooldown = i_touchCd, runBodyMin = i_runBody,
      propWindow = i_propWin, propImpATR = i_propImp,
-     runCloseMinATR = i_runClose, sweepWickMin = i_sweepWick, sweepExtOk = i_sweepQual == "Include external", failedCloseBars = i_failBars,
+     runCloseMinATR = i_runClose, sweepWickMin = i_sweepWick, sweepExtOk = i_sweepQual == "Include external", cisdNeedSweep = i_cisdSweep, failedCloseBars = i_failBars,
      extLookback = i_extLB, maxLevels = i_maxLevels, klLookLeft = i_klLeft,
      klUseVol = i_klVol, sweepWindow = i_sweepWin, rjbWickMin = i_rjbWick,
      rjbConfirmBars = i_rjbBars, qmMaxBars = i_qmBars, maxZones = i_maxZones, zoneMaxAge = i_zoneAge, zoneMaxATR = i_zoneMaxH,
@@ -1075,7 +1085,6 @@ f_structure(cf, cx, sx, swH, swL, aN, dispOk, pendBars, failMax) =>
     else if cx.pbUpArmed and low < cx.hiMakerLow
         s.pbValidUp    := true
         cx.pbUpArmed   := false
-        cx.cisdUpSet   := false
     if na(cx.loMakerLow) or low <= cx.loMakerLow
         cx.loMakerLow  := low
         cx.loMakerHigh := high
@@ -1083,7 +1092,6 @@ f_structure(cf, cx, sx, swH, swL, aN, dispOk, pendBars, failMax) =>
     else if cx.pbDnArmed and high > cx.loMakerHigh
         s.pbValidDn    := true
         cx.pbDnArmed   := false
-        cx.cisdDnSet   := false
     // §C1 — the makers only ever moved outwards, so after a few hundred bars hiMakerHigh WAS the
     // all-time high and loMakerLow the all-time low. movePhase then reduced to "is close at the
     // all-time extreme", i.e. permanently RETRACEMENT, and the pullback tracker was comparing
@@ -1096,27 +1104,33 @@ f_structure(cf, cx, sx, swH, swL, aN, dispOk, pendBars, failMax) =>
         cx.loMakerLow  := low
         cx.loMakerHigh := high
         cx.pbDnArmed   := true
-    // §3.6 CISD
-    if not cx.cisdUpSet and close > open
-        // §3.6 mother-candle rule: a green candle that consolidates inside an earlier green
-        // candle is not the CISD candidate — take the mother candle's open (up to 2 levels)
-        insU1 = high <= high[1] and low >= low[1] and close[1] > open[1]
-        insU2 = insU1 and high[1] <= high[2] and low[1] >= low[2] and close[2] > open[2]
-        cx.cisdUpOpen := insU2 ? open[2] : insU1 ? open[1] : open
-        cx.cisdUpBar  := bar_index - (insU2 ? 2 : insU1 ? 1 : 0)
-        cx.cisdUpSet  := true
-    if not cx.cisdDnSet and close < open
-        insD1 = high <= high[1] and low >= low[1] and close[1] < open[1]
-        insD2 = insD1 and high[1] <= high[2] and low[1] >= low[2] and close[2] < open[2]
-        cx.cisdDnOpen := insD2 ? open[2] : insD1 ? open[1] : open
-        cx.cisdDnBar  := bar_index - (insD2 ? 2 : insD1 ? 1 : 0)
-        cx.cisdDnSet  := true
-    s.cisdBear := cx.cisdUpSet and close < cx.cisdUpOpen
-    s.cisdBull := cx.cisdDnSet and close > cx.cisdDnOpen
+    // §3.6 CISD · S10 (audit T11) — ICT definition: the reference is the OPEN of the first candle of
+    // the same-colour series that delivered the leg extreme; the CISD is a close through it, and it
+    // only means something after liquidity was taken. v8.2 used the open of the first green candle
+    // after the last pullback, which was a leg invalidation that fired late in trends and early on
+    // every pullback.
+    if close > open and not (close[1] > open[1])
+        cx.cisdUpOpen := open                       // running up-series start
+        cx.cisdUpBar  := bar_index
+    if close < open and not (close[1] < open[1])
+        cx.cisdDnOpen := open
+        cx.cisdDnBar  := bar_index
+    if high >= cx.hiMakerHigh and not na(cx.cisdUpOpen)      // this bar made the leg high
+        sx.cisdUpRef    := cx.cisdUpOpen
+        sx.cisdUpRefBar := cx.cisdUpBar
+        sx.cisdUpUsed   := false
+    if low <= cx.loMakerLow and not na(cx.cisdDnOpen)
+        sx.cisdDnRef    := cx.cisdDnOpen
+        sx.cisdDnRefBar := cx.cisdDnBar
+        sx.cisdDnUsed   := false
+    swOkUp = not cf.cisdNeedSweep or (cx.sweptHighBar >= 0 and bar_index - cx.sweptHighBar <= cf.armBars)
+    swOkDn = not cf.cisdNeedSweep or (cx.sweptLowBar  >= 0 and bar_index - cx.sweptLowBar  <= cf.armBars)
+    s.cisdBear := not sx.cisdUpUsed and not na(sx.cisdUpRef) and close < sx.cisdUpRef and swOkUp
+    s.cisdBull := not sx.cisdDnUsed and not na(sx.cisdDnRef) and close > sx.cisdDnRef and swOkDn
     if s.cisdBear
-        cx.cisdUpSet := false
+        sx.cisdUpUsed := true
     if s.cisdBull
-        cx.cisdDnSet := false
+        sx.cisdDnUsed := true
     s.trend     := cx.trend
     // §C1 · §3.8 · S4 — measured against the current leg IN the trend direction: price pushing past
     // the live swing that defines the leg is impulse, anything inside it is retracement.
@@ -3410,7 +3424,7 @@ f_add(xU, 1, d_sig and hasL, sigTxtL, sigTipL, ft.gateUp == 1 ? vis.inv : vis.bu
 f_add(xU, 2, d_struct and tierKey and st.bullCHoCH and (tierAll or ft.chochReal), chochBase + chochUpX + "▲", chochTip, ft.chochReal ? vis.bull : vis.inv)
 f_add(xU, 3, d_struct and tierKey and (st.bullBOS or (d_weakBos and st.weakBullBOS)), (ft.dispBull ? "BOS▲ ·" + str.tostring(mv.fvgCount) + "FVG" : st.weakBullBOS ? "BOS▲ weak" : "BOS▲"), ft.dispBull ? "Bullish BOS with displacement (STRONG)" : st.weakBullBOS ? "Bullish break without displacement — pending follow-through, no structure change" : "Bullish BOS (displaced candle, no FVG in the leg)", ft.dispBull ? vis.bull : vis.inv)
 f_add(xU, 3, d_struct and tierAll and st.internalBullBOS, "iBOS▲", "Internal break: a lower high closed through inside a bearish trend — no structure change (S4)", vis.inv)
-f_add(xU, 4, d_struct and (tierAll or (tierKey and cisdHP)) and cisdUpOk, "CISD▲" + (cisdHP ? "★" : ""), "Bullish CISD (close > impulse open) — early reversal", vis.bull)
+f_add(xU, 4, d_struct and (tierAll or (tierKey and cisdHP)) and cisdUpOk, "CISD▲" + (cisdHP ? "★" : ""), "Bullish CISD: close above the open of the down-series that made the low, after a sweep — early reversal", vis.bull)
 f_add(xU, 5, d_liqEvt and tierKey and ft.sweptLow and (d_liqAll or ft.sweptMajor), "SWEEP✕ " + swKUp, "Liquidity sweep of " + ft.sweptKindLo + " — reversal context", vis.bull)
 f_add(xU, 6, ft.evtUp != "" and (d_obDiag or not str.startswith(ft.evtUp, "T")) and (tierAll or str.startswith(ft.evtUp, "BRK")), ft.evtUp, ft.tipUp, str.startswith(ft.evtUp, "BRK") ? vis.brk : str.startswith(ft.evtUp, "T") ? vis.inv : vis.bull)
 f_add(xU, 7, d_htfEvt and tierKey and newHtf and ft.htfSweepDn and ctx.hBarCount == ctx.sweepDnAt, "HTF SWEEP↓", "HTF candle swept below the last HTF swing low and closed back", vis.bull)
@@ -3424,7 +3438,7 @@ f_add(xD, 1, d_sig and hasS, sigTxtS, sigTipS, ft.gateDn == 1 ? vis.inv : vis.be
 f_add(xD, 2, d_struct and tierKey and st.bearCHoCH and (tierAll or ft.chochReal), chochBase + chochDnX + "▼", chochTip, ft.chochReal ? vis.bear : vis.inv)
 f_add(xD, 3, d_struct and tierKey and (st.bearBOS or (d_weakBos and st.weakBearBOS)), (ft.dispBear ? "BOS▼ ·" + str.tostring(mv.fvgCount) + "FVG" : st.weakBearBOS ? "BOS▼ weak" : "BOS▼"), ft.dispBear ? "Bearish BOS with displacement (STRONG)" : st.weakBearBOS ? "Bearish break without displacement — pending follow-through, no structure change" : "Bearish BOS (displaced candle, no FVG in the leg)", ft.dispBear ? vis.bear : vis.inv)
 f_add(xD, 3, d_struct and tierAll and st.internalBearBOS, "iBOS▼", "Internal break: a higher low closed through inside a bullish trend — no structure change (S4)", vis.inv)
-f_add(xD, 4, d_struct and (tierAll or (tierKey and cisdHP)) and cisdDnOk, "CISD▼" + (cisdHP ? "★" : ""), "Bearish CISD (close < impulse open) — early reversal", vis.bear)
+f_add(xD, 4, d_struct and (tierAll or (tierKey and cisdHP)) and cisdDnOk, "CISD▼" + (cisdHP ? "★" : ""), "Bearish CISD: close below the open of the up-series that made the high, after a sweep — early reversal", vis.bear)
 f_add(xD, 5, d_liqEvt and tierKey and ft.sweptHigh and (d_liqAll or ft.sweptMajor), "SWEEP✕ " + swKDn, "Liquidity sweep of " + ft.sweptKindHi + " — reversal context", vis.bear)
 f_add(xD, 6, d_struct and tierAll and (st.bullSweep or st.bearSweep) and not ft.sweptHigh and not ft.sweptLow, "✖SWEEP", "Invalid BOS — wick beyond swing, close back (buyers/sellers weakening)", vis.inv)
 f_add(xD, 7, ft.evtDn != "" and (d_obDiag or not str.startswith(ft.evtDn, "T")) and (tierAll or str.startswith(ft.evtDn, "BRK")), ft.evtDn, ft.tipDn, str.startswith(ft.evtDn, "BRK") ? vis.brk : str.startswith(ft.evtDn, "T") ? vis.inv : vis.bear)
@@ -3477,10 +3491,10 @@ if d_struct and barstate.isconfirmed
         f_evLine(lns, ctx.majorHighIdx, ctx.majorHigh, color.new(ft.chochReal ? vis.bull : vis.inv, 10), ft.chochReal ? line.style_solid : line.style_dashed, cfg.maxLines)
     if st.bearCHoCH and not na(ctx.majorLow)
         f_evLine(lns, ctx.majorLowIdx, ctx.majorLow, color.new(ft.chochReal ? vis.bear : vis.inv, 10), ft.chochReal ? line.style_solid : line.style_dashed, cfg.maxLines)
-    if st.cisdBear and not na(ctx.cisdUpOpen)
-        f_evLine(lns, math.max(ctx.cisdUpBar, bar_index - 30), ctx.cisdUpOpen, color.new(vis.bear, 40), line.style_dotted, cfg.maxLines)
-    if st.cisdBull and not na(ctx.cisdDnOpen)
-        f_evLine(lns, math.max(ctx.cisdDnBar, bar_index - 30), ctx.cisdDnOpen, color.new(vis.bull, 40), line.style_dotted, cfg.maxLines)
+    if st.cisdBear and not na(sx.cisdUpRef)
+        f_evLine(lns, math.max(sx.cisdUpRefBar, bar_index - 30), sx.cisdUpRef, color.new(vis.bear, 40), line.style_dotted, cfg.maxLines)
+    if st.cisdBull and not na(sx.cisdDnRef)
+        f_evLine(lns, math.max(sx.cisdDnRefBar, bar_index - 30), sx.cisdDnRef, color.new(vis.bull, 40), line.style_dotted, cfg.maxLines)
     // live major H/L (CHoCH trigger levels)
     if not na(ctx.majorHigh)
         line.delete(hiLine)
