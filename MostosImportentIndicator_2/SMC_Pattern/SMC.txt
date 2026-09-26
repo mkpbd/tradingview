@@ -28,6 +28,9 @@
 //      the tradable one; f_conf / f_stop / panel read the trade's own side.
 //  S10 CISD = close through the open of the candle series that delivered the leg extreme, only after
 //      a qualified sweep (input); consumed on trigger; the mother-candle heuristic is gone.
+//  S11 "Zone entry trigger" = IMMEDIATE (v8.2) or CONFIRMED: reversal candle at the POI, then a close
+//      through its extreme or a displacement FVG away from it within N bars; the tapped zone stays
+//      in the slot for the SL / score. Applies to the zone / FVG modules only; trap modules unchanged.
 //  spec : INDICATOR_DEV_SPEC_BN.md   rules : BUILD_PROTOCOL_BN.md (R1 call-once, R2 one Cfg, R3 state in Ctx)
 //  audit: FORENSIC_AUDIT_BN.md — this build implements stages 1, 2 and the cheap part of 3.
 //  layers: L0 candle · L1 structure · L2 FVG/strength · L3 liquidity · L4 zones · L5 HTF · L6 setups · L7 trade
@@ -471,6 +474,19 @@ type Sx
     float cisdDnRef = na
     int   cisdDnRefBar = 0
     bool  cisdDnUsed = true
+    // S11 POI reaction state, one per side
+    int   poiDirL = 0
+    int   poiBarL = -999
+    float poiRefL = na       // reaction candle high → micro-MSS level
+    float poiLowL = na       // invalidation
+    bool  poiFvgL = false    // the tap was an FVG reaction (no zone)
+    ZS    poiZb = na         // zone snapshot at the tap
+    int   poiDirS = 0
+    int   poiBarS = -999
+    float poiRefS = na
+    float poiHighS = na
+    bool  poiFvgS = false
+    ZS    poiZs = na
 
 // S9 — the zone price is reacting to, one per side (bull = demand / support, bear = supply / resistance)
 type ZS
@@ -753,6 +769,12 @@ i_nearZone  = input.float(3.0, "Liquidity scan distance × ATR (M09)", minval = 
 i_rangeLen  = input.int(20,  "Range detection length (M50/M53)", minval = 5, group = gX, inline = "r")
 i_rangeMax  = input.float(3.0, "Range max width × ATR", minval = 0.5, step = 0.5, group = gX, inline = "r")
 i_armBars   = input.int(30,  "Armed setup stays valid N bars (M41/45/46/48/52/54)", minval = 5, maxval = 200, group = gX)
+// S11 (audit RC4) — the zone modules used to fire on the first reversal candle inside the POI.
+// CONFIRMED waits for that candle's high to be closed through (micro-MSS) or for a fresh FVG in
+// the trade direction, within the window below; the zone snapshot is kept for the SL / score.
+i_entryConfirm = input.string("IMMEDIATE", "Zone entry trigger", options = ["IMMEDIATE", "CONFIRMED"], group = gX, inline = "pc",
+     tooltip = "IMMEDIATE = reversal candle at the POI (v8.2 behaviour) · CONFIRMED = reversal candle, then a close beyond its extreme or a displacement FVG away from the POI")
+i_poiBars   = input.int(8, "confirm within (bars)", minval = 2, maxval = 30, group = gX, inline = "pc")
 i_m53Alt    = input.bool(false, "M53 alternative entry: buy the range break-UP (lower win-rate)", group = gX)
 
 // ── NEW · Premium / Discount array (ICT) ─────────────────────────────────────
@@ -2559,6 +2581,17 @@ revBull  = cd.pinBull or cd.engulfBull or cd.ifcBull or cd.manipBull
 revBear  = cd.pinBear or cd.engulfBear or cd.ifcBear or cd.manipBear
 strongRevBear = cd.pinBear or cd.engulfBear or (cd.longWickRej and cd.isBear)
 strongRevBull = cd.pinBull or cd.engulfBull or (cd.longWickRej and cd.isBull)
+// S11 — while a POI reaction is armed, keep the tapped zone in the slot even after price left it,
+// so the confirming bar still scores / stops against that zone
+immMode = i_entryConfirm == "IMMEDIATE"
+if not immMode and sx.poiDirL == 1 and ft.zb.kind == "" and not na(sx.poiZb)
+    ft.zb := sx.poiZb
+    ft.atDemand  := ft.zb.kind != "SR"
+    ft.atSupport := ft.zb.kind == "SR"
+if not immMode and sx.poiDirS == 1 and ft.zs.kind == "" and not na(sx.poiZs)
+    ft.zs := sx.poiZs
+    ft.atSupply := ft.zs.kind != "SR"
+    ft.atResist := ft.zs.kind == "SR"
 atBullZone = ft.zb.kind != ""
 atBearZone = ft.zs.kind != ""
 bullTrend  = st.trend == "BULLISH"
@@ -2573,6 +2606,40 @@ pbOk       = not fl_M26 or not ft.arrivalStrong or ft.arrivalMixed >= 0.35   // 
 rtOk       = not fl_M31 or not (zoneTouch and ft.retestValid == false and ctx.lastBOSAvgBody > 0)
 brkWin     = ft.breakAgo >= 1 and ft.breakAgo <= 8
 brkTouchOk = not fl_M01T or ft.brkTouches >= 2
+
+// ── S11 POI reaction state machine: tap (reversal candle at zone / FVG) → confirm (close through
+// the reaction candle's extreme, or a fresh FVG away from the POI) → trigger ───────────────────
+poiConfL = false
+poiConfS = false
+if not immMode
+    poiBuf = atrV * 0.15
+    if sx.poiDirL == 1 and (bar_index - sx.poiBarL > i_poiBars or close < sx.poiLowL - poiBuf)
+        sx.poiDirL := 0
+    if sx.poiDirS == 1 and (bar_index - sx.poiBarS > i_poiBars or close > sx.poiHighS + poiBuf)
+        sx.poiDirS := 0
+    if sx.poiDirL == 1 and bar_index - sx.poiBarL >= 1 and (close > sx.poiRefL or ft.newBullFvg)
+        poiConfL   := true
+        sx.poiDirL := 0
+    if sx.poiDirS == 1 and bar_index - sx.poiBarS >= 1 and (close < sx.poiRefS or ft.newBearFvg)
+        poiConfS   := true
+        sx.poiDirS := 0
+    // arm after the confirm test so the confirming candle cannot re-arm on the same bar
+    if sx.poiDirL == 0 and not poiConfL and (zoneOkBull or ft.atBullFvg) and revBull
+        sx.poiDirL := 1
+        sx.poiBarL := bar_index
+        sx.poiRefL := high
+        sx.poiLowL := math.min(low, nz(ft.zb.bottom, low))
+        sx.poiFvgL := ft.atBullFvg and ft.zb.kind == ""
+        sx.poiZb   := ft.zb
+    if sx.poiDirS == 0 and not poiConfS and (zoneOkBear or ft.atBearFvg) and revBear
+        sx.poiDirS  := 1
+        sx.poiBarS  := bar_index
+        sx.poiRefS  := low
+        sx.poiHighS := math.max(high, nz(ft.zs.top, high))
+        sx.poiFvgS  := ft.atBearFvg and ft.zs.kind == ""
+        sx.poiZs    := ft.zs
+trigBull = immMode ? revBull : poiConfL
+trigBear = immMode ? revBear : poiConfS
 
 // ── candidates: [cond, name, dir(+1/-1), base score, note] ───────────────────
 // A — price action
@@ -2629,19 +2696,19 @@ if cd.doji and zoneTouch
 s11  = en_M11 and bar_index - dojiBar == 1 and close > dojiHi and close > dojiZt
 s11b = en_M11 and bar_index - dojiBar == 1 and close < dojiLo and close < dojiZb
 // §M12: trendline and a flipped S/R overlap (both are "at price" here) — or a key level as fallback
-s12  = en_M12 and zoneOkBull and ft.zb.flipped and (ft.atTLsup or ft.zb.kl >= 3) and revBull
-s12b = en_M12 and zoneOkBear and ft.zs.flipped and (ft.atTLres or ft.zs.kl >= 3) and revBear
+s12  = en_M12 and zoneOkBull and ft.zb.flipped and (ft.atTLsup or ft.zb.kl >= 3) and trigBull
+s12b = en_M12 and zoneOkBear and ft.zs.flipped and (ft.atTLres or ft.zs.kl >= 3) and trigBear
 s14  = en_M14 and ctx.breakDir == 1  and ft.breakAgo == 1 and low  < ctx.breakLvl and cd.pinBull and close > ctx.breakLvl
 s14b = en_M14 and ctx.breakDir == -1 and ft.breakAgo == 1 and high > ctx.breakLvl and cd.pinBear and close < ctx.breakLvl
 s15  = en_M15 and ft.breakPinBull
 s15b = en_M15 and ft.breakPinBear
 // E — volume
-s21  = en_M21 and zoneOkBear and ft.zs.depStrong and ft.arrivalWeak and revBear and ft.volHigh
-s21b = en_M21 and zoneOkBull and ft.zb.depStrong and ft.arrivalWeak and revBull and ft.volHigh
+s21  = en_M21 and zoneOkBear and ft.zs.depStrong and ft.arrivalWeak and trigBear and ft.volHigh
+s21b = en_M21 and zoneOkBull and ft.zb.depStrong and ft.arrivalWeak and trigBull and ft.volHigh
 s22  = en_M22 and ft.breakUp and cd.isBull and cd.bodyRatio >= 0.6 and ft.volHigh and not ctx.arrivalStrong
 s22b = en_M22 and ft.breakDn and cd.isBear and cd.bodyRatio >= 0.6 and ft.volHigh and not ctx.arrivalStrong
-s23  = en_M23 and bullTrend and retrace and ft.volSlopeNeg and zoneOkBull and revBull
-s23b = en_M23 and bearTrend and retrace and ft.volSlopeNeg and zoneOkBear and revBear
+s23  = en_M23 and bullTrend and retrace and ft.volSlopeNeg and zoneOkBull and trigBull
+s23b = en_M23 and bearTrend and retrace and ft.volSlopeNeg and zoneOkBear and trigBear
 w24  = en_M24 and ft.breakUp and ft.volHigh and ctx.arrivalStrong and bar_index - ctx.arrivalBar <= 10
 w24b = en_M24 and ft.breakDn and ft.volHigh and ctx.arrivalStrong and bar_index - ctx.arrivalBar <= 10
 var int trap24 = 0
@@ -2672,15 +2739,15 @@ w29b = en_M29 and (st.weakBearBOS or (st.bearBOS and not mv.strong)) and cd.larg
 s29  = en_M29 and ctx.lastBOSBar > 0 and bar_index - ctx.lastBOSBar >= 1 and bar_index - ctx.lastBOSBar <= 5 and not ctx.lastDepStrong and ctx.breakDir == 1 and revBear
 s29b = en_M29 and ctx.lastBOSBar > 0 and bar_index - ctx.lastBOSBar >= 1 and bar_index - ctx.lastBOSBar <= 5 and not ctx.lastDepStrong and ctx.breakDir == -1 and revBull
 // G — zone flip
-s33  = en_M33 and zoneOkBull and ft.zb.flipped and ft.zb.depStrong and ft.arrivalWeak and revBull and bullTrend and ft.htfBias == "BULL"
-s33b = en_M33 and zoneOkBear and ft.zs.flipped and ft.zs.depStrong and ft.arrivalWeak and revBear and bearTrend and ft.htfBias == "BEAR"
+s33  = en_M33 and zoneOkBull and ft.zb.flipped and ft.zb.depStrong and ft.arrivalWeak and trigBull and bullTrend and ft.htfBias == "BULL"
+s33b = en_M33 and zoneOkBear and ft.zs.flipped and ft.zs.depStrong and ft.arrivalWeak and trigBear and bearTrend and ft.htfBias == "BEAR"
 // H — order blocks
 obBull = zoneOkBull and (ft.zb.kind == "OB" or ft.zb.kind == "BRK")
 obBear = zoneOkBear and (ft.zs.kind == "OB" or ft.zs.kind == "BRK")
 s36  = en_M36 and obBull and ft.arrivalWeak and (cd.engulfBull or cd.pinBull or ft.sweptLow)
 s36b = en_M36 and obBear and ft.arrivalWeak and (cd.engulfBear or cd.pinBear or ft.sweptHigh)
-s37  = en_M37 and obBull and ft.zb.idm and revBull
-s37b = en_M37 and obBear and ft.zs.idm and revBear
+s37  = en_M37 and obBull and ft.zb.idm and trigBull
+s37b = en_M37 and obBear and ft.zs.idm and trigBear
 // I — liquidity patterns (M38)
 p1   = en_M38 and ft.breakUp and mv.strong and not ctx.arrivalStrong                       // real: weak approach → strong breakout
 p2   = en_M38 and ft.breakUp and not mv.strong and ctx.arrivalStrong                       // fake: strong expansion → weak breakout
@@ -2793,58 +2860,58 @@ en_M54 = f_en(input.bool(true,  "M54 Smart S&D trap", group = gM2, inline = "h")
 armed(dirWant, dirHave, atBar) => dirHave == dirWant and bar_index - atBar >= 1 and bar_index - atBar <= cfg.armBars
 // §M7 — M45 accepts both encodings: ±1 (sweep + BOS) and ±2 (sweep + real CHoCH, the stronger form)
 armedSw(dirWant, dirHave, atBar) => (dirHave == dirWant or dirHave == dirWant * 2) and bar_index - atBar >= 1 and bar_index - atBar <= cfg.armBars
-reactBull = zoneOkBull or ft.atBullFvg
-reactBear = zoneOkBear or ft.atBearFvg
+reactBull = zoneOkBull or ft.atBullFvg or (poiConfL and sx.poiFvgL)      // S11: FVG-only tap confirms too
+reactBear = zoneOkBear or ft.atBearFvg or (poiConfS and sx.poiFvgS)
 recentHi  = ctx.rangeBrkBar > 0 and bar_index - ctx.rangeBrkBar <= cfg.armBars
 
 // J — ICT blocks (zone engine already validated them; entry = retest + reversal)
-s39  = en_M39 and zoneOkBull and ft.zb.kind == "RCB" and revBull
-s39b = en_M39 and zoneOkBear and ft.zs.kind == "RCB" and revBear
-s40  = en_M40 and zoneOkBull and ft.zb.kind == "RJB" and revBull
-s40b = en_M40 and zoneOkBear and ft.zs.kind == "RJB" and revBear
+s39  = en_M39 and zoneOkBull and ft.zb.kind == "RCB" and trigBull
+s39b = en_M39 and zoneOkBear and ft.zs.kind == "RCB" and trigBear
+s40  = en_M40 and zoneOkBull and ft.zb.kind == "RJB" and trigBull
+s40b = en_M40 and zoneOkBear and ft.zs.kind == "RJB" and trigBear
 // K — sweep + FVG (armed by 05: strong move with FVG after the sweep)
-s41  = en_M41 and armed(1, ctx.m41Dir, ctx.m41Bar)  and reactBull and revBull
-s41b = en_M41 and armed(-1, ctx.m41Dir, ctx.m41Bar) and reactBear and revBear
+s41  = en_M41 and armed(1, ctx.m41Dir, ctx.m41Bar)  and reactBull and trigBull
+s41b = en_M41 and armed(-1, ctx.m41Dir, ctx.m41Bar) and reactBear and trigBear
 w41  = en_M41 and (ctx.m41Dir == 9 or ctx.m41Dir == -9) and bar_index == ctx.m41Bar
 // L — high-probability S&D (5 criteria live in the zone: OB with depStrong, 50% rule, unmitigated) + strongest variant ★★
-s42  = en_M42 and zoneOkBull and ft.zb.kind == "OB" and ft.zb.depStrong and ft.zb.fifty and ft.arrivalWeak and revBull
-s42b = en_M42 and zoneOkBear and ft.zs.kind == "OB" and ft.zs.depStrong and ft.zs.fifty and ft.arrivalWeak and revBear
+s42  = en_M42 and zoneOkBull and ft.zb.kind == "OB" and ft.zb.depStrong and ft.zb.fifty and ft.arrivalWeak and trigBull
+s42b = en_M42 and zoneOkBear and ft.zs.kind == "OB" and ft.zs.depStrong and ft.zs.fifty and ft.arrivalWeak and trigBear
 // N — key level approach (KL ≥ 3): C1 choppy arrival · C2 liquidity build-up (trend into the level) · C3 depletion
 klBear = zoneOkBear and ft.zs.kl >= 3
 klBull = zoneOkBull and ft.zb.kl >= 3
-s44b = en_M44 and klBear and revBear and (ft.arrivalWeak or bullTrend or ft.rangeShrink)
-s44  = en_M44 and klBull and revBull and (ft.arrivalWeak or bearTrend or ft.rangeShrink)
+s44b = en_M44 and klBear and trigBear and (ft.arrivalWeak or bullTrend or ft.rangeShrink)
+s44  = en_M44 and klBull and trigBull and (ft.arrivalWeak or bearTrend or ft.rangeShrink)
 // O — sweep-based CHoCH → retest at breaker / OB
-s45  = en_M45 and armedSw(1, ctx.m45Dir, ctx.m45Bar)  and zoneOkBull and (ft.zb.kind == "BRK" or ft.zb.kind == "OB") and revBull
-s45b = en_M45 and armedSw(-1, ctx.m45Dir, ctx.m45Bar) and zoneOkBear and (ft.zs.kind == "BRK" or ft.zs.kind == "OB") and revBear
+s45  = en_M45 and armedSw(1, ctx.m45Dir, ctx.m45Bar)  and zoneOkBull and (ft.zb.kind == "BRK" or ft.zb.kind == "OB") and trigBull
+s45b = en_M45 and armedSw(-1, ctx.m45Dir, ctx.m45Bar) and zoneOkBear and (ft.zs.kind == "BRK" or ft.zs.kind == "OB") and trigBear
 m45Strong = math.abs(ctx.m45Dir) == 2
 // P — CISD (armed with ≥1 reliability condition) → reversal at breaker / OB / FVG (harami counts here)
-s46  = en_M46 and armed(1, ctx.m46Dir, ctx.m46Bar)  and reactBull and (revBull or cd.harami)
-s46b = en_M46 and armed(-1, ctx.m46Dir, ctx.m46Bar) and reactBear and (revBear or cd.harami)
+s46  = en_M46 and armed(1, ctx.m46Dir, ctx.m46Bar)  and reactBull and (trigBull or (immMode and cd.harami))
+s46b = en_M46 and armed(-1, ctx.m46Dir, ctx.m46Bar) and reactBear and (trigBear or (immMode and cd.harami))
 // Q — smart money manipulation
 s47b = en_M47 and bullTrend and st.bullSweep and cd.upWickRatio >= cfg.sweepWickMin
 s47  = en_M47 and bearTrend and st.bearSweep and cd.dnWickRatio >= cfg.sweepWickMin
-s48  = en_M48 and armed(1, ctx.m48Dir, ctx.m48Bar)  and zoneOkBull and (ft.zb.kind == "OB" or ft.zb.kind == "BRK") and revBull
-s48b = en_M48 and armed(-1, ctx.m48Dir, ctx.m48Bar) and zoneOkBear and (ft.zs.kind == "OB" or ft.zs.kind == "BRK") and revBear
+s48  = en_M48 and armed(1, ctx.m48Dir, ctx.m48Bar)  and zoneOkBull and (ft.zb.kind == "OB" or ft.zb.kind == "BRK") and trigBull
+s48b = en_M48 and armed(-1, ctx.m48Dir, ctx.m48Bar) and zoneOkBear and (ft.zs.kind == "OB" or ft.zs.kind == "BRK") and trigBear
 // §M49: the swept low must be INTERNAL (inside the leg, above the major low) — not any swing low
-s49  = en_M49 and bullTrend and ft.intSweptBull and reactBull and revBull
-s49b = en_M49 and bearTrend and ft.intSweptBear and reactBear and revBear
+s49  = en_M49 and bullTrend and ft.intSweptBull and reactBull and trigBull
+s49b = en_M49 and bearTrend and ft.intSweptBear and reactBear and trigBear
 // the manipulation leg of a LONG range-trap is a stop hunt BELOW the range -> sweptLow (M53 below
 // has the same shape and gets it right); the zone terms were already polarised correctly
-s50  = en_M50 and bullTrend and recentHi and ctx.rangeBrkDir == -1 and (ft.atDemand or (ft.sweptLow and reactBull)) and revBull
-s50b = en_M50 and bearTrend and recentHi and ctx.rangeBrkDir == 1  and (ft.atSupply or (ft.sweptHigh and reactBear)) and revBear
+s50  = en_M50 and bullTrend and recentHi and ctx.rangeBrkDir == -1 and (ft.atDemand or (ft.sweptLow and reactBull)) and trigBull
+s50b = en_M50 and bearTrend and recentHi and ctx.rangeBrkDir == 1  and (ft.atSupply or (ft.sweptHigh and reactBear)) and trigBear
 // R — golden strategies
-s51  = en_M51 and bullTrend and ctx.lastDepStrong and bar_index - ctx.lastBOSBar <= 40 and zoneOkBull and revBull
-s51b = en_M51 and bearTrend and ctx.lastDepStrong and bar_index - ctx.lastBOSBar <= 40 and zoneOkBear and revBear
+s51  = en_M51 and bullTrend and ctx.lastDepStrong and bar_index - ctx.lastBOSBar <= 40 and zoneOkBull and trigBull
+s51b = en_M51 and bearTrend and ctx.lastDepStrong and bar_index - ctx.lastBOSBar <= 40 and zoneOkBear and trigBear
 w51  = en_M51 and (st.weakBullBOS or (st.bullBOS and not mv.strong))
 w51b = en_M51 and (st.weakBearBOS or (st.bearBOS and not mv.strong))
-s52b = en_M52 and armed(-1, ctx.m52Dir, ctx.m52Bar) and reactBear and revBear
-s52  = en_M52 and armed(1, ctx.m52Dir, ctx.m52Bar)  and reactBull and revBull
+s52b = en_M52 and armed(-1, ctx.m52Dir, ctx.m52Bar) and reactBear and trigBear
+s52  = en_M52 and armed(1, ctx.m52Dir, ctx.m52Bar)  and reactBull and trigBull
 s53  = en_M53 and bearTrend and recentHi and ctx.rangeBrkDir == -1 and (ft.sweptLow or (not na(ctx.curLow) and low <= ctx.curLow + atrV * 0.2)) and revBull
 s53alt = en_M53 and i_m53Alt and bearTrend and ctx.rangeBrkDir == 1 and bar_index == ctx.rangeBrkBar and cd.isBull
 s53b = en_M53 and bullTrend and recentHi and ctx.rangeBrkDir == 1 and (ft.sweptHigh or (not na(ctx.curHigh) and high >= ctx.curHigh - atrV * 0.2)) and revBear
-s54  = en_M54 and ctx.m54Stage == 3 and zoneOkBull and revBull
-s54b = en_M54 and ctx.m54StageB == 3 and zoneOkBear and revBear
+s54  = en_M54 and ctx.m54Stage == 3 and zoneOkBull and trigBull
+s54b = en_M54 and ctx.m54StageB == 3 and zoneOkBear and trigBear
 // consume the latch: without this the machine stays at stage 3 and re-fires M54 on every zone
 // touch until the timeout (every other multi-step setup in the build consumes its latch too)
 if s54
@@ -3026,12 +3093,12 @@ s63  = en_M63 and tapM63 and sx.dbDir == 1  and revBull
 s63b = en_M63 and tapM63 and sx.dbDir == -1 and revBear
 s65  = en_M65 and trg65
 s65b = en_M65 and trg65b
-s68  = en_M68 and armed(1, sx.m68Dir, sx.m68Bar)  and reactBull and revBull
-s68b = en_M68 and armed(-1, sx.m68Dir, sx.m68Bar) and reactBear and revBear
+s68  = en_M68 and armed(1, sx.m68Dir, sx.m68Bar)  and reactBull and trigBull
+s68b = en_M68 and armed(-1, sx.m68Dir, sx.m68Bar) and reactBear and trigBear
 s69  = en_M69 and sx.ifcDir == 1  and bar_index - sx.ifcBar >= 1 and close > sx.ifcHi
 s69b = en_M69 and sx.ifcDir == -1 and bar_index - sx.ifcBar >= 1 and close < sx.ifcLo
-s70  = en_M70 and zoneOkBull and ft.zb.kind == "QM" and revBull
-s70b = en_M70 and zoneOkBear and ft.zs.kind == "QM" and revBear
+s70  = en_M70 and zoneOkBull and ft.zb.kind == "QM" and trigBull
+s70b = en_M70 and zoneOkBear and ft.zs.kind == "QM" and trigBear
 s72b = en_M72 and consolOk and sx.m72Dir == 1  and close < ctx.breakLvl and cd.isBear and cd.bodyRatio >= 0.6
 s72  = en_M72 and consolOk and sx.m72Dir == -1 and close > ctx.breakLvl and cd.isBull and cd.bodyRatio >= 0.6
 if s69 or s69b
@@ -3048,8 +3115,8 @@ if s62 or s62b
 // M73 — ICT Propulsion Block: the zone proved interest twice, so the third visit is the entry.
 // Deliberately does NOT require `not ft.zb.sweepReq`: a propulsion zone is by definition on its 2nd+
 // touch, and the sweep-required rule is what would otherwise veto the strongest zone on the chart.
-s73  = en_M73 and ft.zb.prop and ft.atDemand and ft.zb.fifty and revBull
-s73b = en_M73 and ft.zs.prop and ft.atSupply and ft.zs.fifty and revBear
+s73  = en_M73 and ft.zb.prop and ft.atDemand and ft.zb.fifty and trigBull
+s73b = en_M73 and ft.zs.prop and ft.atSupply and ft.zs.fifty and trigBear
 
 // LONG chain → bL
 f_bid(bL, s58, "M58", 2, "Double bottom: neckline broken on close")
