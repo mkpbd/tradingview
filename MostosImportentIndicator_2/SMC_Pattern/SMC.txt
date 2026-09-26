@@ -10,6 +10,8 @@
 //  S2  f_legOrigin: one leg origin (price extreme after the broken swing) shared by f_moveStrength,
 //      the KL score and the OB block; OB candle = last opposite candle before the displacement
 //      candle. "G1" type removed (always-true artefact of the T2 shift).
+//  S3  session windows take a timezone (default UTC); defaults no longer overlap; SESH/SESL are
+//      placed when the Asia window ends instead of when London opens.
 //  spec : INDICATOR_DEV_SPEC_BN.md   rules : BUILD_PROTOCOL_BN.md (R1 call-once, R2 one Cfg, R3 state in Ctx)
 //  audit: FORENSIC_AUDIT_BN.md — this build implements stages 1, 2 and the cheap part of 3.
 //  layers: L0 candle · L1 structure · L2 FVG/strength · L3 liquidity · L4 zones · L5 HTF · L6 setups · L7 trade
@@ -698,11 +700,16 @@ i_pdDeep = input.float(0.75, "Deep-premium / deep-discount threshold", minval = 
 // ── NEW · Session / killzone filter ──────────────────────────────────────────
 i_ssnOn    = input.bool(false, "Only signal inside a killzone", group = gPD, inline = "ss1")
 i_ssnScore = input.bool(true,  "Score London / NY sessions", group = gPD, inline = "ss1")
-i_ssnAsia  = input.session("0000-0800", "Asia",   group = gPD, inline = "ss2")
+// S3 (audit B5) — the windows used to be read in the exchange timezone with no timezone argument, so
+// "0700-1000 London" was only London on a UTC feed (Binance) and drifted with DST on broker feeds.
+// Defaults are UTC and no longer overlap (Asia used to run to 08:00 while London opened at 07:00).
+i_ssnTz    = input.string("UTC", "Session timezone", options = ["UTC", "Europe/London", "America/New_York", "Asia/Tokyo", "Exchange"], group = gPD,
+     tooltip = "Timezone the three session windows are written in. Exchange = the symbol's own timezone (old behaviour).")
+i_ssnAsia  = input.session("0000-0700", "Asia",   group = gPD, inline = "ss2")
 i_ssnLon   = input.session("0700-1000", "London", group = gPD, inline = "ss2")
 i_ssnNY    = input.session("1200-1500", "NY",     group = gPD, inline = "ss2")
 i_ssnLvl   = input.bool(true,  "Asia session high / low as liquidity levels (SESH / SESL)", group = gPD,
-     tooltip = "Plotted when the London window opens and treated as external liquidity — the Asia-range sweep into a London reversal is the most repeatable ICT pattern and the sweep classifier already had a SESH/SESL branch with nothing feeding it.")
+     tooltip = "Plotted when the Asia window ends and treated as external liquidity — the Asia-range sweep into a London reversal is the most repeatable ICT pattern.")
 
 i_cBull  = input.color(#089981, "Bull", group = gV, inline = "c1")
 i_cBear  = input.color(#F23645, "Bear", group = gV, inline = "c1")
@@ -1869,10 +1876,13 @@ newWeek = i_showPW and (timeframe.isintraday or timeframe.isdaily) and timeframe
 // ── NEW · sessions (killzones). Only meaningful intraday; on ≥ daily every bar spans them all,
 // so the flags are forced open and the filter becomes a no-op rather than blocking everything.
 ssnIntra = timeframe.isintraday
-inAsia   = ssnIntra and not na(time(timeframe.period, i_ssnAsia))
-inLon    = ssnIntra and not na(time(timeframe.period, i_ssnLon))
-inNY     = ssnIntra and not na(time(timeframe.period, i_ssnNY))
-lonOpen  = inLon and not inLon[1]
+ssnTz    = i_ssnTz == "Exchange" ? syminfo.timezone : i_ssnTz
+inAsia   = ssnIntra and not na(time(timeframe.period, i_ssnAsia, ssnTz))
+inLon    = ssnIntra and not na(time(timeframe.period, i_ssnLon, ssnTz))
+inNY     = ssnIntra and not na(time(timeframe.period, i_ssnNY, ssnTz))
+// S3 — the Asia range is complete when the Asia window ENDS, not when London opens (the two used to
+// overlap, so SESH/SESL were placed from a partial range)
+asiaEnd  = ssnIntra and not inAsia and inAsia[1]
 
 // ── ORCHESTRATION — every engine exactly once per bar, in layer order ────────
 ft = Feat.new()
@@ -1937,7 +1947,7 @@ if inAsia
         asiaHi := math.max(nz(asiaHi, high), high)
         asiaLo := math.min(nz(asiaLo, low), low)
 // added BEFORE f_liq so the level joins this bar's list and is tracked from the next bar on
-if i_ssnLvl and lonOpen and barstate.isconfirmed and not na(asiaHi) and not na(asiaLo)
+if i_ssnLvl and asiaEnd and barstate.isconfirmed and not na(asiaHi) and not na(asiaLo)
     if array.size(ctx.lv) > 0
         for i = array.size(ctx.lv) - 1 to 0
             Lx = array.get(ctx.lv, i)
