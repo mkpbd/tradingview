@@ -7,6 +7,9 @@
 //      (all default-OFF or cosmetic); "CRT" dropped from the title — nothing CRT-related exists.
 //  S1  the 7 event alertconditions (BOS / CHoCH / CISD / sweep / HP OB / PROP / OB 50%) are gated on
 //      barstate.isconfirmed like the signal alerts — they used to fire on transient intrabar state.
+//  S2  f_legOrigin: one leg origin (price extreme after the broken swing) shared by f_moveStrength,
+//      the KL score and the OB block; OB candle = last opposite candle before the displacement
+//      candle. "G1" type removed (always-true artefact of the T2 shift).
 //  spec : INDICATOR_DEV_SPEC_BN.md   rules : BUILD_PROTOCOL_BN.md (R1 call-once, R2 one Cfg, R3 state in Ctx)
 //  audit: FORENSIC_AUDIT_BN.md — this build implements stages 1, 2 and the cheap part of 3.
 //  layers: L0 candle · L1 structure · L2 FVG/strength · L3 liquidity · L4 zones · L5 HTF · L6 setups · L7 trade
@@ -385,6 +388,8 @@ type Ctx
     float intHighB = na
     int   intSwpBull = -999
     int   intSwpBear = -999
+    int   legIdx = 0
+    float legPx = na
 
 // L6 S–AB state machines (split from Ctx: UDT constructor limit 254 external elements, num/bool = 2 each)
 type Sx
@@ -953,6 +958,22 @@ f_structure(cf, cx, swH, swL, aN) =>
 // Stored pivot / zone indices can outlive that window, so pin them to the edge.
 f_xb(x) => math.max(math.min(x, bar_index), bar_index - 495)
 
+// S2 (audit B1) — origin of the leg that just broke a swing: the lowest low (bull) / highest high
+// (bear) printed AFTER the broken swing and BEFORE this bar. f_moveStrength used the pre-shift
+// pivot and f_zones the post-shift one; on a bar that is both a BOS and a pivot confirmation the
+// two engines measured two different legs, and neither was the price origin. Returns [idx, price].
+f_legOrigin(isBull, fromIdx) =>
+    span = math.min(math.max(bar_index - fromIdx, 1), 490)
+    bestOff = 1
+    bestVal = isBull ? low[1] : high[1]
+    if span >= 2
+        for k = 2 to span
+            v = isBull ? low[k] : high[k]
+            if (isBull and v < bestVal) or (not isBull and v > bestVal)
+                bestVal := v
+                bestOff := k
+    [bar_index - bestOff, bestVal]
+
 // ── L2 FVG ENGINE — once per bar (R1); writes into the shared Feat ───────────
 f_fvg(cf, cx, v, fv, aV, drawOn, keepMit) =>
     minH = aV * cf.fvgMinATR
@@ -1332,7 +1353,7 @@ f_hiddenInterest(cf, cx, top, bottom, idx) =>
     clean
 
 // ── L4 ZONE ENGINE — once per bar (R1); fed by L1 events + L2 strength; writes into Feat ──
-f_zones(cf, cx, v, fv, aV, swH, swL, bullBOS, bearBOS, bullCHoCH, bearCHoCH, mvStrong, mvFvg, vOk, onSR, onKL, onOB, onBrk, onRcb, onRjb, onQm) =>
+f_zones(cf, cx, v, fv, aV, swH, swL, bullBOS, bearBOS, bullCHoCH, bearCHoCH, mvStrong, mvFvg, vOk, oIdxIn, onSR, onKL, onOB, onBrk, onRcb, onRjb, onQm) =>
     pIdx = bar_index - cf.swingLen
     // §6.1 S/R wick zones at every confirmed pivot (created always — KL scoring needs them; drawn only if onSR)
     if not na(swH)
@@ -1345,14 +1366,18 @@ f_zones(cf, cx, v, fv, aV, swH, swL, bullBOS, bearBOS, bullCHoCH, bearCHoCH, mvS
     // BOS → Key Level score on origin SR + Order Block / S&D
     if (bullBOS or bearBOS) and barstate.isconfirmed
         isBull = bullBOS
-        oIdx   = isBull ? cx.curLowIdx : cx.curHighIdx
+        // S2 — the leg origin from f_legOrigin (same one f_moveStrength measured), not the pivot
+        // bookkeeping, which f_structure may already have shifted on this bar
+        oIdx   = oIdxIn
         off = bar_index - oIdx
         if off >= 1 and off < 490
             n0 = array.size(cx.zones)
             if n0 > 0
                 for i = 0 to n0 - 1
                     z = array.get(cx.zones, i)
-                    if z.kind == "SR" and z.idx == oIdx and z.bull == isBull and z.kl == 0
+                    // the origin low is not always a pivot bar: accept the origin-side SR zone within
+                    // swingLen bars of it
+                    if z.kind == "SR" and z.bull == isBull and z.kl == 0 and z.idx >= oIdx - cf.swingLen and z.idx <= oIdx + cf.swingLen
                         // v8.2.1 · base was 2 of 3, so "imbalance in the move" alone made KL and any
                         // second criterion made KL★. In a trend both are almost free (older zones sit
                         // at other prices, so `clean` is nearly always true) and the review charts
@@ -1382,8 +1407,28 @@ f_zones(cf, cx, v, fv, aV, swH, swL, bullBOS, bearBOS, bullCHoCH, bearCHoCH, mvS
                     fv.evtDn := "T5 no-FVG"
                     fv.tipDn := "Big move but NO imbalance — no OB here (Type 5). Look for reversal the other way."
             else
+                // S2 — OB = the last opposite-colour candle before the first displacement candle of
+                // the leg (ICT definition). The old code took the pivot candle and the "G1" widening
+                // was an always-true artefact of the T2 shift. Walk from the origin towards now.
                 obOff = off
                 obT   = "T1"
+                dispOff = -1
+                if obOff >= 2
+                    for k = obOff - 1 to math.max(obOff - cf.swingLen, 1)
+                        rk = high[k] - low[k]
+                        bodyK = rk > 0 ? math.abs(close[k] - open[k]) / rk : 0.0
+                        colOk = isBull ? close[k] > open[k] : close[k] < open[k]
+                        if colOk and bodyK >= 0.5 and rk >= aV * 0.5
+                            dispOff := k
+                            break
+                if dispOff > 0
+                    // nearest opposite-colour candle between the displacement candle and the origin
+                    for k = dispOff + 1 to obOff
+                        opp = isBull ? close[k] < open[k] : close[k] > open[k]
+                        if opp
+                            obOff := k
+                            obT   := k == off ? "T1" : "T1b"
+                            break
                 if high[obOff] <= high[obOff + 1] and low[obOff] >= low[obOff + 1]
                     obOff := obOff + 1
                     obT   := "T2"
@@ -1391,18 +1436,9 @@ f_zones(cf, cx, v, fv, aV, swH, swL, bullBOS, bearBOS, bullCHoCH, bearCHoCH, mvS
                 zBot = low[obOff]
                 if obOff >= 1
                     nb = obOff - 1
-                    impBull = close[nb] > open[nb]
-                    if isBull and impBull and low[nb] < low[obOff]
-                        zTop := high[nb]
-                        zBot := low[nb]
-                        obT  := "G1"
-                    if not isBull and not impBull and high[nb] > high[obOff]
-                        zTop := high[nb]
-                        zBot := low[nb]
-                        obT  := "G1"
                     smallBody = math.abs(close[obOff] - open[obOff]) < 0.3 * (high[obOff] - low[obOff])
                     engulfs   = low[nb] <= low[obOff] and high[nb] >= high[obOff]
-                    if smallBody and engulfs and obT != "G1"
+                    if smallBody and engulfs
                         zTop := isBull ? high[obOff] : high[nb]
                         zBot := isBull ? low[nb] : low[obOff]
                         obT  := "G2"
@@ -1416,8 +1452,7 @@ f_zones(cf, cx, v, fv, aV, swH, swL, bullBOS, bearBOS, bullCHoCH, bearCHoCH, mvS
                         fv.evtDn := "T5 no-FVG"
                         fv.tipDn := "STRONG move but no FVG aligned with the OB candle — OB invalid (Type 5)."
                 else
-                    // the OB CANDLE's own extreme is what may have eaten into the gap — zTop/zBot
-                    // have been widened onto the displacement candle for G1, which would always trip
+                    // the OB CANDLE's own extreme is what may have eaten into the gap
                     selfMit = isBull ? high[obOff] > fvgLvl : low[obOff] < fvgLvl
                     if selfMit
                         if isBull
@@ -1862,14 +1897,21 @@ if st.bearSweep
 var Move mv = Move.new()
 bosEvt = st.bullBOS or st.bearBOS
 if bosEvt and barstate.isconfirmed
-    // the leg origin is the index as it stood BEFORE f_structure shifted it (see preHighIdx above);
-    // reading ctx.curLowIdx here measured only the last swingLen bars on any pivot-confirming bar
-    mv := f_moveStrength(cfg, ctx, st.bullBOS ? preLowIdx : preHighIdx, bar_index, atrV)
+    // S2 — the leg that broke the swing starts at the price extreme printed after that swing
+    // (preHighIdx / preLowIdx = the broken swing as it stood before f_structure shifted it)
+    [lgI, lgP] = f_legOrigin(st.bullBOS, st.bullBOS ? preHighIdx : preLowIdx)
+    ctx.legIdx := lgI
+    ctx.legPx  := lgP
+    mv := f_moveStrength(cfg, ctx, lgI, bar_index, atrV)
     ctx.lastDepStrong  := mv.strong
     ctx.lastBOSBar     := bar_index
     ctx.lastBOSAvgBody := mv.avgBody
 if (st.bullCHoCH or st.bearCHoCH) and barstate.isconfirmed
-    mc = f_moveStrength(cfg, ctx, st.bullCHoCH ? preLowIdx : preHighIdx, bar_index, atrV)
+    // the CHoCH leg starts after the protected swing it broke (majorHigh for a bull CHoCH)
+    [cgI, cgP] = f_legOrigin(st.bullCHoCH, st.bullCHoCH ? ctx.majorHighIdx : ctx.majorLowIdx)
+    ctx.legIdx := cgI
+    ctx.legPx  := cgP
+    mc = f_moveStrength(cfg, ctx, cgI, bar_index, atrV)
     ctx.chochReal := mc.fvgCount >= 1
 ft.dispBull      := st.bullBOS and mv.strong
 ft.dispBear      := st.bearBOS and mv.strong
@@ -1907,7 +1949,7 @@ if i_ssnLvl and lonOpen and barstate.isconfirmed and not na(asiaHi) and not na(a
 f_liq(cfg, ctx, vis, ft, atrV, swingHi, swingLo, extHi, extLo, pdhRaw, pdlRaw, pwhRaw, pwlRaw, newDay, newWeek, d_liq)
 volOk = volume > volSma * i_klVolMult
 f_zones(cfg, ctx, vis, ft, atrV, swingHi, swingLo, st.bullBOS, st.bearBOS, st.bullCHoCH, st.bearCHoCH,
-     mv.strong, mv.fvgCount, volOk, d_sr, d_kl, d_ob, d_brk, d_rcb, d_rjb, d_qm)
+     mv.strong, mv.fvgCount, volOk, ctx.legIdx, d_sr, d_kl, d_ob, d_brk, d_rcb, d_rjb, d_qm)
 f_htf(cfg, ctx, ft, newHtf, hO1, hH1, hL1, hC1, hO2, hH2, hL2, hC2, hPH, hPL)
 // §M9 — st.trend has already been flipped by THIS bar's own BOS/CHoCH, so reading it here made the
 // LTF half of the gate agree with every breakout by construction. `preTrend` is the trend as the
@@ -3370,3 +3412,4 @@ plot(ft.zDepStrong ? 1 : 0, "zone departure STRONG (M04/M21/M33/M42 gate)", disp
 // port, where the token budget has room for it.
 plot(ft.pdPct,      "PD array 0=low of range · 1=high",      display = display.data_window)
 plot(ft.dispScore,  "displacement quality 0-3",              display = display.data_window)
+plot(ctx.legIdx,    "S2 · leg origin bar_index",             display = display.data_window)
