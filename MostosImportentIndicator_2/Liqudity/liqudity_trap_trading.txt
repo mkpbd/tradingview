@@ -4867,7 +4867,7 @@ f_dash() =>
         noTrade = anyLong or anyShort ? "" :
              planKill != "" ? "NO · " + planKill :
              gateKillL != "" ? "NO · " + gateKillL : gateKillS != "" ? "NO · " + gateKillS :
-             dirLock != 0 ? "NO · " + (dirLock == 1 ? "long" : "short") + " narrative live" :
+             dirLock != 0 ? (dirLock == 1 ? "LONG narrative live · shorts locked · " + f_suTxt(suL) : "SHORT narrative live · longs locked · " + f_suTxt(suS)) :
              poiConflict ? "NO · POI conflict (demand / supply " + str.tostring(nsBot - nbTop, format.mintick) + " apart)" :
              htfB == 0 and neutralMode == "Block both sides" ? "NO · neutral bias" :
              not sbOnlyOK ? "NO · outside SB windows" :
