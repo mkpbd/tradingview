@@ -5,6 +5,8 @@
 //  ── v8.3.0 CHANGELOG (FORENSIC_AUDIT_SMC_v8.2.1.md → IMPROVEMENT_PLAN_v8.3.md) ───────────────
 //  S0  token headroom: removed M43, M38-P4, the hidden-liquidity engine and the Wyckoff label
 //      (all default-OFF or cosmetic); "CRT" dropped from the title — nothing CRT-related exists.
+//  S1  the 7 event alertconditions (BOS / CHoCH / CISD / sweep / HP OB / PROP / OB 50%) are gated on
+//      barstate.isconfirmed like the signal alerts — they used to fire on transient intrabar state.
 //  spec : INDICATOR_DEV_SPEC_BN.md   rules : BUILD_PROTOCOL_BN.md (R1 call-once, R2 one Cfg, R3 state in Ctx)
 //  audit: FORENSIC_AUDIT_BN.md — this build implements stages 1, 2 and the cheap part of 3.
 //  layers: L0 candle · L1 structure · L2 FVG/strength · L3 liquidity · L4 zones · L5 HTF · L6 setups · L7 trade
@@ -3337,13 +3339,17 @@ alertcondition(hasL and barstate.isconfirmed, "Setup: LONG signal",  "SMC Suite:
 alertcondition(hasS and barstate.isconfirmed, "Setup: SHORT signal", "SMC Suite: SHORT setup")
 alertcondition(barstate.isconfirmed and ((hasL and sigL.score >= 6) or (hasS and sigS.score >= 6)), "Setup: Any A+ signal", "SMC Suite: A+ signal")
 alertcondition(barstate.isconfirmed and ((hasL and ft.gateUp == 1) or (hasS and ft.gateDn == 1)), "Warning: Counter-HTF signal", "SMC Suite: counter-HTF/trend signal")
-alertcondition(st.bullBOS or st.bearBOS, "Structure: BOS", "SMC Suite: Break of Structure")
-alertcondition((st.bullCHoCH or st.bearCHoCH) and ft.chochReal, "Structure: CHoCH (Real)", "SMC Suite: real CHoCH")
-alertcondition(st.cisdBull or st.cisdBear, "Structure: CISD", "SMC Suite: CISD")
-alertcondition(ft.sweptHigh or ft.sweptLow, "Liquidity: Sweep detected", "SMC Suite: liquidity sweep")
-alertcondition(ft.newObHp, "Zone: New high-probability OB", "SMC Suite: new HP order block")
-alertcondition(ft.newProp, "Zone: Propulsion Block formed", "SMC Suite: propulsion block")
-alertcondition(ft.enteredOb50, "Zone: Price entered OB / S&D (50% tapped)", "SMC Suite: OB 50% tapped")
+// S1 (audit B4) — event conditions are evaluated on every tick and rolled back; a "once per bar"
+// alert fired on the first tick that satisfied them and could not be un-fired when the close did
+// not. All of them now share the confirm gate the signal alerts already had.
+evOk = barstate.isconfirmed
+alertcondition(evOk and (st.bullBOS or st.bearBOS), "Structure: BOS", "SMC Suite: Break of Structure")
+alertcondition(evOk and (st.bullCHoCH or st.bearCHoCH) and ft.chochReal, "Structure: CHoCH (Real)", "SMC Suite: real CHoCH")
+alertcondition(evOk and (st.cisdBull or st.cisdBear), "Structure: CISD", "SMC Suite: CISD")
+alertcondition(evOk and (ft.sweptHigh or ft.sweptLow), "Liquidity: Sweep detected", "SMC Suite: liquidity sweep")
+alertcondition(evOk and ft.newObHp, "Zone: New high-probability OB", "SMC Suite: new HP order block")
+alertcondition(evOk and ft.newProp, "Zone: Propulsion Block formed", "SMC Suite: propulsion block")
+alertcondition(evOk and ft.enteredOb50, "Zone: Price entered OB / S&D (50% tapped)", "SMC Suite: OB 50% tapped")
 
 // ── DATA WINDOW ──────────────────────────────────────────────────────────────
 plot(sigL.score, "long score",  display = display.data_window)
