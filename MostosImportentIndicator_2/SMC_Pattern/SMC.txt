@@ -17,6 +17,8 @@
 //      "internal" (label only); breaks without displacement are "weak" and need a follow-through close;
 //      two failed follow-throughs → RANGE. Protected swing = f_legOrigin of the breaking leg, kept in
 //      majorLow / majorHigh. HTF bias follows the same rules. movePhase is trend-aware.
+//  S5  sweep qualification: only pool / PDH-PDL / PWH-PWL / SESH-SESL (+ext, opt-in) sweeps arm the
+//      HP-OB / M41 / M45 / M54 / CISD-reliability / f_conf chain; pivot wicks are internal (M49 / M53).
 //  spec : INDICATOR_DEV_SPEC_BN.md   rules : BUILD_PROTOCOL_BN.md (R1 call-once, R2 one Cfg, R3 state in Ctx)
 //  audit: FORENSIC_AUDIT_BN.md — this build implements stages 1, 2 and the cheap part of 3.
 //  layers: L0 candle · L1 structure · L2 FVG/strength · L3 liquidity · L4 zones · L5 HTF · L6 setups · L7 trade
@@ -120,6 +122,7 @@ type Cfg
     float  runBodyMin      = 0.60
     float  runCloseMinATR  = 0.25
     float  sweepWickMin    = 0.40
+    bool   sweepExtOk      = false
     int    failedCloseBars = 2
     int    extLookback     = 50
     int    maxLevels       = 30
@@ -463,6 +466,8 @@ type Feat
     bool   lastDepStrong = false
     bool   sweptHigh = false
     bool   sweptLow = false
+    bool   sweptHighQ = false     // S5 — sweep of a qualified (major) level
+    bool   sweptLowQ = false
     bool   runUp = false
     bool   runDn = false
     bool   sweptPool = false
@@ -662,6 +667,10 @@ i_showPW    = input.bool(true, "PWH/PWL (≤ daily)", group = gL, inline = "pd")
 i_runBody   = input.float(0.60, "RUN min body ratio", minval = 0.1, maxval = 1.0, step = 0.05, group = gL)
 i_runClose  = input.float(0.25, "RUN min close beyond × ATR", minval = 0.0, step = 0.05, group = gL)
 i_sweepWick = input.float(0.40, "SWEEP min wick ratio", minval = 0.0, maxval = 1.0, step = 0.05, group = gL)
+// S5 — which sweeps arm the sweep-based setups. A pivot that is merely the 50-bar extreme is the
+// common case on a low timeframe, so it is opt-in.
+i_sweepQual = input.string("Major only", "Sweep arms setups when the level is", options = ["Major only", "Include external"], group = gL,
+     tooltip = "Major only = pooled (EQH/EQL, ≥2 touches), PDH/PDL, PWH/PWL, SESH/SESL · Include external = also the ext-lookback extreme. Other pivot sweeps are 'internal' and only feed M49 / M53 / the zone sweep-required rule.")
 i_failBars  = input.int(2,   "Failed-close window (bars)", minval = 1, maxval = 5, group = gL)
 i_maxLevels = input.int(30,  "Max liquidity levels", minval = 5, maxval = 150, group = gL)
 
@@ -798,7 +807,7 @@ var Cfg cfg = Cfg.new(pinWickMult = i_pinMult, pinWickRatioMin = i_pinRatio, doj
      strongBodyEff = i_bodyEff, strongMixMax = i_mixMax, strongSpeedMin = i_speedMin, maxMoveBars = i_maxMove,
      eqTolATR = i_eqTol, touchTolATR = i_touchTol, touchCooldown = i_touchCd, runBodyMin = i_runBody,
      propWindow = i_propWin, propImpATR = i_propImp,
-     runCloseMinATR = i_runClose, sweepWickMin = i_sweepWick, failedCloseBars = i_failBars,
+     runCloseMinATR = i_runClose, sweepWickMin = i_sweepWick, sweepExtOk = i_sweepQual == "Include external", failedCloseBars = i_failBars,
      extLookback = i_extLB, maxLevels = i_maxLevels, klLookLeft = i_klLeft,
      klUseVol = i_klVol, sweepWindow = i_sweepWin, rjbWickMin = i_rjbWick,
      rjbConfirmBars = i_rjbBars, qmMaxBars = i_qmBars, maxZones = i_maxZones, zoneMaxAge = i_zoneAge, zoneMaxATR = i_zoneMaxH,
@@ -1347,12 +1356,24 @@ f_liq(cf, cx, v, fv, aV, swH, swL, eHi, eLo, pdh, pdl, pwh, pwl, nDay, nWeek, dr
                     L.lb := label.new(f_xb(L.idx), L.price, f_lvlText(L), style = label.style_none, textcolor = v.pool, size = v.zsz)
             if L.done
                 if L.result == "SWEEP"
+                    // S5 (audit T3 / §9) — only a QUALIFIED level (pool, PDH/PDL, PWH/PWL, SESH/SESL,
+                    // optionally the extLookback extreme) arms the sweep-based chain (HP OB, M41, M45,
+                    // M54, CISD reliability, the ✕ marker, f_conf). A plain pivot sweep is internal.
+                    qual = L.touches >= 2 or L.kind == "PDH" or L.kind == "PDL" or L.kind == "PWH" or L.kind == "PWL" or L.kind == "SESH" or L.kind == "SESL" or (cf.sweepExtOk and L.ext)
                     if L.isHigh
                         fv.sweptHigh := true
-                        cx.sweptHighBar := bar_index
+                        if qual
+                            fv.sweptHighQ   := true
+                            cx.sweptHighBar := bar_index
+                        else
+                            cx.intSwpBear := bar_index
                     else
                         fv.sweptLow := true
-                        cx.sweptLowBar := bar_index
+                        if qual
+                            fv.sweptLowQ   := true
+                            cx.sweptLowBar := bar_index
+                        else
+                            cx.intSwpBull := bar_index
                     fv.sweptKind  := f_lvlText(L)
                     if L.isHigh
                         fv.sweptKindHi  := f_lvlText(L)
@@ -2035,10 +2056,12 @@ f_fvg(cfg, ctx, vis, ft, atrV, d_fvg, d_fvgMit)
 // S4 — displacement gate for structure: the breaking candle itself
 dispOk = i_dispGate == "Off" or (cd.bodyRatio >= i_dispBody and cd.rng >= atrV * i_dispRng)
 st = f_structure(cfg, ctx, sx, swingHi, swingLo, atrV, dispOk, i_pendBars, i_failMax)
+// S5 — a wick through the last pivot is an INTERNAL sweep (M49 / M53); it no longer arms the
+// HP-OB / M41 / M45 / M54 chain, which wants a qualified liquidity level
 if st.bullSweep
-    ctx.sweptHighBar := bar_index
+    ctx.intSwpBear := bar_index
 if st.bearSweep
-    ctx.sweptLowBar := bar_index
+    ctx.intSwpBull := bar_index
 
 // L2 strength — only at BOS (departure) and CHoCH (M30 real/fake)
 var Move mv = Move.new()
@@ -2330,7 +2353,7 @@ if st.bullCHoCH and bar_index - ctx.demandTouchBar <= 20
 if ft.atDemand and ctx.m54Stage == 0
     ctx.m54Stage := 1
     ctx.m54Bar := bar_index
-if ctx.m54Stage == 1 and bar_index > ctx.m54Bar and (ft.sweptLow or st.bearSweep)
+if ctx.m54Stage == 1 and bar_index > ctx.m54Bar and ft.sweptLowQ
     ctx.m54Stage := 2
     ctx.m54Bar   := bar_index
 if ctx.m54Stage == 2 and bar_index > ctx.m54Bar and st.bullBOS
@@ -2341,7 +2364,7 @@ if ctx.m54Stage > 0 and bar_index - ctx.m54Bar > cfg.armBars * 2
 if ft.atSupply and ctx.m54StageB == 0
     ctx.m54StageB := 1
     ctx.m54BarB := bar_index
-if ctx.m54StageB == 1 and bar_index > ctx.m54BarB and (ft.sweptHigh or st.bullSweep)
+if ctx.m54StageB == 1 and bar_index > ctx.m54BarB and ft.sweptHighQ
     ctx.m54StageB := 2
     ctx.m54BarB   := bar_index
 if ctx.m54StageB == 2 and bar_index > ctx.m54BarB and st.bearBOS
@@ -2544,8 +2567,9 @@ s08b = en_M08 and bearTrend and zoneOkBear and cd.pinBear
 s09  = en_M09 and zoneOkBull and cd.pinBull and cd.dnWickRatio >= 0.65 and ft.bslAbove >= 2
 s09b = en_M09 and zoneOkBear and cd.pinBear and cd.upWickRatio >= 0.65 and ft.sslBelow >= 2
 // C — liquidity hunting (IMMEDIATE mode: sweep candle itself rejects)
-s10  = en_M10 and ft.sweptLow  and (ft.sweptPool or ft.zKind != "") and cd.dnWickRatio >= cfg.sweepWickMin and close > ft.sweptPriceLo
-s10b = en_M10 and ft.sweptHigh and (ft.sweptPool or ft.zKind != "") and cd.upWickRatio >= cfg.sweepWickMin and close < ft.sweptPriceHi
+// S5 — a qualified level stands on its own; a plain pivot sweep only counts inside a zone
+s10  = en_M10 and (ft.sweptLowQ  or (ft.sweptLow  and ft.zKind != "")) and cd.dnWickRatio >= cfg.sweepWickMin and close > ft.sweptPriceLo
+s10b = en_M10 and (ft.sweptHighQ or (ft.sweptHigh and ft.zKind != "")) and cd.upWickRatio >= cfg.sweepWickMin and close < ft.sweptPriceHi
 // D — S/R
 var float dojiHi = na
 var float dojiLo = na
@@ -3079,7 +3103,7 @@ f_conf(fv, trendStr, isLong) =>
     sc += fv.zDepStrong and fv.arrivalWeak ? 1 : 0
     sc += (isLong and fv.bslAbove >= 1) or (not isLong and fv.sslBelow >= 1) ? 1 : 0
     sc += fv.zKind != "" and fv.zTouches <= 1 ? 1 : 0
-    sc += (isLong and (fv.sweptLow or fv.zIdm)) or (not isLong and (fv.sweptHigh or fv.zIdm)) ? 1 : 0
+    sc += (isLong and (fv.sweptLowQ or fv.zIdm)) or (not isLong and (fv.sweptHighQ or fv.zIdm)) ? 1 : 0
     sc += fv.zKl >= 4 ? 1 : 0
     sc += fv.zKind != "" and ((isLong and fv.atBullFvg) or (not isLong and fv.atBearFvg)) ? 1 : 0
     sc -= fv.arrivalStrong ? 2 : 0
