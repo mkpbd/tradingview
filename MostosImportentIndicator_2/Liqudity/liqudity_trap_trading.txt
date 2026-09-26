@@ -2300,6 +2300,7 @@ f_claimBand(bool isSupply, float top, float bot) =>
                         box.set_top(zo.bx, ot)
                     else
                         box.set_bottom(zo.bx, ob)
+    array.size(zones)      // CE10235: the branches above return Zone / void — give the function one explicit return
 
 f_newZone(bool isSupply, float top, float bot, bool star, string kind, string txt, int lft) =>
     c  = isSupply ? COL_BEAR : COL_BULL
