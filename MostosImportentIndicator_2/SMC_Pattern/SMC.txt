@@ -12,6 +12,11 @@
 //      candle. "G1" type removed (always-true artefact of the T2 shift).
 //  S3  session windows take a timezone (default UTC); defaults no longer overlap; SESH/SESL are
 //      placed when the Asia window ends instead of when London opens.
+//  S4  structure rebuilt: BOS = trend-aligned close through the last pivot WITH displacement;
+//      CHoCH = close through the protected swing against the trend; counter-trend pivot breaks are
+//      "internal" (label only); breaks without displacement are "weak" and need a follow-through close;
+//      two failed follow-throughs → RANGE. Protected swing = f_legOrigin of the breaking leg, kept in
+//      majorLow / majorHigh. HTF bias follows the same rules. movePhase is trend-aware.
 //  spec : INDICATOR_DEV_SPEC_BN.md   rules : BUILD_PROTOCOL_BN.md (R1 call-once, R2 one Cfg, R3 state in Ctx)
 //  audit: FORENSIC_AUDIT_BN.md — this build implements stages 1, 2 and the cheap part of 3.
 //  layers: L0 candle · L1 structure · L2 FVG/strength · L3 liquidity · L4 zones · L5 HTF · L6 setups · L7 trade
@@ -207,6 +212,12 @@ type Struct
     bool   bearSweep = false
     bool   bullCHoCH = false
     bool   bearCHoCH = false
+    // S4 — a counter-trend pivot break (label only, no state change) and a trend-aligned break
+    // without displacement (state change deferred to a follow-through close within pendBars)
+    bool   internalBullBOS = false
+    bool   internalBearBOS = false
+    bool   weakBullBOS = false
+    bool   weakBearBOS = false
     bool   pbValidUp = false
     bool   pbValidDn = false
     bool   cisdBull  = false
@@ -430,6 +441,18 @@ type Sx
     int   m72Cnt = 0
     int   m72Wick = 0
     int   m72Dir = 0
+    // S4 structure state (Ctx is at the UDT element cap)
+    string hiType = ""        // HH | LH of the last confirmed pivot high
+    string loType = ""        // HL | LL
+    int   stPendDir = 0       // ±1 break without displacement waiting for a follow-through close
+    int   stPendKind = 0      // 1 = BOS, 2 = CHoCH
+    int   stPendBar = -999
+    float stPendLvl = na
+    int   stPendFrom = 0      // fromIdx for f_legOrigin when the pending break is promoted
+    int   stBrkDir = 0        // last break of any kind, for the failed-follow-through counter
+    float stBrkLvl = na
+    int   stBrkBar = -999
+    int   stFail = 0          // consecutive failed follow-throughs → RANGE at 2
 
 // L2..L5 per-bar flags (feature vector) — setups read ONLY cd / st / ft
 type Feat
@@ -611,6 +634,14 @@ i_ifcAnyCol = input.bool(false, "IFC allow any colour", group = gC)
 i_manipWick = input.float(0.30, "Manipulative min wick/range", minval = 0.05, maxval = 0.9, step = 0.05, group = gC)
 
 i_rangeBars = input.int(20,  "Bars without BOS/CHoCH → RANGE", minval = 5, group = gS)
+// S4 (audit B2/B3) — a close through a swing only changes structure when the closing candle shows
+// displacement; otherwise it is a "weak" break that needs a second close within N bars.
+i_dispGate  = input.string("Candle", "Structure needs displacement", options = ["Candle", "Off"], group = gS, inline = "d",
+     tooltip = "Candle = the breaking candle must have body ≥ the ratio and range ≥ the ATR multiple below · Off = v8.2 behaviour (any close through the swing changes structure)")
+i_dispBody  = input.float(0.5, "body/range ≥", minval = 0.2, maxval = 0.9, step = 0.05, group = gS, inline = "d")
+i_dispRng   = input.float(0.8, "range ≥ × ATR", minval = 0.2, step = 0.1, group = gS, inline = "d")
+i_pendBars  = input.int(3, "Weak break: follow-through window (bars)", minval = 1, maxval = 10, group = gS)
+i_failMax   = input.int(2, "Failed follow-throughs → RANGE", minval = 1, maxval = 5, group = gS)
 
 i_fvgMin    = input.float(0.10, "Min FVG height × ATR", minval = 0.0, step = 0.05, group = gF)
 i_fvgMode   = input.string("TOUCH", "FVG mitigation mode", options = ["TOUCH", "50%", "FULL"], group = gF)
@@ -819,70 +850,178 @@ f_candle(cf, aV, rLo, rHi) =>
         k.manipBear := high > high[1] and close < low[1]  and close < open and k.upWickRatio >= cf.manipWickRatio
     k
 
+// S2 (audit B1) — origin of the leg that just broke a swing: the lowest low (bull) / highest high
+// (bear) printed AFTER the broken swing and BEFORE this bar. f_moveStrength used the pre-shift
+// pivot and f_zones the post-shift one; on a bar that is both a BOS and a pivot confirmation the
+// two engines measured two different legs, and neither was the price origin. Returns [idx, price].
+f_legOrigin(isBull, fromIdx) =>
+    span = math.min(math.max(bar_index - fromIdx, 1), 490)
+    bestOff = 1
+    bestVal = isBull ? low[1] : high[1]
+    if span >= 2
+        for k = 2 to span
+            v = isBull ? low[k] : high[k]
+            if (isBull and v < bestVal) or (not isBull and v > bestVal)
+                bestVal := v
+                bestOff := k
+    [bar_index - bestOff, bestVal]
+
+// S4 — arm a break that lacks displacement; a second close beyond `lvl` within pendBars promotes it
+f_pend(sx, dir, kind, lvl, fromIdx) =>
+    sx.stPendDir  := dir
+    sx.stPendKind := kind
+    sx.stPendBar  := bar_index
+    sx.stPendLvl  := lvl
+    sx.stPendFrom := fromIdx
+
 // ── L1 STRUCTURE ENGINE — once per bar (R1) ──────────────────────────────────
-f_structure(cf, cx, swH, swL, aN) =>
+// S4 (audit B2 / B3 / RC1). v8.2 emitted a BOS on ANY close through the last pivot, flipped the trend
+// on it, and tested CHoCH afterwards — so majorHigh ≥ curHigh made CHoCH unreachable and every
+// corrective break read as a trend change. Now:
+//   BOS       = close through the last pivot IN the trend direction (or from RANGE), with displacement
+//   CHoCH     = close through the PROTECTED swing (majorHigh / majorLow) AGAINST the trend, with displacement
+//   internal  = counter-trend close through a pivot that is not the protected swing → label only
+//   weak      = either of the first two without displacement → pending; promoted by a follow-through
+//               close within pendBars, otherwise dropped
+//   RANGE     = two consecutive breaks that closed back through their level, or the old bar count
+// The protected swing is the price origin of the leg that made the break (f_legOrigin), stored in
+// majorLow (bull trend) / majorHigh (bear trend) so every downstream reader keeps its name.
+f_structure(cf, cx, sx, swH, swL, aN, dispOk, pendBars, failMax) =>
     s = Struct.new()
     pIdx = bar_index - cf.swingLen
     if not na(swH)
         s.swingHigh := true
+        sx.hiType   := na(cx.curHigh) ? "" : swH > cx.curHigh ? "HH" : "LH"
     if not na(swL)
         s.swingLow := true
-    s.bullBOS   := not na(cx.curHigh) and not cx.hiBroken and close > cx.curHigh
-    s.bearBOS   := not na(cx.curLow)  and not cx.loBroken and close < cx.curLow
+        sx.loType  := na(cx.curLow) ? "" : swL < cx.curLow ? "LL" : "HL"
+    // failed follow-through: the last break (of any kind) closed back through its level
+    if sx.stBrkDir != 0 and bar_index - sx.stBrkBar >= 1
+        if bar_index - sx.stBrkBar <= cf.failedCloseBars
+            if (sx.stBrkDir == 1 and close < sx.stBrkLvl) or (sx.stBrkDir == -1 and close > sx.stBrkLvl)
+                sx.stFail   := sx.stFail + 1
+                sx.stBrkDir := 0
+                if sx.stFail >= failMax
+                    cx.trend := "RANGE"
+        else
+            sx.stBrkDir := 0
+    brkUp = not na(cx.curHigh) and not cx.hiBroken and close > cx.curHigh
+    brkDn = not na(cx.curLow)  and not cx.loBroken and close < cx.curLow
     s.bullSweep := not na(cx.curHigh) and not cx.hiBroken and high > cx.curHigh and close <= cx.curHigh
     s.bearSweep := not na(cx.curLow)  and not cx.loBroken and low  < cx.curLow  and close >= cx.curLow
-    // §M1 — a gap or outside bar can close beyond BOTH stored extremes (possible whenever the two
-    // pivots sit on the same side of the close). Both flags true made the zone engine pick `isBull =
-    // bullBOS` arbitrarily, set the trend from whichever block ran last, and arm M41 in two
-    // directions at once. Keep the side price actually displaced further.
-    if s.bullBOS and s.bearBOS
+    // §M1 — a gap or outside bar can close beyond BOTH stored extremes. Keep the side displaced further.
+    if brkUp and brkDn
         if (close - cx.curHigh) >= (cx.curLow - close)
-            s.bearBOS := false
+            brkDn := false
         else
-            s.bullBOS := false
-    if s.bullBOS
+            brkUp := false
+    if brkUp
         cx.hiBroken := true
-    if s.bearBOS
+    if brkDn
         cx.loBroken := true
-    if s.bearBOS
-        // §C5 — the old rule only re-anchored on a lower high, so the FIRST bearish BOS of a chart
-        // (which comes off the highest high, not an LH) left majorHigh at `na` and bullCHoCH could
-        // never fire; later, a stored major below the live swing high made CHoCH trivially true.
-        lhNow = not na(cx.prevHigh) and cx.curHigh < cx.prevHigh
-        if lhNow or na(cx.majorHigh) or cx.curHigh >= cx.majorHigh
-            cx.majorHigh    := cx.curHigh
-            cx.majorHighIdx := cx.curHighIdx
-        cx.trend        := "BEARISH"
-        cx.barsSinceEvt := 0
-    if s.bullBOS
-        hlNow = not na(cx.prevLow) and cx.curLow > cx.prevLow
-        if hlNow or na(cx.majorLow) or cx.curLow <= cx.majorLow
-            cx.majorLow    := cx.curLow
-            cx.majorLowIdx := cx.curLowIdx
+    // pending weak break: promote on a follow-through close, expire after pendBars
+    promUp = false
+    promDn = false
+    if sx.stPendDir != 0
+        if bar_index - sx.stPendBar > pendBars
+            sx.stPendDir := 0
+        else if sx.stPendDir == 1 and close > sx.stPendLvl
+            promUp := true
+            if sx.stPendKind == 2
+                s.bullCHoCH := true
+            else
+                s.bullBOS := true
+            sx.stPendDir := 0
+        else if sx.stPendDir == -1 and close < sx.stPendLvl
+            promDn := true
+            if sx.stPendKind == 2
+                s.bearCHoCH := true
+            else
+                s.bearBOS := true
+            sx.stPendDir := 0
+    chUp = cx.trend == "BEARISH" and not na(cx.majorHigh) and close > cx.majorHigh
+    chDn = cx.trend == "BULLISH" and not na(cx.majorLow)  and close < cx.majorLow
+    evtAny = s.bullBOS or s.bearBOS or s.bullCHoCH or s.bearCHoCH
+    // bull side
+    if (brkUp or chUp) and not evtAny
+        if chUp
+            if dispOk
+                s.bullCHoCH := true
+            else
+                s.weakBullBOS := true
+                f_pend(sx, 1, 2, cx.majorHigh, cx.majorHighIdx)
+        else if cx.trend == "BEARISH"
+            s.internalBullBOS := true
+        else if dispOk
+            s.bullBOS := true
+        else
+            s.weakBullBOS := true
+            f_pend(sx, 1, 1, cx.curHigh, cx.curHighIdx)
+    evtAny := s.bullBOS or s.bearBOS or s.bullCHoCH or s.bearCHoCH
+    // bear side
+    if (brkDn or chDn) and not evtAny and not s.weakBullBOS and not s.internalBullBOS
+        if chDn
+            if dispOk
+                s.bearCHoCH := true
+            else
+                s.weakBearBOS := true
+                f_pend(sx, -1, 2, cx.majorLow, cx.majorLowIdx)
+        else if cx.trend == "BULLISH"
+            s.internalBearBOS := true
+        else if dispOk
+            s.bearBOS := true
+        else
+            s.weakBearBOS := true
+            f_pend(sx, -1, 1, cx.curLow, cx.curLowIdx)
+    // state changes — only a displaced (or promoted) BOS / CHoCH moves the trend and the protected swing
+    if s.bullBOS or s.bullCHoCH
+        fromI = promUp ? sx.stPendFrom : s.bullCHoCH ? cx.majorHighIdx : cx.curHighIdx
+        [oi, op] = f_legOrigin(true, fromI)
+        cx.legIdx       := oi
+        cx.legPx        := op
+        cx.majorLow     := op
+        cx.majorLowIdx  := oi
         cx.trend        := "BULLISH"
         cx.barsSinceEvt := 0
-    s.bullCHoCH := cx.trend == "BEARISH" and not na(cx.majorHigh) and close > cx.majorHigh
-    s.bearCHoCH := cx.trend == "BULLISH" and not na(cx.majorLow)  and close < cx.majorLow
-    if s.bullCHoCH
-        cx.trend        := "BULLISH"
-        cx.barsSinceEvt := 0
-        // §C5 — the new trend needs its own invalidation level, otherwise the next bearCHoCH is
-        // measured against a major low from the previous regime. Only anchor below price.
-        if not na(cx.curLow) and cx.curLow < close and (na(cx.majorLow) or cx.curLow > cx.majorLow)
-            cx.majorLow    := cx.curLow
-            cx.majorLowIdx := cx.curLowIdx
-        // §M2 — the break flags used to stay latched through a CHoCH: upside is already taken, but
-        // a fresh downside break is meaningful again.
-        cx.hiBroken := true
-        cx.loBroken := false
-    if s.bearCHoCH
+        sx.stFail       := 0
+        sx.stBrkDir     := 1
+        sx.stBrkLvl     := s.bullCHoCH ? cx.majorHigh : cx.curHigh
+        sx.stBrkBar     := bar_index
+        if s.bullCHoCH
+            // §M2 — upside is taken, a fresh downside break is meaningful again
+            cx.hiBroken := true
+            cx.loBroken := false
+    if s.bearBOS or s.bearCHoCH
+        fromI = promDn ? sx.stPendFrom : s.bearCHoCH ? cx.majorLowIdx : cx.curLowIdx
+        [oi, op] = f_legOrigin(false, fromI)
+        cx.legIdx       := oi
+        cx.legPx        := op
+        cx.majorHigh    := op
+        cx.majorHighIdx := oi
         cx.trend        := "BEARISH"
         cx.barsSinceEvt := 0
-        if not na(cx.curHigh) and cx.curHigh > close and (na(cx.majorHigh) or cx.curHigh < cx.majorHigh)
-            cx.majorHigh    := cx.curHigh
-            cx.majorHighIdx := cx.curHighIdx
-        cx.loBroken := true
-        cx.hiBroken := false
+        sx.stFail       := 0
+        sx.stBrkDir     := -1
+        sx.stBrkLvl     := s.bearCHoCH ? cx.majorLow : cx.curLow
+        sx.stBrkBar     := bar_index
+        if s.bearCHoCH
+            cx.loBroken := true
+            cx.hiBroken := false
+    // weak / internal breaks: measure the leg (for mv) and track the level for the failure counter
+    if s.weakBullBOS or s.internalBullBOS
+        [oi, op] = f_legOrigin(true, cx.curHighIdx)
+        cx.legIdx   := oi
+        cx.legPx    := op
+        sx.stBrkDir := 1
+        sx.stBrkLvl := cx.curHigh
+        sx.stBrkBar := bar_index
+    if s.weakBearBOS or s.internalBearBOS
+        [oi, op] = f_legOrigin(false, cx.curLowIdx)
+        cx.legIdx   := oi
+        cx.legPx    := op
+        sx.stBrkDir := -1
+        sx.stBrkLvl := cx.curLow
+        sx.stBrkBar := bar_index
     if not (s.bullBOS or s.bearBOS or s.bullCHoCH or s.bearCHoCH)
         cx.barsSinceEvt := cx.barsSinceEvt + 1
         if cx.barsSinceEvt > cf.rangeBarsThresh
@@ -954,9 +1093,11 @@ f_structure(cf, cx, swH, swL, aN) =>
     if s.cisdBull
         cx.cisdDnSet := false
     s.trend     := cx.trend
-    // §C1 · §3.8 — measured against the CURRENT leg, not the all-time extreme: price pushing
-    // past the live swing that defines the leg is impulse, anything inside it is retracement.
-    s.movePhase := (not na(cx.curHigh) and close >= cx.curHigh) or (not na(cx.curLow) and close <= cx.curLow) ? "IMPULSIVE" : "RETRACEMENT"
+    // §C1 · §3.8 · S4 — measured against the current leg IN the trend direction: price pushing past
+    // the live swing that defines the leg is impulse, anything inside it is retracement.
+    s.movePhase := cx.trend == "RANGE" ? "RANGE" :
+                   (cx.trend == "BULLISH" and not na(cx.curHigh) and close >= cx.curHigh) or
+                   (cx.trend == "BEARISH" and not na(cx.curLow)  and close <= cx.curLow) ? "IMPULSIVE" : "RETRACEMENT"
     s
 
 // ── drawing x-coordinate clamp ──────────────────────────────────────
@@ -964,22 +1105,6 @@ f_structure(cf, cx, swH, swL, aN) =>
 // otherwise: "The requested historical offset is beyond the historical buffer's limit".
 // Stored pivot / zone indices can outlive that window, so pin them to the edge.
 f_xb(x) => math.max(math.min(x, bar_index), bar_index - 495)
-
-// S2 (audit B1) — origin of the leg that just broke a swing: the lowest low (bull) / highest high
-// (bear) printed AFTER the broken swing and BEFORE this bar. f_moveStrength used the pre-shift
-// pivot and f_zones the post-shift one; on a bar that is both a BOS and a pivot confirmation the
-// two engines measured two different legs, and neither was the price origin. Returns [idx, price].
-f_legOrigin(isBull, fromIdx) =>
-    span = math.min(math.max(bar_index - fromIdx, 1), 490)
-    bestOff = 1
-    bestVal = isBull ? low[1] : high[1]
-    if span >= 2
-        for k = 2 to span
-            v = isBull ? low[k] : high[k]
-            if (isBull and v < bestVal) or (not isBull and v > bestVal)
-                bestVal := v
-                bestOff := k
-    [bar_index - bestOff, bestVal]
 
 // ── L2 FVG ENGINE — once per bar (R1); writes into the shared Feat ───────────
 f_fvg(cf, cx, v, fv, aV, drawOn, keepMit) =>
@@ -1486,7 +1611,8 @@ f_zones(cf, cx, v, fv, aV, swH, swL, bullBOS, bearBOS, bullCHoCH, bearCHoCH, mvS
     // §C3 — `onRcb` / `onQm` are display toggles and used to gate detection: hiding the boxes
     // deleted M39 and M70 outright. They are now only draw flags.
     if bullCHoCH and barstate.isconfirmed
-        llIdx = cx.curLowIdx < cx.majorHighIdx ? cx.curLowIdx : cx.prevLowIdx
+        // S4 — the reclaimed candle is the origin of the CHoCH leg (f_legOrigin), not a pivot guess
+        llIdx = oIdxIn
         off = bar_index - llIdx
         if off >= 1 and off < 490 and llIdx > 0
             legMid = (low[off] + high) * 0.5
@@ -1498,7 +1624,7 @@ f_zones(cf, cx, v, fv, aV, swH, swL, bullBOS, bearBOS, bullCHoCH, bearCHoCH, mvS
         cx.qmBullLL   := cx.curLow
         cx.qmBullAt   := bar_index
     if bearCHoCH and barstate.isconfirmed
-        hhIdx = cx.curHighIdx < cx.majorLowIdx ? cx.curHighIdx : cx.prevHighIdx
+        hhIdx = oIdxIn
         off = bar_index - hhIdx
         if off >= 1 and off < 490 and hhIdx > 0
             legMid = (high[off] + low) * 0.5
@@ -1813,22 +1939,31 @@ f_htf(cf, cx, fv, isNew, o1, h1, l1, c1, o2, h2, l2, c2, ph, pl) =>
             cx.sweepUpAt := cx.hBarCount
         if not na(cx.hCurLow) and not cx.hLoBroken and l1 < cx.hCurLow and c1 >= cx.hCurLow
             cx.sweepDnAt := cx.hBarCount
-        bBOS = not na(cx.hCurHigh) and not cx.hHiBroken and c1 > cx.hCurHigh
-        sBOS = not na(cx.hCurLow)  and not cx.hLoBroken and c1 < cx.hCurLow
-        if sBOS
-            cx.hLoBroken := true
-            if not na(cx.hPrevHigh) and cx.hCurHigh < cx.hPrevHigh
-                cx.hMajorHigh := cx.hCurHigh
-            cx.hTrend := "BEAR"
-        if bBOS
+        // S4 — same rules as the LTF engine: a break only moves the bias when the HTF candle shows
+        // displacement (body ≥ half its range); a counter-bias pivot break is internal; the bias
+        // flips only on a close through the protected swing (last pivot before the breaking leg).
+        dispH = (h1 - l1) > 0 and math.abs(c1 - o1) / (h1 - l1) >= 0.5
+        bBrk = not na(cx.hCurHigh) and not cx.hHiBroken and c1 > cx.hCurHigh
+        sBrk = not na(cx.hCurLow)  and not cx.hLoBroken and c1 < cx.hCurLow
+        if bBrk
             cx.hHiBroken := true
-            if not na(cx.hPrevLow) and cx.hCurLow > cx.hPrevLow
+        if sBrk
+            cx.hLoBroken := true
+        chUpH = cx.hTrend == "BEAR" and not na(cx.hMajorHigh) and c1 > cx.hMajorHigh
+        chDnH = cx.hTrend == "BULL" and not na(cx.hMajorLow)  and c1 < cx.hMajorLow
+        if dispH
+            if chUpH
+                cx.hTrend    := "BULL"
                 cx.hMajorLow := cx.hCurLow
-            cx.hTrend := "BULL"
-        if cx.hTrend == "BEAR" and not na(cx.hMajorHigh) and c1 > cx.hMajorHigh
-            cx.hTrend := "BULL"
-        if cx.hTrend == "BULL" and not na(cx.hMajorLow) and c1 < cx.hMajorLow
-            cx.hTrend := "BEAR"
+            else if chDnH
+                cx.hTrend     := "BEAR"
+                cx.hMajorHigh := cx.hCurHigh
+            else if bBrk and cx.hTrend != "BEAR"
+                cx.hTrend    := "BULL"
+                cx.hMajorLow := cx.hCurLow
+            else if sBrk and cx.hTrend != "BULL"
+                cx.hTrend     := "BEAR"
+                cx.hMajorHigh := cx.hCurHigh
         if not na(ph)
             cx.hPrevHigh := cx.hCurHigh
             cx.hCurHigh  := ph
@@ -1897,7 +2032,9 @@ preLowIdx  = ctx.curLowIdx
 preTrend   = ctx.trend
 cd = f_candle(cfg, atrV, refLo, refHi)
 f_fvg(cfg, ctx, vis, ft, atrV, d_fvg, d_fvgMit)
-st = f_structure(cfg, ctx, swingHi, swingLo, atrV)
+// S4 — displacement gate for structure: the breaking candle itself
+dispOk = i_dispGate == "Off" or (cd.bodyRatio >= i_dispBody and cd.rng >= atrV * i_dispRng)
+st = f_structure(cfg, ctx, sx, swingHi, swingLo, atrV, dispOk, i_pendBars, i_failMax)
 if st.bullSweep
     ctx.sweptHighBar := bar_index
 if st.bearSweep
@@ -1906,22 +2043,16 @@ if st.bearSweep
 // L2 strength — only at BOS (departure) and CHoCH (M30 real/fake)
 var Move mv = Move.new()
 bosEvt = st.bullBOS or st.bearBOS
-if bosEvt and barstate.isconfirmed
-    // S2 — the leg that broke the swing starts at the price extreme printed after that swing
-    // (preHighIdx / preLowIdx = the broken swing as it stood before f_structure shifted it)
-    [lgI, lgP] = f_legOrigin(st.bullBOS, st.bullBOS ? preHighIdx : preLowIdx)
-    ctx.legIdx := lgI
-    ctx.legPx  := lgP
-    mv := f_moveStrength(cfg, ctx, lgI, bar_index, atrV)
+// S4 — weak / internal breaks are still measured (M29 / M51 warnings, break state) but do not move structure
+wkEvt  = st.weakBullBOS or st.weakBearBOS or st.internalBullBOS or st.internalBearBOS
+if (bosEvt or wkEvt) and barstate.isconfirmed
+    // S2 / S4 — ctx.legIdx is the price origin of the breaking leg, written by f_structure
+    mv := f_moveStrength(cfg, ctx, ctx.legIdx, bar_index, atrV)
     ctx.lastDepStrong  := mv.strong
     ctx.lastBOSBar     := bar_index
     ctx.lastBOSAvgBody := mv.avgBody
 if (st.bullCHoCH or st.bearCHoCH) and barstate.isconfirmed
-    // the CHoCH leg starts after the protected swing it broke (majorHigh for a bull CHoCH)
-    [cgI, cgP] = f_legOrigin(st.bullCHoCH, st.bullCHoCH ? ctx.majorHighIdx : ctx.majorLowIdx)
-    ctx.legIdx := cgI
-    ctx.legPx  := cgP
-    mc = f_moveStrength(cfg, ctx, cgI, bar_index, atrV)
+    mc = f_moveStrength(cfg, ctx, ctx.legIdx, bar_index, atrV)
     ctx.chochReal := mc.fvgCount >= 1
 ft.dispBull      := st.bullBOS and mv.strong
 ft.dispBear      := st.bearBOS and mv.strong
@@ -2046,12 +2177,15 @@ ctx.dnR2 := ctx.dnR1
 ctx.dnR1 := cd.dnWickRatio
 
 // breakout state (M01/M02/M03/M05/M14/M15/M22/M24): a level break = BOS or liquidity RUN
-ft.breakUp := st.bullBOS or ft.runUp
-ft.breakDn := st.bearBOS or ft.runDn
+// S4 — the trap / continuation modules key off ANY level break, structural or not
+ft.breakUp := st.bullBOS or st.weakBullBOS or st.internalBullBOS or ft.runUp
+ft.breakDn := st.bearBOS or st.weakBearBOS or st.internalBearBOS or ft.runDn
 if ft.breakUp or ft.breakDn
     ctx.breakDir := ft.breakUp ? 1 : -1
     // a RUN break carries its own level (runPrice); only a sweep carries sweptPrice
-    ctx.breakLvl := ft.breakUp ? (st.bullBOS ? preHigh : nz(ft.runPrice, ft.sweptPrice)) : (st.bearBOS ? preLow : nz(ft.runPrice, ft.sweptPrice))
+    stUp = st.bullBOS or st.weakBullBOS or st.internalBullBOS
+    stDn = st.bearBOS or st.weakBearBOS or st.internalBearBOS
+    ctx.breakLvl := ft.breakUp ? (stUp ? preHigh : nz(ft.runPrice, ft.sweptPrice)) : (stDn ? preLow : nz(ft.runPrice, ft.sweptPrice))
     if na(ctx.breakLvl)
         ctx.breakLvl := ft.breakUp ? preHigh : preLow
     ctx.breakBar := bar_index
@@ -2465,8 +2599,8 @@ s25b = en_M25 and fomo == -1 and bar_index - fomoBar >= 1 and bar_index - fomoBa
 if s25 or s25b
     fomo := 0
 // F — structure hacks
-w29  = en_M29 and st.bullBOS and not mv.strong and cd.largeRange
-w29b = en_M29 and st.bearBOS and not mv.strong and cd.largeRange
+w29  = en_M29 and (st.weakBullBOS or (st.bullBOS and not mv.strong)) and cd.largeRange
+w29b = en_M29 and (st.weakBearBOS or (st.bearBOS and not mv.strong)) and cd.largeRange
 s29  = en_M29 and ctx.lastBOSBar > 0 and bar_index - ctx.lastBOSBar >= 1 and bar_index - ctx.lastBOSBar <= 5 and not ctx.lastDepStrong and ctx.breakDir == 1 and revBear
 s29b = en_M29 and ctx.lastBOSBar > 0 and bar_index - ctx.lastBOSBar >= 1 and bar_index - ctx.lastBOSBar <= 5 and not ctx.lastDepStrong and ctx.breakDir == -1 and revBull
 // G — zone flip
@@ -2636,8 +2770,8 @@ s50b = en_M50 and bearTrend and recentHi and ctx.rangeBrkDir == 1  and (ft.atSup
 // R — golden strategies
 s51  = en_M51 and bullTrend and ctx.lastDepStrong and bar_index - ctx.lastBOSBar <= 40 and zoneOkBull and revBull
 s51b = en_M51 and bearTrend and ctx.lastDepStrong and bar_index - ctx.lastBOSBar <= 40 and zoneOkBear and revBear
-w51  = en_M51 and st.bullBOS and not mv.strong
-w51b = en_M51 and st.bearBOS and not mv.strong
+w51  = en_M51 and (st.weakBullBOS or (st.bullBOS and not mv.strong))
+w51b = en_M51 and (st.weakBearBOS or (st.bearBOS and not mv.strong))
 s52b = en_M52 and armed(-1, ctx.m52Dir, ctx.m52Bar) and reactBear and revBear
 s52  = en_M52 and armed(1, ctx.m52Dir, ctx.m52Bar)  and reactBull and revBull
 s53  = en_M53 and bearTrend and recentHi and ctx.rangeBrkDir == -1 and (ft.sweptLow or (not na(ctx.curLow) and low <= ctx.curLow + atrV * 0.2)) and revBull
@@ -3201,7 +3335,8 @@ xD = Tag.new()
 // below-bar side (bull): signal > CHoCH▲ > BOS▲ > CISD▲ > sweep of low > zone evt > HTF > warn > PB > candle tag
 f_add(xU, 1, d_sig and hasL, sigTxtL, sigTipL, ft.gateUp == 1 ? vis.inv : vis.bull)
 f_add(xU, 2, d_struct and tierKey and st.bullCHoCH and (tierAll or ft.chochReal), chochBase + chochUpX + "▲", chochTip, ft.chochReal ? vis.bull : vis.inv)
-f_add(xU, 3, d_struct and tierKey and st.bullBOS and (ft.dispBull or d_weakBos), (ft.dispBull ? "BOS▲ ·" + str.tostring(mv.fvgCount) + "FVG" : "BOS▲ weak"), ft.dispBull ? "Bullish BOS with displacement (STRONG)" : "Bullish BOS without imbalance — WEAK move, not tradable", ft.dispBull ? vis.bull : vis.inv)
+f_add(xU, 3, d_struct and tierKey and (st.bullBOS or (d_weakBos and st.weakBullBOS)), (ft.dispBull ? "BOS▲ ·" + str.tostring(mv.fvgCount) + "FVG" : st.weakBullBOS ? "BOS▲ weak" : "BOS▲"), ft.dispBull ? "Bullish BOS with displacement (STRONG)" : st.weakBullBOS ? "Bullish break without displacement — pending follow-through, no structure change" : "Bullish BOS (displaced candle, no FVG in the leg)", ft.dispBull ? vis.bull : vis.inv)
+f_add(xU, 3, d_struct and tierAll and st.internalBullBOS, "iBOS▲", "Internal break: a lower high closed through inside a bearish trend — no structure change (S4)", vis.inv)
 f_add(xU, 4, d_struct and (tierAll or (tierKey and cisdHP)) and cisdUpOk, "CISD▲" + (cisdHP ? "★" : ""), "Bullish CISD (close > impulse open) — early reversal", vis.bull)
 f_add(xU, 5, d_liqEvt and tierKey and ft.sweptLow and (d_liqAll or ft.sweptMajor), "SWEEP✕ " + swKUp, "Liquidity sweep of " + ft.sweptKindLo + " — reversal context", vis.bull)
 f_add(xU, 6, ft.evtUp != "" and (d_obDiag or not str.startswith(ft.evtUp, "T")) and (tierAll or str.startswith(ft.evtUp, "BRK")), ft.evtUp, ft.tipUp, str.startswith(ft.evtUp, "BRK") ? vis.brk : str.startswith(ft.evtUp, "T") ? vis.inv : vis.bull)
@@ -3214,7 +3349,8 @@ f_add(xU, 12, d_candle and (cd.pinBull or cd.ifcBull or cd.manipBull or cd.engul
 // above-bar side (bear/neutral)
 f_add(xD, 1, d_sig and hasS, sigTxtS, sigTipS, ft.gateDn == 1 ? vis.inv : vis.bear)
 f_add(xD, 2, d_struct and tierKey and st.bearCHoCH and (tierAll or ft.chochReal), chochBase + chochDnX + "▼", chochTip, ft.chochReal ? vis.bear : vis.inv)
-f_add(xD, 3, d_struct and tierKey and st.bearBOS and (ft.dispBear or d_weakBos), (ft.dispBear ? "BOS▼ ·" + str.tostring(mv.fvgCount) + "FVG" : "BOS▼ weak"), ft.dispBear ? "Bearish BOS with displacement (STRONG)" : "Bearish BOS without imbalance — WEAK move, not tradable", ft.dispBear ? vis.bear : vis.inv)
+f_add(xD, 3, d_struct and tierKey and (st.bearBOS or (d_weakBos and st.weakBearBOS)), (ft.dispBear ? "BOS▼ ·" + str.tostring(mv.fvgCount) + "FVG" : st.weakBearBOS ? "BOS▼ weak" : "BOS▼"), ft.dispBear ? "Bearish BOS with displacement (STRONG)" : st.weakBearBOS ? "Bearish break without displacement — pending follow-through, no structure change" : "Bearish BOS (displaced candle, no FVG in the leg)", ft.dispBear ? vis.bear : vis.inv)
+f_add(xD, 3, d_struct and tierAll and st.internalBearBOS, "iBOS▼", "Internal break: a higher low closed through inside a bullish trend — no structure change (S4)", vis.inv)
 f_add(xD, 4, d_struct and (tierAll or (tierKey and cisdHP)) and cisdDnOk, "CISD▼" + (cisdHP ? "★" : ""), "Bearish CISD (close < impulse open) — early reversal", vis.bear)
 f_add(xD, 5, d_liqEvt and tierKey and ft.sweptHigh and (d_liqAll or ft.sweptMajor), "SWEEP✕ " + swKDn, "Liquidity sweep of " + ft.sweptKindHi + " — reversal context", vis.bear)
 f_add(xD, 6, d_struct and tierAll and (st.bullSweep or st.bearSweep) and not ft.sweptHigh and not ft.sweptLow, "✖SWEEP", "Invalid BOS — wick beyond swing, close back (buyers/sellers weakening)", vis.inv)
@@ -3256,10 +3392,10 @@ f_evLine(arr, xa, y, col, sty, mx) =>
         line.delete(array.shift(arr))
 
 if d_struct and barstate.isconfirmed
-    if st.bullBOS and not na(preHigh)
-        f_evLine(lns, preHighIdx, preHigh, color.new(ft.dispBull ? vis.bull : vis.inv, 20), line.style_solid, cfg.maxLines)
-    if st.bearBOS and not na(preLow)
-        f_evLine(lns, preLowIdx, preLow, color.new(ft.dispBear ? vis.bear : vis.inv, 20), line.style_solid, cfg.maxLines)
+    if (st.bullBOS or st.weakBullBOS or st.internalBullBOS) and not na(preHigh)
+        f_evLine(lns, preHighIdx, preHigh, color.new(st.bullBOS ? vis.bull : vis.inv, 20), st.bullBOS ? line.style_solid : line.style_dotted, cfg.maxLines)
+    if (st.bearBOS or st.weakBearBOS or st.internalBearBOS) and not na(preLow)
+        f_evLine(lns, preLowIdx, preLow, color.new(st.bearBOS ? vis.bear : vis.inv, 20), st.bearBOS ? line.style_solid : line.style_dotted, cfg.maxLines)
     if st.bullSweep and not na(preHigh)
         f_evLine(lns, preHighIdx, preHigh, color.new(vis.inv, 30), line.style_dashed, cfg.maxLines)
     if st.bearSweep and not na(preLow)
@@ -3423,3 +3559,6 @@ plot(ft.zDepStrong ? 1 : 0, "zone departure STRONG (M04/M21/M33/M42 gate)", disp
 plot(ft.pdPct,      "PD array 0=low of range · 1=high",      display = display.data_window)
 plot(ft.dispScore,  "displacement quality 0-3",              display = display.data_window)
 plot(ctx.legIdx,    "S2 · leg origin bar_index",             display = display.data_window)
+plot(sx.stFail,     "S4 · failed follow-throughs",           display = display.data_window)
+plot(st.internalBullBOS ? 1 : st.internalBearBOS ? -1 : 0, "S4 · internal break", display = display.data_window)
+plot(st.weakBullBOS ? 1 : st.weakBearBOS ? -1 : 0,         "S4 · weak break",     display = display.data_window)
