@@ -1,6 +1,10 @@
 //@version=6
 // =============================================================================
-//  SMC / ICT / CRT SUITE  —  v8.2.1  (single-file build)
+//  SMC / ICT SUITE  —  v8.3.0  (single-file build)
+//
+//  ── v8.3.0 CHANGELOG (FORENSIC_AUDIT_SMC_v8.2.1.md → IMPROVEMENT_PLAN_v8.3.md) ───────────────
+//  S0  token headroom: removed M43, M38-P4, the hidden-liquidity engine and the Wyckoff label
+//      (all default-OFF or cosmetic); "CRT" dropped from the title — nothing CRT-related exists.
 //  spec : INDICATOR_DEV_SPEC_BN.md   rules : BUILD_PROTOCOL_BN.md (R1 call-once, R2 one Cfg, R3 state in Ctx)
 //  audit: FORENSIC_AUDIT_BN.md — this build implements stages 1, 2 and the cheap part of 3.
 //  layers: L0 candle · L1 structure · L2 FVG/strength · L3 liquidity · L4 zones · L5 HTF · L6 setups · L7 trade
@@ -70,7 +74,7 @@
 //      two scoring systems (base score picks the candidate, f_conf scores it) · cache the TP scans
 //      · SMC_Suite_v8.2.1_strategy.pine is the companion port for real win-rate statistics.
 // =============================================================================
-indicator("SMC / ICT / CRT Suite v8.2.1", "SMC Suite", overlay = true, max_bars_back = 500,
+indicator("SMC / ICT Suite v8.3.0", "SMC Suite", overlay = true, max_bars_back = 500,
      max_labels_count = 500, max_lines_count = 500, max_boxes_count = 500)
 
 // ── TYPES  (Cut-1 → lib/SMC_Types.pine) ──────────────────────────────────────
@@ -87,7 +91,6 @@ type Cfg
     float  manipWickRatio  = 0.30
     int    swingLen        = 5
     int    rangeBarsThresh = 20
-    float  wyckoffRangeMult = 1.5
     float  fvgMinATR       = 0.10
     string fvgMitMode      = "TOUCH"
     int    maxFvg          = 40
@@ -106,8 +109,6 @@ type Cfg
     float  runCloseMinATR  = 0.25
     float  sweepWickMin    = 0.40
     int    failedCloseBars = 2
-    int    hiddenN         = 3
-    float  hiddenWickMin   = 0.35
     int    extLookback     = 50
     int    maxLevels       = 30
     int    klLookLeft      = 50
@@ -205,7 +206,6 @@ type Struct
     bool   cisdBear  = false
     string trend     = "RANGE"
     string movePhase = "IMPULSIVE"
-    string wyckoff   = "ACCUMULATION"
 
 // L2
 type Fvg
@@ -303,8 +303,6 @@ type Ctx
     bool  cisdDnSet = false
     float cisdDnOpen = na
     int   cisdDnBar = 0
-    bool  hidSSLprev = false
-    bool  hidBSLprev = false
     int   sweptHighBar = -999
     int   sweptLowBar = -999
     bool  qmBullPend = false
@@ -371,8 +369,6 @@ type Ctx
     int   m54Bar = -999
     int   m54StageB = 0
     int   m54BarB = -999
-    int   hidSSLBar = -999
-    int   hidBSLBar = -999
     int   demandTouchBar = -999
     int   supplyTouchBar = -999
     int   bullFvgBar = -999
@@ -447,8 +443,6 @@ type Feat
     float  sweptPriceHi = na
     float  sweptPriceLo = na
     float  runPrice = na
-    bool   hiddenSSL = false
-    bool   hiddenBSL = false
     int    bslAbove = 0
     int    sslBelow = 0
     bool   atDemand = false
@@ -587,7 +581,7 @@ i_maxLabels = input.int(200, "Max labels", minval = 10, maxval = 500, group = gA
 i_maxLines  = input.int(100, "Max lines",  minval = 10, maxval = 500, group = gA)
 i_minGap    = input.int(6,   "Min bars between labels (same side)", minval = 0, maxval = 20, group = gA)
 i_lblMode   = input.string("Signals only", "Label density", options = ["Signals only", "Key events", "All events"], group = gA,
-     tooltip = "Signals only = setup signals + zone boxes/lines (default — on a low timeframe anything more overlaps) · Key events = + real CHoCH, strong BOS, major sweeps, breakers, HTF · All events = every marker (CISD, FLIP, SWEEP REQ, warnings, hidden liquidity)")
+     tooltip = "Signals only = setup signals + zone boxes/lines (default — on a low timeframe anything more overlaps) · Key events = + real CHoCH, strong BOS, major sweeps, breakers, HTF · All events = every marker (CISD, FLIP, SWEEP REQ, warnings)")
 tierAll = i_lblMode == "All events"
 tierKey = i_lblMode != "Signals only"
 i_setMode   = input.string("Custom (toggles)", "Setup master mode", options = ["Custom (toggles)", "Core only", "All on", "All off"], group = gA,
@@ -608,8 +602,6 @@ i_ifcAnyCol = input.bool(false, "IFC allow any colour", group = gC)
 i_manipWick = input.float(0.30, "Manipulative min wick/range", minval = 0.05, maxval = 0.9, step = 0.05, group = gC)
 
 i_rangeBars = input.int(20,  "Bars without BOS/CHoCH → RANGE", minval = 5, group = gS)
-i_wyckLB    = input.int(30,  "Wyckoff range lookback", minval = 10, group = gS)
-i_wyckMult  = input.float(1.5, "Wyckoff range width × ATR", minval = 0.3, step = 0.1, group = gS)
 
 i_fvgMin    = input.float(0.10, "Min FVG height × ATR", minval = 0.0, step = 0.05, group = gF)
 i_fvgMode   = input.string("TOUCH", "FVG mitigation mode", options = ["TOUCH", "50%", "FULL"], group = gF)
@@ -631,8 +623,6 @@ i_runBody   = input.float(0.60, "RUN min body ratio", minval = 0.1, maxval = 1.0
 i_runClose  = input.float(0.25, "RUN min close beyond × ATR", minval = 0.0, step = 0.05, group = gL)
 i_sweepWick = input.float(0.40, "SWEEP min wick ratio", minval = 0.0, maxval = 1.0, step = 0.05, group = gL)
 i_failBars  = input.int(2,   "Failed-close window (bars)", minval = 1, maxval = 5, group = gL)
-i_hidN      = input.int(3,   "Hidden liquidity: consecutive candles", minval = 2, maxval = 10, group = gL)
-i_hidWick   = input.float(0.35, "Hidden liquidity: min wick ratio", minval = 0.1, maxval = 0.9, step = 0.05, group = gL)
 i_maxLevels = input.int(30,  "Max liquidity levels", minval = 5, maxval = 150, group = gL)
 
 i_maxZones  = input.int(30,  "Max zones tracked", minval = 5, maxval = 120, group = gZ)
@@ -693,7 +683,7 @@ i_m53Alt    = input.bool(false, "M53 alternative entry: buy the range break-UP (
 // ── NEW · Premium / Discount array (ICT) ─────────────────────────────────────
 gPD = "9a · Premium / Discount + Sessions"
 i_pdOn   = input.bool(true,  "Score premium/discount position", group = gPD, inline = "pd1",
-     tooltip = "Dealing range = majorLow..majorHigh. A long in discount (lower half) and a short in premium (upper half) each earn a confluence point; buying the top quarter or selling the bottom quarter costs one.")
+     tooltip = "Dealing range = the current leg (see the PD array panel row). A long in discount (lower half) and a short in premium (upper half) each earn a confluence point; buying the top quarter or selling the bottom quarter costs one.")
 i_pdGate = input.bool(false, "Block longs in premium / shorts in discount", group = gPD, inline = "pd1",
      tooltip = "Hard filter. Off by default — turn it on only after checking on your symbol that the range definition (major HL/LH) suits it.")
 i_pdDeep = input.float(0.75, "Deep-premium / deep-discount threshold", minval = 0.55, maxval = 0.95, step = 0.05, group = gPD)
@@ -735,7 +725,7 @@ d_cisdAll = input.bool(false, "Label every CISD (off = counter-trend only)", gro
 d_fvg    = input.bool(true,  "FVG boxes", group = gD, inline = "s2")
 d_fvgMit = input.bool(false, "Keep mitigated FVG (faded)", group = gD, inline = "s2")
 d_liq    = input.bool(true,  "Liquidity lines", group = gD, inline = "s3")
-d_liqEvt = input.bool(true,  "Sweep / run / hidden events", group = gD, inline = "s3")
+d_liqEvt = input.bool(true,  "Sweep / run events", group = gD, inline = "s3")
 d_liqAll = input.bool(false, "Label every BSL/SSL sweep/run (off = POOL / ext / PD / PW only)", group = gD, inline = "s3b")
 d_obDiag = input.bool(false, "OB diagnostics labels (T5 no-FVG / T3 invalid)", group = gD, inline = "s4b")
 d_ob     = input.bool(true,  "OB / S&D", group = gD, inline = "s4")
@@ -758,13 +748,13 @@ d_sig    = input.bool(true,  "Setup signals (L6)", group = gD)
 var Cfg cfg = Cfg.new(pinWickMult = i_pinMult, pinWickRatioMin = i_pinRatio, dojiBodyMax = i_dojiMax,
      largeRangeMult = i_largeMult, longWickRatio = i_longWick, haramiBodyMax = i_haramiMax, starProxATR = i_starProx,
      ifcWickMult = i_ifcMult, ifcAnyColor = i_ifcAnyCol, manipWickRatio = i_manipWick, swingLen = i_swingLen,
-     rangeBarsThresh = i_rangeBars, wyckoffRangeMult = i_wyckMult, fvgMinATR = i_fvgMin,
+     rangeBarsThresh = i_rangeBars, fvgMinATR = i_fvgMin,
      fvgMitMode = i_fvgMode, maxFvg = i_maxFvg, fvgMaxAge = i_fvgAge, minFVGForStrong = i_minFvgStr,
      strongBodyEff = i_bodyEff, strongMixMax = i_mixMax, strongSpeedMin = i_speedMin, maxMoveBars = i_maxMove,
      eqTolATR = i_eqTol, touchTolATR = i_touchTol, touchCooldown = i_touchCd, runBodyMin = i_runBody,
      propWindow = i_propWin, propImpATR = i_propImp,
-     runCloseMinATR = i_runClose, sweepWickMin = i_sweepWick, failedCloseBars = i_failBars, hiddenN = i_hidN,
-     hiddenWickMin = i_hidWick, extLookback = i_extLB, maxLevels = i_maxLevels, klLookLeft = i_klLeft,
+     runCloseMinATR = i_runClose, sweepWickMin = i_sweepWick, failedCloseBars = i_failBars,
+     extLookback = i_extLB, maxLevels = i_maxLevels, klLookLeft = i_klLeft,
      klUseVol = i_klVol, sweepWindow = i_sweepWin, rjbWickMin = i_rjbWick,
      rjbConfirmBars = i_rjbBars, qmMaxBars = i_qmBars, maxZones = i_maxZones, zoneMaxAge = i_zoneAge, zoneMaxATR = i_zoneMaxH,
      gateMode = i_gate, sweepValidHTF = i_sweepVal, candleLookback = i_cLook,
@@ -816,7 +806,7 @@ f_candle(cf, aV, rLo, rHi) =>
     k
 
 // ── L1 STRUCTURE ENGINE — once per bar (R1) ──────────────────────────────────
-f_structure(cf, cx, swH, swL, rW, aN) =>
+f_structure(cf, cx, swH, swL, aN) =>
     s = Struct.new()
     pIdx = bar_index - cf.swingLen
     if not na(swH)
@@ -953,11 +943,6 @@ f_structure(cf, cx, swH, swL, rW, aN) =>
     // §C1 · §3.8 — measured against the CURRENT leg, not the all-time extreme: price pushing
     // past the live swing that defines the leg is impulse, anything inside it is retracement.
     s.movePhase := (not na(cx.curHigh) and close >= cx.curHigh) or (not na(cx.curLow) and close <= cx.curLow) ? "IMPULSIVE" : "RETRACEMENT"
-    isRangeNow  = rW < aN * cf.wyckoffRangeMult
-    s.wyckoff   := cx.trend == "BULLISH" and not isRangeNow ? "MARKUP" :
-                   cx.trend == "BEARISH" and not isRangeNow ? "MARKDOWN" :
-                   isRangeNow and cx.trend == "BEARISH" ? "ACCUMULATION" :
-                   isRangeNow and cx.trend == "BULLISH" ? "DISTRIBUTION" : "MANIPULATION"
     s
 
 // ── drawing x-coordinate clamp ──────────────────────────────────────
@@ -1255,24 +1240,6 @@ f_liq(cf, cx, v, fv, aV, swH, swL, eHi, eLo, pdh, pdl, pwh, pwl, nDay, nWeek, dr
         if not na(old.lb)
             label.delete(old.lb)
         array.remove(cx.lv, wIdx)
-    // §5.4 hidden liquidity (edge-triggered)
-    // §M5 — hidS/hidB started at `true` and the guards below compare against `low[k+1]`, which is
-    // `na` on the first bars; an na comparison is false, so the flags survived and both hidden-
-    // liquidity alerts fired at the very start of every chart.
-    hidS = bar_index >= cf.hiddenN + 1
-    hidB = hidS
-    for k = 0 to cf.hiddenN - 1
-        r  = high[k] - low[k]
-        dw = r > 0 ? (math.min(close[k], open[k]) - low[k]) / r : 0.0
-        uw = r > 0 ? (high[k] - math.max(close[k], open[k])) / r : 0.0
-        if dw < cf.hiddenWickMin or low[k] < low[k + 1]
-            hidS := false
-        if uw < cf.hiddenWickMin or high[k] > high[k + 1]
-            hidB := false
-    fv.hiddenSSL  := hidS and not cx.hidSSLprev
-    fv.hiddenBSL  := hidB and not cx.hidBSLprev
-    cx.hidSSLprev := hidS
-    cx.hidBSLprev := hidB
 
 // ── L4 ZONE — helpers ────────────────────────────────────────────────────────
 f_zColor(v, z) =>
@@ -1851,7 +1818,6 @@ swingHi = ta.pivothigh(high, i_swingLen, i_swingLen)
 swingLo = ta.pivotlow(low,  i_swingLen, i_swingLen)
 extHi   = ta.highest(high, i_extLB)
 extLo   = ta.lowest(low,  i_extLB)
-rangeW  = ta.highest(high, i_wyckLB) - ta.lowest(low, i_wyckLB)
 volSma  = ta.sma(volume, i_volLen)
 volLr   = ta.linreg(volume, 10, 0)
 volSlopeNeg = volLr < volLr[1]
@@ -1884,7 +1850,7 @@ preLowIdx  = ctx.curLowIdx
 preTrend   = ctx.trend
 cd = f_candle(cfg, atrV, refLo, refHi)
 f_fvg(cfg, ctx, vis, ft, atrV, d_fvg, d_fvgMit)
-st = f_structure(cfg, ctx, swingHi, swingLo, rangeW, atrV)
+st = f_structure(cfg, ctx, swingHi, swingLo, atrV)
 if st.bullSweep
     ctx.sweptHighBar := bar_index
 if st.bearSweep
@@ -2114,10 +2080,6 @@ if ft.newBullFvg
     ctx.bullFvgBar := bar_index
 if ft.newBearFvg
     ctx.bearFvgBar := bar_index
-if ft.hiddenSSL
-    ctx.hidSSLBar := bar_index
-if ft.hiddenBSL
-    ctx.hidBSLBar := bar_index
 if ft.atDemand
     ctx.demandTouchBar := bar_index
 if ft.atSupply
@@ -2467,13 +2429,11 @@ s37b = en_M37 and obBear and ft.zIdm and revBear
 p1   = en_M38 and ft.breakUp and mv.strong and not ctx.arrivalStrong                       // real: weak approach → strong breakout
 p2   = en_M38 and ft.breakUp and not mv.strong and ctx.arrivalStrong                       // fake: strong expansion → weak breakout
 p3   = en_M38 and ctx.breakDir == 1 and brkWin and ft.wickLowerDom and revBear              // lower-wick trap
-p4   = en_M38 and ctx.breakDir == 1 and brkWin and ft.hiddenBSL and zoneOkBull and revBull  // shadow-high liquidity
 p5   = en_M38 and ctx.breakDir == 1 and brkWin and ft.wickUpperDom and revBear              // weak breakout trap
 p7   = en_M38 and ctx.breakDir == 1 and brkWin and ft.atSupply and not ctx.lastDepStrong and revBear
 p1b  = en_M38 and ft.breakDn and mv.strong and not ctx.arrivalStrong
 p2b  = en_M38 and ft.breakDn and not mv.strong and ctx.arrivalStrong
 p3b  = en_M38 and ctx.breakDir == -1 and brkWin and ft.wickUpperDom and revBull
-p4b  = en_M38 and ctx.breakDir == -1 and brkWin and ft.hiddenSSL and zoneOkBear and revBear
 p5b  = en_M38 and ctx.breakDir == -1 and brkWin and ft.wickLowerDom and revBull
 p7b  = en_M38 and ctx.breakDir == -1 and brkWin and ft.atDemand and not ctx.lastDepStrong and revBull
 // P6 — structural trap: the leg stepped into the level through several swings, so liquidity is stacked behind it
@@ -2522,7 +2482,6 @@ f_bid(bL, s33 and rtOk, "M33", 6 + liqBonusL, "Zone flip model: strong breakout 
 f_bid(bL, s36 and pbOk, "M36", 5 + hpB + liqBonusL, "Weak retracement into valid OB + bullish reversal")
 f_bid(bL, s37, "M37", 7 + hpB + liqBonusL, "Inducement block: EQL swept before the OB tap + reversal (highest quality)")
 f_bid(bL, p1, "M38-P1", 4, "Compression→expansion: real breakout with imbalance — buy the retest")
-f_bid(bL, p4 and arrOkBull, "M38-P4", 4, "Shadow-high liquidity above (long upper wicks, no break) + support retest")
 f_bid(bL, p3b or p5b, "M38-P3/5", 3, "Wick-bias trap during breakdown → reversal LONG")
 f_bid(bL, p2b or p7b, "M38-P2/7", 4, "Fake breakdown (weak move / demand right below) → LONG")
 f_bid(bL, p6b, "M38-P6", 4, "Structural breakout trap (mirror): several swing highs stepped into the level → liquidity above → LONG on the close through")
@@ -2552,7 +2511,6 @@ f_bid(bS, s33b and rtOk, "M33", 6 + liqBonusS, "Zone flip model (bearish)")
 f_bid(bS, s36b and pbOk, "M36", 5 + hpB + liqBonusS, "Weak retracement into valid bearish OB + reversal")
 f_bid(bS, s37b, "M37", 7 + hpB + liqBonusS, "Inducement block (bearish): EQH swept before OB tap")
 f_bid(bS, p1b, "M38-P1", 4, "Compression→expansion breakdown with imbalance — sell the retest")
-f_bid(bS, p4b and arrOkBear, "M38-P4", 4, "Shadow-low liquidity below + resistance retest")
 f_bid(bS, p3 or p5, "M38-P3/5", 3, "Wick-bias trap during breakout → reversal SHORT")
 f_bid(bS, p2 or p7, "M38-P2/7", 4, "Fake breakout (weak move / supply right above) → SHORT")
 f_bid(bS, p6, "M38-P6", 4, "Structural breakout trap: several swing lows stepped into the level → liquidity below → SHORT on the close through")
@@ -2567,7 +2525,6 @@ en_M39 = f_en(input.bool(true,  "M39 Reclaimed block retest", group = gM2, inlin
 en_M40 = f_en(input.bool(true,  "M40 Rejection block retest", group = gM2, inline = "a"), true)
 en_M41 = f_en(input.bool(true,  "M41 Sweep + FVG confluence", group = gM2, inline = "b"), true)
 en_M42 = f_en(input.bool(true,  "M42 High-probability S&D", group = gM2, inline = "b"), true)
-en_M43 = f_en(input.bool(false, "M43 Hidden liquidity reversal", group = gM2, inline = "c"), false)
 en_M44 = f_en(input.bool(false, "M44 Key level approach (C1/C2/C3)", group = gM2, inline = "c"), false)
 en_M45 = f_en(input.bool(true,  "M45 Sweep-based CHoCH retest", group = gM2, inline = "d"), true)
 en_M46 = f_en(input.bool(true,  "M46 CISD setup", group = gM2, inline = "d"), true)
@@ -2598,9 +2555,6 @@ w41  = en_M41 and (ctx.m41Dir == 9 or ctx.m41Dir == -9) and bar_index == ctx.m41
 // L — high-probability S&D (5 criteria live in the zone: OB with depStrong, 50% rule, unmitigated) + strongest variant ★★
 s42  = en_M42 and zoneOkBull and ft.zKind == "OB" and ft.zDepStrong and ft.zFifty and ft.arrivalWeak and revBull
 s42b = en_M42 and zoneOkBear and ft.zKind == "OB" and ft.zDepStrong and ft.zFifty and ft.arrivalWeak and revBear
-// M — hidden liquidity: liquidity building below → at a level expect DOWN move, fade the breakout
-s43b = en_M43 and bar_index - ctx.hidSSLBar <= cfg.armBars and ctx.hidSSLBar >= 0 and atBearZone and revBear
-s43  = en_M43 and bar_index - ctx.hidBSLBar <= cfg.armBars and ctx.hidBSLBar >= 0 and atBullZone and revBull
 // N — key level approach (KL ≥ 3): C1 choppy arrival · C2 liquidity build-up (trend into the level) · C3 depletion
 klBear = zoneOkBear and ft.zKl >= 3
 klBull = zoneOkBull and ft.zKl >= 3
@@ -2649,7 +2603,6 @@ f_bid(bL, s39 and arrOkBull, "M39", 5 + liqBonusL, "Reclaimed block retest + bul
 f_bid(bL, s40, "M40", 4 + liqBonusL, "Rejection block (wick zone) retest + reversal")
 f_bid(bL, s41, "M41", 6 + liqBonusL, "Sweep + FVG confluence: low swept, STRONG move left FVG, retrace reversal")
 f_bid(bL, s42, "M42", 6 + (ft.zNearSwept ? 2 : 0) + hpB, "High-probability demand: strong departure · 50% tapped · weak arrival" + (ft.zNearSwept ? " · ★★ near-miss then sweep (strongest)" : ""))
-f_bid(bL, s43, "M43", 4, "Hidden BUY-side liquidity above → fade the breakdown at a level")
 f_bid(bL, s44 and arrOkBull, "M44", 5 + m20L, "Key level approach: choppy / build-up / depletion → reversal")
 f_bid(bL, s45, "M45", 6 + liqBonusL + (m45Strong ? 1 : 0), "Sweep → BOS/CHoCH → breaker/OB retest (★ = the CHoCH form, +1)")
 f_bid(bL, s46, "M46", 5 + liqBonusL + (ft.cisdRel >= 2 ? 1 : 0), "CISD (early reversal) with reliability → zone reaction. SL beyond zone")
@@ -2667,7 +2620,6 @@ f_bid(bS, s39b and arrOkBear, "M39", 5 + liqBonusS, "Reclaimed block retest + be
 f_bid(bS, s40b, "M40", 4 + liqBonusS, "Rejection block (wick zone) retest + reversal")
 f_bid(bS, s41b, "M41", 6 + liqBonusS, "Sweep + FVG confluence: high swept, STRONG move left FVG, retrace reversal")
 f_bid(bS, s42b, "M42", 6 + (ft.zNearSwept ? 2 : 0) + hpB, "High-probability supply: strong departure · 50% tapped · weak arrival" + (ft.zNearSwept ? " · ★★ near-miss then sweep (strongest)" : ""))
-f_bid(bS, s43b, "M43", 4, "Hidden SELL-side liquidity below → fade the breakout at a level, TP = those lows")
 f_bid(bS, s44b and arrOkBear, "M44", 5 + m20S, "Key level approach: choppy / build-up / depletion → reversal")
 f_bid(bS, s45b, "M45", 6 + liqBonusS + (m45Strong ? 1 : 0), "Sweep → BOS/CHoCH → breaker/OB retest (★ = the CHoCH form, +1)")
 f_bid(bS, s46b, "M46", 5 + liqBonusS + (ft.cisdRel >= 2 ? 1 : 0), "CISD (early reversal) with reliability → zone reaction. SL beyond zone")
@@ -3202,7 +3154,6 @@ f_add(xU, 6, ft.evtUp != "" and (d_obDiag or not str.startswith(ft.evtUp, "T")) 
 f_add(xU, 7, d_htfEvt and tierKey and newHtf and ft.htfSweepDn and ctx.hBarCount == ctx.sweepDnAt, "HTF SWEEP↓", "HTF candle swept below the last HTF swing low and closed back", vis.bull)
 f_add(xU, 8, d_htfEvt and tierKey and newHtf and ft.htfManipBull, "HTF MANIP▲", "HTF manipulative candle — trade its O/H/L/C levels", vis.bull)
 f_add(xU, 9, tierAll and warnUp != "", warnUp, "Warning marker — not a trade", vis.inv)
-f_add(xU, 10, d_liqEvt and tierAll and ft.hiddenSSL, "hSSL", "Hidden sell-side liquidity building below", vis.inv)
 f_add(xU, 11, d_pb and st.pbValidUp, "PB✓", "Valid bullish pullback confirmed (§3.5)", vis.bull)
 f_add(xU, 12, d_candle and (cd.pinBull or cd.ifcBull or cd.manipBull or cd.engulfBull), cd.ifcBull ? "IFC▲" : cd.manipBull ? "MAN▲" : cd.pinBull ? "PIN▲" : "ENG▲", "Candle pattern (L0)", vis.bull)
 
@@ -3217,7 +3168,6 @@ f_add(xD, 7, ft.evtDn != "" and (d_obDiag or not str.startswith(ft.evtDn, "T")) 
 f_add(xD, 8, d_htfEvt and tierKey and newHtf and ft.htfSweepUp and ctx.hBarCount == ctx.sweepUpAt, "HTF SWEEP↑", "HTF candle swept above the last HTF swing high and closed back", vis.bear)
 f_add(xD, 9, d_htfEvt and tierKey and newHtf and ft.htfManipBear, "HTF MANIP▼", "HTF manipulative candle — trade its O/H/L/C levels", vis.bear)
 f_add(xD, 10, tierAll and warnDn != "", warnDn, "Warning marker — not a trade", vis.inv)
-f_add(xD, 11, d_liqEvt and tierAll and ft.hiddenBSL, "hBSL", "Hidden buy-side liquidity building above", vis.inv)
 f_add(xD, 12, d_pb and st.pbValidDn, "PB✓", "Valid bearish pullback confirmed (§3.5)", vis.bear)
 f_add(xD, 13, d_candle and (cd.pinBear or cd.ifcBear or cd.manipBear or cd.engulfBear or cd.starBear), cd.ifcBear ? "IFC▼" : cd.manipBear ? "MAN▼" : cd.starBear ? "SS" : cd.pinBear ? "PIN▼" : "ENG▼", "Candle pattern (L0)", vis.bear)
 
@@ -3314,8 +3264,8 @@ f_panel(tb, cx, fv, stc, v, sgl, sgs, hL, hS, tfHtf) =>
     table.cell(tb, 1, 1,  stc.trend, text_color = v.txt, bgcolor = color.new(tcol, 40))
     table.cell(tb, 0, 2,  "HTF bias",      text_color = v.txt, bgcolor = lab)
     table.cell(tb, 1, 2,  fv.htfBias + (mism ? " ⚠" : ""), text_color = v.txt, bgcolor = color.new(hcol, 40))
-    table.cell(tb, 0, 3,  "Wyckoff",       text_color = v.txt, bgcolor = lab)
-    table.cell(tb, 1, 3,  stc.wyckoff, text_color = chart.fg_color)
+    table.cell(tb, 0, 3,  "Regime",        text_color = v.txt, bgcolor = lab)
+    table.cell(tb, 1, 3,  stc.trend + (fv.inRange ? " · range" : ""), text_color = chart.fg_color)
     table.cell(tb, 0, 4,  "Last event",    text_color = v.txt, bgcolor = lab)
     table.cell(tb, 1, 4,  cx.lastEvt + (cx.lastEvtBar >= 0 ? " · " + str.tostring(bar_index - cx.lastEvtBar) + "b ago" : ""), text_color = chart.fg_color)
     table.cell(tb, 0, 5,  "Move phase",    text_color = v.txt, bgcolor = lab)
@@ -3391,7 +3341,6 @@ alertcondition(st.bullBOS or st.bearBOS, "Structure: BOS", "SMC Suite: Break of 
 alertcondition((st.bullCHoCH or st.bearCHoCH) and ft.chochReal, "Structure: CHoCH (Real)", "SMC Suite: real CHoCH")
 alertcondition(st.cisdBull or st.cisdBear, "Structure: CISD", "SMC Suite: CISD")
 alertcondition(ft.sweptHigh or ft.sweptLow, "Liquidity: Sweep detected", "SMC Suite: liquidity sweep")
-alertcondition(ft.hiddenSSL or ft.hiddenBSL, "Liquidity: Hidden liquidity building", "SMC Suite: hidden liquidity")
 alertcondition(ft.newObHp, "Zone: New high-probability OB", "SMC Suite: new HP order block")
 alertcondition(ft.newProp, "Zone: Propulsion Block formed", "SMC Suite: propulsion block")
 alertcondition(ft.enteredOb50, "Zone: Price entered OB / S&D (50% tapped)", "SMC Suite: OB 50% tapped")
