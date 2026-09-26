@@ -31,6 +31,11 @@
 //  S11 "Zone entry trigger" = IMMEDIATE (v8.2) or CONFIRMED: reversal candle at the POI, then a close
 //      through its extreme or a displacement FVG away from it within N bars; the tapped zone stays
 //      in the slot for the SL / score. Applies to the zone / FVG modules only; trap modules unchanged.
+//  S12 names: M02 "pin-bar continuation", M45 note says which form fired; legend updated; event
+//      lines whose anchor is older than the drawing buffer are drawn dotted.
+//  Removed inputs: Wyckoff lookback / width, hidden-liquidity candles / wick. New inputs: structure
+//      displacement gate, follow-through window, failed-follow-throughs, CISD sweep gate, session
+//      timezone, sweep qualification, grade thresholds, zone entry trigger + window.
 //  spec : INDICATOR_DEV_SPEC_BN.md   rules : BUILD_PROTOCOL_BN.md (R1 call-once, R2 one Cfg, R3 state in Ctx)
 //  audit: FORENSIC_AUDIT_BN.md — this build implements stages 1, 2 and the cheap part of 3.
 //  layers: L0 candle · L1 structure · L2 FVG/strength · L3 liquidity · L4 zones · L5 HTF · L6 setups · L7 trade
@@ -2779,7 +2784,7 @@ bL = Best.new()
 bS = Best.new()
 
 // LONG candidates
-f_bid(bL, s02 and arrOkBull, "M02", 2, "Pin-bar liquidity trap: shrinking upper wicks after breakout → LONG, TP = jammed liquidity above")
+f_bid(bL, s02 and arrOkBull, "M02", 2, "Pin-bar continuation: shrinking upper wicks after breakout + bullish pin → LONG, TP = liquidity above")
 f_bid(bL, s01b and arrOkBull, "M01", 2, "Breakout rejection trap (mirror): growing lower wicks then strong close back above")
 f_bid(bL, s03, "M03", 1, "Inside-bar breakout: close above the inside bar (IB held above 50% of breakout candle)")
 f_bid(bL, s04b and arrOkBull and pbOk, "M04", 1, "Doji move reversal at strong level: weak arrival (dojis) + reversal candle")
@@ -2809,7 +2814,7 @@ f_bid(bL, p6b, "M38-P6", 1, "Structural breakout trap (mirror): several swing hi
 
 // SHORT candidates
 f_bid(bS, s01 and arrOkBear, "M01", 2, "Breakout rejection trap: growing upper wicks after breakout, strong close back below → SHORT")
-f_bid(bS, s02b and arrOkBear, "M02", 2, "Pin-bar liquidity trap (mirror): shrinking lower wicks → SHORT")
+f_bid(bS, s02b and arrOkBear, "M02", 2, "Pin-bar continuation (mirror): shrinking lower wicks after breakdown → SHORT")
 f_bid(bS, s03b, "M03", 1, "Inside-bar breakdown: close below the inside bar")
 f_bid(bS, s04 and arrOkBear and pbOk, "M04", 1, "Doji move reversal at strong resistance")
 f_bid(bS, s05b, "M05", 2, "Pin bar right after breakdown")
@@ -2925,7 +2930,7 @@ f_bid(bL, s40, "M40", 2, "Rejection block (wick zone) retest + reversal")
 f_bid(bL, s41, "M41", 4, "Sweep + FVG confluence: low swept, STRONG move left FVG, retrace reversal")
 f_bid(bL, s42, "M42", 4, "High-probability demand: strong departure · 50% tapped · weak arrival" + (ft.zb.nearSwept ? " · ★★ near-miss then sweep (strongest)" : ""))
 f_bid(bL, s44 and arrOkBull, "M44", 1, "Key level approach: choppy / build-up / depletion → reversal")
-f_bid(bL, s45, "M45", m45Strong ? 4 : 3, "Sweep → BOS/CHoCH → breaker/OB retest (★ = the CHoCH form, +1)")
+f_bid(bL, s45, "M45", m45Strong ? 4 : 3, "Qualified sweep → " + (m45Strong ? "CHoCH (reversal, tier 4)" : "BOS (continuation, tier 3)") + " → breaker/OB retest")
 f_bid(bL, s46, "M46", 3, "CISD (early reversal) with reliability → zone reaction. SL beyond zone")
 f_bid(bL, s47, "M47", 1, "Manipulated breakdown: sweep candle below LL in bearish trend → LONG, TP nearest reaction zone (trail after TP1)")
 f_bid(bL, s48, "M48", 1, "Fake CHoCH: LTF broke major low but HTF still BULL (inducement) → OB rejection LONG")
@@ -2942,7 +2947,7 @@ f_bid(bS, s40b, "M40", 2, "Rejection block (wick zone) retest + reversal")
 f_bid(bS, s41b, "M41", 4, "Sweep + FVG confluence: high swept, STRONG move left FVG, retrace reversal")
 f_bid(bS, s42b, "M42", 4, "High-probability supply: strong departure · 50% tapped · weak arrival" + (ft.zs.nearSwept ? " · ★★ near-miss then sweep (strongest)" : ""))
 f_bid(bS, s44b and arrOkBear, "M44", 1, "Key level approach: choppy / build-up / depletion → reversal")
-f_bid(bS, s45b, "M45", m45Strong ? 4 : 3, "Sweep → BOS/CHoCH → breaker/OB retest (★ = the CHoCH form, +1)")
+f_bid(bS, s45b, "M45", m45Strong ? 4 : 3, "Qualified sweep → " + (m45Strong ? "CHoCH (reversal, tier 4)" : "BOS (continuation, tier 3)") + " → breaker/OB retest")
 f_bid(bS, s46b, "M46", 3, "CISD (early reversal) with reliability → zone reaction. SL beyond zone")
 f_bid(bS, s47b, "M47", 1, "Manipulated breakout: sweep candle above HH in bullish trend → SHORT, TP nearest reaction zone (trail after TP1)")
 f_bid(bS, s48b, "M48", 1, "Fake CHoCH (mirror): LTF broke major high but HTF still BEAR → OB rejection SHORT")
@@ -3541,7 +3546,9 @@ if barstate.isconfirmed
 
 // §11.1 structure lines: BOS solid · sweep dashed grey · CHoCH solid (fake = dashed grey) · CISD dotted
 f_evLine(arr, xa, y, col, sty, mx) =>
-    array.push(arr, line.new(f_xb(xa), y, bar_index, y, color = col, style = sty, width = 1))
+    // S12 — an anchor older than the drawing buffer is pinned to its edge; show that as dotted
+    clamped = xa < bar_index - 495
+    array.push(arr, line.new(f_xb(xa), y, bar_index, y, color = col, style = clamped ? line.style_dotted : sty, width = 1))
     while array.size(arr) > mx
         line.delete(array.shift(arr))
 
@@ -3646,11 +3653,11 @@ f_legend(tb, v) =>
     table.cell(tb, 0, 0, "▲▲ A+ · ▲ A · · B", text_color = v.txt, bgcolor = color.new(v.bull, 40))
     table.cell(tb, 1, 0, "setup signal · ▲▲ = A+ · ▲ = A · · = B · grey = ⚠vs HTF/trend", text_color = chart.fg_color)
     table.cell(tb, 0, 1, "BOS / CHoCH / CISD", text_color = v.txt, bgcolor = color.new(v.bull, 40))
-    table.cell(tb, 1, 1, "solid line = valid · dashed grey = weak / fake / sweep · dotted = CISD", text_color = chart.fg_color)
+    table.cell(tb, 1, 1, "solid = displaced BOS/CHoCH · dotted grey = weak / internal break · dashed grey = sweep · dotted = CISD · iBOS = internal", text_color = chart.fg_color)
     table.cell(tb, 0, 2, "SWEEP✕ · RUN", text_color = v.txt, bgcolor = color.new(v.bear, 40))
     table.cell(tb, 1, 2, "liquidity sweep (trade) · run (avoid)", text_color = chart.fg_color)
     table.cell(tb, 0, 3, "OB★ BRK RCB RJB QM", text_color = v.txt, bgcolor = color.new(v.brk, 40))
-    table.cell(tb, 1, 3, "zones · dashed grey = weak/invalid · ⚠SWEEP REQ · IDM✓ · ★★", text_color = chart.fg_color)
+    table.cell(tb, 1, 3, "zones (T1/T1b/T2/G2 = OB candle type) · dashed grey = weak/invalid · ⚠SWEEP REQ · IDM✓ · ★★", text_color = chart.fg_color)
     table.cell(tb, 0, 4, "KL / KL★", text_color = v.txt, bgcolor = color.new(v.sr, 40))
     table.cell(tb, 1, 4, "key level (criteria ≥ min) / 4+", text_color = chart.fg_color)
     table.cell(tb, 0, 5, "▮ FVG", text_color = v.bull, bgcolor = color.new(v.bull, 85))
