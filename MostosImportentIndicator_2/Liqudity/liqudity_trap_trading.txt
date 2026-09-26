@@ -419,6 +419,9 @@
 //   FIX-V10 One SB entry per window per direction.
 //   FIX-V11 An engineered pool in play keeps its KIND through a nearby swing sweep.
 //   FIX-V12 Zone text only on ★HP / kind tags; rejection blocks capped at 2/side.
+//   FIX-V13 (v3.3.1) An HTF gap taller than `hPoiNextMaxAtr` × ATR cannot be the
+//           NEXT level (a 2,900-pt 240m gap hijacked NEXT BUY on BTC 15m), and
+//           the POI-conflict test only compares chart-TF zones.
 //   Budget  plot 8 + plotchar 14 + bgcolor 5 + alertcondition 35 = 62 of 64.
 indicator("Liquidity + S/D + Price Action [MTF] v3.3", "LQ-SD-PA v3.3", overlay = true,
      max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
@@ -536,6 +539,13 @@ nextLvlPos   = input.string("Left end of the line", "Label position",
 // more important target than any chart-TF zone, and the machine can anchor on it.
 nextInclHtf  = input.bool(true, "Include the HTF FVG POI as a NEXT level candidate", group = grpNX,
      tooltip = "The nearest untested HTF FVG (kind 'HTF', grade T3) is considered alongside chart-TF zones. Whichever is closer to price wins the label.")
+// ◆ FIX-V13 (v3.3.1): a live BTC 15m chart showed "NEXT BUY T3 HTF 81878–84778"
+// — a 240-min gap 2,900 points (3.4%) tall. Its top sat above every chart
+// demand, so it hijacked the NEXT level with price permanently "INSIDE", and it
+// overlapped the chart-TF supply above price, which read as a POI conflict.
+// A zone that tall is a RANGE, not a point of interest on this timeframe.
+hPoiNextMaxAtr = input.float(4.0, "HTF POI may be the NEXT level only if height ≤ ATR ×", step = 0.5, minval = 1, group = grpNX,
+     tooltip = "Measured in chart-TF ATR. A taller HTF gap still feeds FEM and the machine's HTF tap; it just cannot be the NEXT BUY / SELL marker.")
 
 grpC = "CRT / Turtle soup / CISD / IFC"
 showCRT    = input.bool(true,  "CRT 3-candle trigger candidates",       group = grpC)
@@ -2646,13 +2656,13 @@ f_nextZones() =>
     // candidacy rule as a chart zone (not entirely on the far side of price),
     // same "nearest wins" rule. Grade T3 — an HTF imbalance outranks a chart-TF
     // one; fresh = no separate visit yet.
-    if nextInclHtf and not na(hPoiBTop) and hPoiBBot <= close and (na(nbTop) or hPoiBTop > nbTop)
+    if nextInclHtf and not na(hPoiBTop) and hPoiBBot <= close and hPoiBTop - hPoiBBot <= hPoiNextMaxAtr * atr and (na(nbTop) or hPoiBTop > nbTop)   // FIX-V13
         nbTop   := hPoiBTop
         nbBot   := hPoiBBot
         nbFresh := nz(hPoiBIn) == 0
         nbScore := 3
         nbKind  := "HTF"
-    if nextInclHtf and not na(hPoiSTop) and hPoiSTop >= close and (na(nsBot) or hPoiSBot < nsBot)
+    if nextInclHtf and not na(hPoiSTop) and hPoiSTop >= close and hPoiSTop - hPoiSBot <= hPoiNextMaxAtr * atr and (na(nsBot) or hPoiSBot < nsBot)   // FIX-V13
         nsTop   := hPoiSTop
         nsBot   := hPoiSBot
         nsFresh := nz(hPoiSIn) == 0
@@ -2940,7 +2950,10 @@ nearSupply = not na(nsBot) and not inSupply and nsBot - close <= POI_NEAR_ATR * 
 // ATR of each other is indecision, not a POI (a live USTEC chart had them 0.05%
 // apart and both sides scored "at POI"). Neither side earns POI points, the
 // machine may not tap, and the verdict says why.
-poiConflict = not na(nbTop) and not na(nsBot) and nsBot - nbTop <= atr
+// FIX-V13: only CHART-TF zones can conflict — an HTF gap legitimately contains
+// smaller opposing LTF zones (it is not in the `zones` registry, so FIX-V3's
+// band claim never separates them).
+poiConflict = not na(nbTop) and not na(nsBot) and nbKind != "HTF" and nsKind != "HTF" and nsBot - nbTop <= atr
 
 // FIX-F4: chasing an exhausted day costs 10 context points (floored at 0)
 // FIX-T18: a NEUTRAL bias (structure vs EMA disagree) is less certainty, not
@@ -4868,7 +4881,7 @@ f_dash() =>
              planKill != "" ? "NO · " + planKill :
              gateKillL != "" ? "NO · " + gateKillL : gateKillS != "" ? "NO · " + gateKillS :
              dirLock != 0 ? (dirLock == 1 ? "LONG narrative live · shorts locked · " + f_suTxt(suL) : "SHORT narrative live · longs locked · " + f_suTxt(suS)) :
-             poiConflict ? "NO · POI conflict (demand / supply " + str.tostring(nsBot - nbTop, format.mintick) + " apart)" :
+             poiConflict ? "NO · POI conflict (demand / supply " + str.tostring(math.abs(nsBot - nbTop), format.mintick) + " apart)" :
              htfB == 0 and neutralMode == "Block both sides" ? "NO · neutral bias" :
              not sbOnlyOK ? "NO · outside SB windows" :
              regime == "CHOP" and not chopOKL and not chopOKS ? "NO · chop" :
