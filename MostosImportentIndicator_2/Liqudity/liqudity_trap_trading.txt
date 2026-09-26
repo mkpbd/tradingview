@@ -385,7 +385,42 @@
 //   FIX-T11 Freshness only outranks distance inside a distance window, the A+
 //           premium/discount test is waived on a range too tight to have one,
 //           LT-7 requires a chart-TF supply zone, and relVol uses a sane floor.
-indicator("Liquidity + S/D + Price Action [MTF] v3.2.2", "LQ-SD-PA v3.2.2", overlay = true,
+// ─────────────────────────────────────────────────────────────────────────────
+// v3.3 — FOURTH-PASS AUDIT (FOURTH_PASS_AUDIT_v3.2.2_BN.md · UPGRADE_PLAN_v3.3_BN.md)
+//        "One direction · SB fast path". Gate repairs; no engine rewritten.
+//   FIX-V1  NEUTRAL BIAS IS A DECISION. `htfB == 0` used to pass both `>= 0` and
+//           `<= 0`, so every bias gate opened both ways. `neutralMode` (block /
+//           follow chart structure / allow) resolves to ONE `biasOkL / biasOkS`
+//           that every consumer reads — arm, final gate, trap gates, SB entry.
+//   FIX-V2  MASTER DIRECTION LOCK (`oneDir`). An open trade or a setup at POI or
+//           beyond owns the chart: the opposite side may not arm, fire or confirm
+//           a trap. Machine + tracker state moved above MODULE 16B (16A) so the
+//           lock reads the previous bar. A quality raid of the OTHER side kills
+//           a stage-1 setup ("range swept both ways").
+//   FIX-V3  FIX-T20 for EVERY zone: `f_claimBand` runs for OB, RB, IFVG and after
+//           breaker / mitigation flips (a live BTC chart had demand top == supply
+//           OB bottom). Flip claims run after the loop — index-safe.
+//   FIX-V4  `poiConflict`: next demand and next supply within one ATR = no POI
+//           points either side, no machine tap, verdict says why.
+//   FIX-V5  Trap narrative gate: no trap against a TRENDING external structure
+//           without a RAW strong raid; counter-trend −20, fighting the OTE −15.
+//   FIX-V6  THE TRAP ENGINE IS AN ENGINE CANDIDATE. `sigLTLong/Short` pass
+//           MODULE 18 (tier · score · cooldown · lock · SB-13 hierarchy) and
+//           18B (risk cap · min RR), carry their own stop, print in the merged
+//           label with E/SL/TP lines and are tracked. Raw `sslSweep/bslSweep`
+//           are no longer a confirmation (the retest bar confirmed itself);
+//           confirmation must land AFTER the retest bar; one signal per level.
+//   FIX-V7  An SB entry outranks the same-direction cooldown (SB-13 rank 3).
+//   FIX-V8  A final-gate mute names its gate (`gate: …`) and returns the setup
+//           to SHIFTED for a retry instead of silently spending the sweep.
+//   FIX-V9  SB SHIFT = LTF MODEL (`sbShiftSrc`): internal CHoCH / CISD cut by a
+//           displacement candle (`sbDispAtr`); the raid IS the POI, so a tagged
+//           setup goes stage 1 → 3 on the shift. Non-SB path unchanged.
+//   FIX-V10 One SB entry per window per direction.
+//   FIX-V11 An engineered pool in play keeps its KIND through a nearby swing sweep.
+//   FIX-V12 Zone text only on ★HP / kind tags; rejection blocks capped at 2/side.
+//   Budget  plot 8 + plotchar 14 + bgcolor 5 + alertcondition 35 = 62 of 64.
+indicator("Liquidity + S/D + Price Action [MTF] v3.3", "LQ-SD-PA v3.3", overlay = true,
      max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
 
 // ═════════════════════════════════════════════════════════════════ MODULE 1
@@ -416,6 +451,12 @@ htfStructPiv = input.int(5, "HTF structure pivot length (HTF bars)", minval = 2,
 // it on the bias timeframe means the HTF narrative the setup leans on is gone.
 htfProtInval = input.bool(true, "HTF protected swing invalidates a setup", group = grpH,
      tooltip = "A long setup dies when price closes below the bias timeframe's protected LOW (short: above the protected HIGH). Only active while the HTF structure engine actually holds a protected swing on that side.")
+// ◆ FIX-V1 (v3.3, audit F-1): a NEUTRAL bias used to pass BOTH `htfB >= 0` and
+// `htfB <= 0`, so every bias gate opened both ways whenever structure and EMA
+// disagreed — the single biggest source of a long and a short on one chart.
+neutralMode = input.string("Follow chart structure", "When the HTF bias is NEUTRAL",
+     options = ["Block both sides", "Follow chart structure", "Allow both (v3.2.2)"], group = grpH,
+     tooltip = "Structure + EMA disagree = neutral. Block = no entry either way. Follow = use the chart's external structure direction. Allow = v3.2.2 behaviour (both sides pass).")
 useHtfCrt = input.bool(true, "HTF CRT + Turtle-soup trigger candidates", group = grpH)
 htfSel    = input.string("Auto", "HTF for CRT / TBS / POI", options = ["Auto", "15", "30", "60", "240", "D"], group = grpH)
 hPoiMaxAge   = input.int(40, "HTF POI max age (HTF candles)",           minval = 5, group = grpH)
@@ -574,6 +615,17 @@ sbPoiWait  = input.int(8,  "SB clock: bars POI tap → shift", minval = 2, group
 sbRetWait  = input.int(10, "SB clock: bars shift → entry",   minval = 2, group = grpSB)
 sbFvgMinAtr = input.float(0.10, "SB FVG min height (ATR ×)", step = 0.05, minval = 0, group = grpSB,
      tooltip = "A clean FVG, not a one-tick gap. The locking leg must also be a displacement candle.")
+// ◆ FIX-V9 (v3.3, audit F-9 / F-10): the SB path shared the swing model's shift
+// (an EXTERNAL CHoCH) and had to see it inside an 8-bar clock — on M5 with
+// extPiv = 12 that never happens, so every SB setup died "POI tap expired (no
+// shift)". Silver Bullet is a LOWER-TIMEFRAME model: its shift is a displaced
+// break of the short-term swing (internal CHoCH) or a CISD, and the raid itself
+// is the POI (stage 1 → 3 directly). Non-SB setups are untouched.
+sbShiftSrc = input.string("Internal CHoCH / CISD + displacement", "SB shift (LTF model)",
+     options = ["Same as machine (v3.2.2)", "Internal CHoCH / CISD + displacement"], group = grpSB,
+     tooltip = "Silver Bullet is a lower-timeframe model: its shift is a displaced break of the SHORT-TERM swing (internal CHoCH) or a CISD, cut by a displacement candle. External CHoCH inside an 8-bar clock is not realistic on M5.")
+sbDispAtr  = input.float(0.8, "SB displacement body ≥ ATR × (FVG leg + shift candle)", step = 0.1, minval = 0.3, group = grpSB,
+     tooltip = "The chart-TF zone engine uses `dispFactor` (1.2). The SB leg on M5 is often 0.8–1.0 ATR; only the SB path reads this.")
 sbReqMss = input.bool(false, "Require a true MSS for the SB shift (reject CHoCH / CISD)", group = grpSB,
      tooltip = "MSS = a displaced break of the protected swing WHILE a quality sweep is in play. OFF (default) also accepts an external CHoCH or a CISD, matching \"CHoCH acceptable if strong\" — the shift grade is recorded either way and drives both the SB score and the structure-based exit.")
 
@@ -666,6 +718,10 @@ poiSrc = input.string("Zone / HTF POI only", "Machine: what counts as the POI TA
 // no short could ever fire. Check it where the setup is born.
 armNeedHtf = input.bool(true, "Machine: do not arm against the HTF bias", group = grpQ,
      tooltip = "ON: a long setup only arms while the bias filter's timeframe is not bearish (and the mirror for shorts) — the same test MODULE 18 applies at the end. OFF restores v3.2.1, where the setup ran the whole chain and was refused at the last gate.")
+// ◆ FIX-V2 (v3.3, audit F-2): the two machines were independent, so a long at
+// POI and a short arming three bars later was legal. One narrative at a time.
+oneDir = input.bool(true, "One direction at a time (machine · engines · traps)", group = grpQ,
+     tooltip = "While a trade is open, or a setup is AT POI or beyond, the opposite side may not arm, fire or confirm a trap. Turn OFF for v3.2.2 behaviour.")
 
 grpR = "Risk / TP / SL"
 showTrade = input.bool(true, "Show entry / SL / TP of last signal", group = grpR)
@@ -1148,22 +1204,27 @@ var int   lastBslKind = 0
 qPoolLo = (close >= low  + (1 - STRONG_CLOSE_PCT) * rng and body >= BRK_BODY_ATR * atr) or volHot ? 3 : 2
 qPoolHi = (close <= high - (1 - STRONG_CLOSE_PCT) * rng and body >= BRK_BODY_ATR * atr) or volHot ? 3 : 2
 
+// ◆ FIX-V11 (v3.3, audit F-13): a swing sweep used to overwrite the pool KIND
+// unconditionally, so a session / PD / EQ raid still in play was downgraded to
+// "swing" by the next minor swing sweep a few bars later — and `sbPoolPref`
+// then refused the Silver Bullet arm. An engineered pool within reach of the
+// swing level keeps its kind; only its level / extreme / grade are refreshed.
 if sslSweep and confirmed
     int qS = f_sweepQual(true)
     lastSslQualRaw := lastSslBar == bar_index ? math.max(lastSslQualRaw, qS) : qS
     lastSslQual    := lastSslBar == bar_index ? math.max(lastSslQual, qS)    : qS
+    lastSslKind := f_recent(lastSslBar, sweepLook) and lastSslKind >= 2 and math.abs(lastSup - lastSslLvl) <= NEAR_LVL_ATR * atr ? lastSslKind : 1
     lastSslBar  := bar_index
     lastSslLvl  := lastSup
     lastSslExt  := low
-    lastSslKind := 1
 if bslSweep and confirmed
     int qB = f_sweepQual(false)
     lastBslQualRaw := lastBslBar == bar_index ? math.max(lastBslQualRaw, qB) : qB
     lastBslQual    := lastBslBar == bar_index ? math.max(lastBslQual, qB)    : qB
+    lastBslKind := f_recent(lastBslBar, sweepLook) and lastBslKind >= 2 and math.abs(lastRes - lastBslLvl) <= NEAR_LVL_ATR * atr ? lastBslKind : 1
     lastBslBar  := bar_index
     lastBslLvl  := lastRes
     lastBslExt  := high
-    lastBslKind := 1
 
 // EQ pools: Judas sweep (close back inside) vs real break (pool consumed)
 eqhSwept = false
@@ -1611,6 +1672,10 @@ hsDir = nz(hsDirRaw, 0)
 htfB = biasMode == "EMA only"       ? emaBias :
        biasMode == "Structure only" ? (hsDir != 0 ? hsDir : emaBias) :
        (hsDir == 0 ? emaBias : hsDir == emaBias ? hsDir : 0)
+// ◆ FIX-V1: the ONE bias permission every gate reads. A neutral bias is a
+// decision (block / follow chart structure), not a permission slip for both.
+biasOkL = biasFilter == "Off" or htfB > 0 or (htfB == 0 and (neutralMode == "Allow both (v3.2.2)" or (neutralMode == "Follow chart structure" and extDir >= 0)))
+biasOkS = biasFilter == "Off" or htfB < 0 or (htfB == 0 and (neutralMode == "Allow both (v3.2.2)" or (neutralMode == "Follow chart structure" and extDir <= 0)))
 
 // ═════════════════════════════════════════════════════════════════ MODULE 8
 // SESSION LIQUIDITY MEMORY + OPENING PRICES
@@ -2165,7 +2230,7 @@ f_latestFvg() =>
             _cFvgBTop  := low
             _cFvgBBot  := high[2]
             _cFvgBBar  := bar_index
-            _cFvgBDisp := bullBar[1] and body[1] >= dispFactor * atr
+            _cFvgBDisp := bullBar[1] and body[1] >= math.min(dispFactor, sbDispAtr) * atr   // FIX-V9: only sbFvgOk reads this
         if not na(_cFvgBBot) and close < _cFvgBBot
             _cFvgBTop := na
             _cFvgBBot := na
@@ -2174,7 +2239,7 @@ f_latestFvg() =>
             _cFvgSBot  := high
             _cFvgSTop  := low[2]
             _cFvgSBar  := bar_index
-            _cFvgSDisp := bearBar[1] and body[1] >= dispFactor * atr
+            _cFvgSDisp := bearBar[1] and body[1] >= math.min(dispFactor, sbDispAtr) * atr   // FIX-V9
         if not na(_cFvgSTop) and close > _cFvgSTop
             _cFvgSTop := na
             _cFvgSBot := na
@@ -2208,12 +2273,34 @@ var zones = array.new<Zone>()
 f_pushZone(Zone z) =>
     array.push(zones, z)
 
-// ◆ FIX-T20 OPPOSING ZONES MAY NOT OVERLAP (inlined at both call sites below).
-// The duplicate scan only ever compared a new zone with zones of its OWN side,
-// so a demand and a supply could share a band — a live XAU chart had demand
-// top == supply bottom == 4356.675, which made `inDemand` AND `inSupply` true
-// at once. The NEWER zone wins the contested band; the older keeps its own side
-// and is dropped when too little is left to be a POI (FIX-T19's height).
+// ◆ FIX-T20 OPPOSING ZONES MAY NOT OVERLAP. The duplicate scan only ever
+// compared a new zone with zones of its OWN side, so a demand and a supply
+// could share a band (a live XAU chart had demand top == supply bottom, which
+// made `inDemand` AND `inSupply` true at once). The NEWER zone wins the band;
+// the older keeps its own side and is dropped when too little is left to be a
+// POI (FIX-T19's height).
+// ◆ FIX-V3 (v3.3, audit F-3): the rule was inlined for the S/D branch only —
+// OB companions, rejection blocks, IFVGs and breaker / mitigation FLIPS all
+// bypassed it (a live BTC chart: demand top == supply-OB bottom == 83990.8).
+// One function now, called at every creation site and after every flip.
+f_claimBand(bool isSupply, float top, float bot) =>
+    if array.size(zones) > 0
+        for k = array.size(zones) - 1 to 0
+            zo = array.get(zones, k)
+            if zo.isSupply != isSupply
+                float ot = box.get_top(zo.bx)
+                float ob = box.get_bottom(zo.bx)
+                if not (ob > top or ot < bot)
+                    ot := isSupply ? math.min(ot, bot) : ot
+                    ob := isSupply ? ob : math.max(ob, top)
+                    if ot - ob < minZoneAtr * atr
+                        box.delete(zo.bx)
+                        array.remove(zones, k)
+                    else if isSupply
+                        box.set_top(zo.bx, ot)
+                    else
+                        box.set_bottom(zo.bx, ob)
+
 f_newZone(bool isSupply, float top, float bot, bool star, string kind, string txt, int lft) =>
     c  = isSupply ? COL_BEAR : COL_BULL
     x1 = lft != 0 ? lft : bar_index - 2
@@ -2236,6 +2323,11 @@ f_zoneUpdate() =>
     float sigSLShort = na
     bool zoneInvalidatedUp = false   // demand-side POI violated this bar (machine invalidation)
     bool zoneInvalidatedDn = false
+    // FIX-V3: a flipped block claims its band AFTER the loop (mutating `zones`
+    // inside a descending index loop could run the index past the new size)
+    float flipTop = na
+    float flipBot = na
+    bool  flipSup = false
 
     if array.size(zones) > 0
         for i = array.size(zones) - 1 to 0
@@ -2262,9 +2354,12 @@ f_zoneUpdate() =>
                         z.score    := isBrkS ? 3 : 2
                         box.set_border_color(z.bx, color.new(COL_BULL, 55))
                         box.set_bgcolor(z.bx, color.new(COL_BULL, 93))
-                        box.set_text(z.bx, isBrkS ? "BREAKER ▲" : "MITIGATION ▲")
+                        box.set_text(z.bx, z.kind)
                         box.set_text_color(z.bx, color.new(COL_BULL, 0))
                         box.set_text_valign(z.bx, text.align_bottom)
+                        flipTop := top                                  // FIX-V3
+                        flipBot := bot
+                        flipSup := false
                     else
                         box.delete(z.bx)
                         array.remove(zones, i)
@@ -2307,9 +2402,12 @@ f_zoneUpdate() =>
                         z.score    := isBrkD ? 3 : 2
                         box.set_border_color(z.bx, color.new(COL_BEAR, 55))
                         box.set_bgcolor(z.bx, color.new(COL_BEAR, 93))
-                        box.set_text(z.bx, isBrkD ? "BREAKER ▼" : "MITIGATION ▼")
+                        box.set_text(z.bx, z.kind)
                         box.set_text_color(z.bx, color.new(COL_BEAR, 0))
                         box.set_text_valign(z.bx, text.align_top)
+                        flipTop := top                                  // FIX-V3
+                        flipBot := bot
+                        flipSup := true
                     else
                         box.delete(z.bx)
                         array.remove(zones, i)
@@ -2333,6 +2431,8 @@ f_zoneUpdate() =>
                     sigSLLong := math.min(low, bot) - SL_PAD_ATR * atr
                     z.signaled := true
                     box.set_bgcolor(z.bx, color.new(COL_BULL, 94))
+    if not na(flipTop)
+        f_claimBand(flipSup, flipTop, flipBot)               // FIX-V3
     [sigSDLong, sigSDShort, sigSLLong, sigSLShort, zoneInvalidatedUp, zoneInvalidatedDn]
 [zuSDL, zuSDS, zuSLL, zuSLS, zuInvU, zuInvD] = f_zoneUpdate()
 sigSDLong  = zuSDL
@@ -2360,6 +2460,8 @@ float slFEMLong  = na
 float slFEMShort = na
 float slMCLong   = na
 float slMCShort  = na
+float slLTLong   = na      // FIX-V6 (v3.3): the trap engine's own stop
+float slLTShort  = na
 
 // ---- create S/D zones (FVG-imbalance geometry, V2 FIX-9) + OB companions ------
 // CE10295 refactor: zone creation only pushes to the global `zones` array,
@@ -2388,28 +2490,16 @@ f_zoneCreate() =>
                         box.delete(z.bx)
                         array.remove(zones, i)
         if not dup and zTop - zBot >= minZoneAtr * atr      // FIX-T19
-            // FIX-T20: the new DEMAND takes the band; supplies keep what is above
-            if array.size(zones) > 0
-                for k = array.size(zones) - 1 to 0
-                    zo = array.get(zones, k)
-                    if zo.isSupply
-                        float ot = box.get_top(zo.bx)
-                        float ob = box.get_bottom(zo.bx)
-                        if not (ob > zTop or ot < zBot)
-                            ob := math.max(ob, zTop)
-                            if ot - ob < minZoneAtr * atr
-                                box.delete(zo.bx)
-                                array.remove(zones, k)
-                            else
-                                box.set_bottom(zo.bx, ob)
-            f_pushZone(f_newZone(false, zTop, zBot, bs, "SD", "DEMAND" + (bs ? " ★HP" : ""), 0))
+            f_claimBand(false, zTop, zBot)                   // FIX-T20 / FIX-V3
+            f_pushZone(f_newZone(false, zTop, zBot, bs, "SD", bs ? "DEMAND ★HP" : "", 0))
             // ORDER BLOCK companion: the opposing (bearish) origin candle before
             // the displacement leg — its own geometry, below the imbalance
             if showOB and bearBar[2]
                 float obTop = high[2]
                 float obBot = math.max(low[2], high[2] - maxZoneAtr * atr)
                 if obTop - obBot >= minZoneAtr * atr and obTop <= zBot + atr * 0.01
-                    f_pushZone(f_newZone(false, obTop, obBot, false, "OB", "OB ▲", bar_index - 2))
+                    f_claimBand(false, obTop, obBot)         // FIX-V3
+                    f_pushZone(f_newZone(false, obTop, obBot, false, "OB", "OB", bar_index - 2))
 
     if newSupply and confirmed
         float zBot = high
@@ -2427,26 +2517,14 @@ f_zoneCreate() =>
                         box.delete(z.bx)
                         array.remove(zones, i)
         if not dup and zTop - zBot >= minZoneAtr * atr      // FIX-T19
-            // FIX-T20: the new SUPPLY takes the band; demands keep what is below
-            if array.size(zones) > 0
-                for k = array.size(zones) - 1 to 0
-                    zo = array.get(zones, k)
-                    if not zo.isSupply
-                        float ot = box.get_top(zo.bx)
-                        float ob = box.get_bottom(zo.bx)
-                        if not (ob > zTop or ot < zBot)
-                            ot := math.min(ot, zBot)
-                            if ot - ob < minZoneAtr * atr
-                                box.delete(zo.bx)
-                                array.remove(zones, k)
-                            else
-                                box.set_top(zo.bx, ot)
-            f_pushZone(f_newZone(true, zTop, zBot, bs, "SD", "SUPPLY" + (bs ? " ★HP" : ""), 0))
+            f_claimBand(true, zTop, zBot)                    // FIX-T20 / FIX-V3
+            f_pushZone(f_newZone(true, zTop, zBot, bs, "SD", bs ? "SUPPLY ★HP" : "", 0))
             if showOB and bullBar[2]
                 float obBot = low[2]
                 float obTop = math.min(high[2], low[2] + maxZoneAtr * atr)
                 if obTop - obBot >= minZoneAtr * atr and obBot >= zTop - atr * 0.01
-                    f_pushZone(f_newZone(true, obTop, obBot, false, "OB", "OB ▼", bar_index - 2))
+                    f_claimBand(true, obTop, obBot)          // FIX-V3
+                    f_pushZone(f_newZone(true, obTop, obBot, false, "OB", "OB", bar_index - 2))
 
     // ---- rejection blocks (swept pivot wick + displacement away, V2 FIX-24) -------
     rbSwpH = high[pivLen] > ta.highest(high, pivLen * 2)[pivLen + 1]
@@ -2465,7 +2543,8 @@ f_zoneCreate() =>
                         rbDup := true
                         break
                 if not rbDup
-                    f_pushZone(f_newZone(true, rbTop, rbBot, false, "RB", "REJECTION ▼", bar_index - pivLen))
+                    f_claimBand(true, rbTop, rbBot)          // FIX-V3
+                    f_pushZone(f_newZone(true, rbTop, rbBot, false, "RB", "RB", bar_index - pivLen))
                     rbNew := true
         if not na(pl)
             float rbBot2 = low[pivLen]
@@ -2477,7 +2556,8 @@ f_zoneCreate() =>
                         rbDup2 := true
                         break
                 if not rbDup2
-                    f_pushZone(f_newZone(false, rbTop2, rbBot2, false, "RB", "REJECTION ▲", bar_index - pivLen))
+                    f_claimBand(false, rbTop2, rbBot2)       // FIX-V3
+                    f_pushZone(f_newZone(false, rbTop2, rbBot2, false, "RB", "RB", bar_index - pivLen))
                     rbNew := true
 
     // ---- cap zone count per side (drop oldest) -------------------------------------
@@ -2498,7 +2578,8 @@ f_zoneCreate() =>
                     ifDup := true
                     break
             if not ifDup and ifvgSupTop - ifvgSupBot >= minZoneAtr * atr
-                f_pushZone(f_newZone(true, ifvgSupTop, ifvgSupBot, false, "IFVG", "IFVG ▼", bar_index - 2))
+                f_claimBand(true, ifvgSupTop, ifvgSupBot)    // FIX-V3
+                f_pushZone(f_newZone(true, ifvgSupTop, ifvgSupBot, false, "IFVG", "IFVG", bar_index - 2))
                 ifvgNew := true
         if not na(ifvgDemTop)
             ifDup2 = false
@@ -2507,19 +2588,26 @@ f_zoneCreate() =>
                     ifDup2 := true
                     break
             if not ifDup2 and ifvgDemTop - ifvgDemBot >= minZoneAtr * atr
-                f_pushZone(f_newZone(false, ifvgDemTop, ifvgDemBot, false, "IFVG", "IFVG ▲", bar_index - 2))
+                f_claimBand(false, ifvgDemTop, ifvgDemBot)   // FIX-V3
+                f_pushZone(f_newZone(false, ifvgDemTop, ifvgDemBot, false, "IFVG", "IFVG", bar_index - 2))
                 ifvgNew := true
 
     // SCOPE: one descending pass keeps the NEWEST `maxZones` per side and drops
     // the rest — the same result as the old census plus two drain loops.
+    // FIX-V12 (F-15): rejection blocks are capped at two per side — they were
+    // the bulk of the box pile-up around price on a live BTC chart
     if (newDemand or newSupply or rbNew or ifvgNew) and array.size(zones) > 0
         int dKeep = 0
         int sKeep = 0
+        int dRb   = 0
+        int sRb   = 0
         for i = array.size(zones) - 1 to 0
             z = array.get(zones, i)
             sKeep := z.isSupply ? sKeep + 1 : sKeep
             dKeep := z.isSupply ? dKeep : dKeep + 1
-            if (z.isSupply ? sKeep : dKeep) > maxZones
+            sRb   := z.isSupply and z.kind == "RB" ? sRb + 1 : sRb
+            dRb   := not z.isSupply and z.kind == "RB" ? dRb + 1 : dRb
+            if (z.isSupply ? sKeep : dKeep) > maxZones or (z.isSupply ? sRb : dRb) > 2
                 box.delete(z.bx)
                 array.remove(zones, i)
 f_zoneCreate()
@@ -2695,7 +2783,7 @@ f_insideBar() =>
                 _ibStage := 0
         else if _ibStage == 2
             if close > _ibHigh         // SCOPE
-                _sig3Long := showS3 and bullBar and body >= BRK_BODY_ATR * atr and close >= high - STRONG_CLOSE_PCT * rng and structDir >= 0 and htfB >= 0
+                _sig3Long := showS3 and bullBar and body >= BRK_BODY_ATR * atr and close >= high - STRONG_CLOSE_PCT * rng and structDir >= 0 and biasOkL   // FIX-V1
                 _ibStage := 0
             else if close < _ibLow or bar_index - _ibStart > IB_WAIT_BARS
                 _ibStage := 0
@@ -2708,7 +2796,7 @@ f_insideBar() =>
                 _ibStage := 0
         else if _ibStage == -2
             if close < _ibLow          // SCOPE
-                _sig3Short := showS3 and bearBar and body >= BRK_BODY_ATR * atr and close <= low + STRONG_CLOSE_PCT * rng and structDir <= 0 and htfB <= 0
+                _sig3Short := showS3 and bearBar and body >= BRK_BODY_ATR * atr and close <= low + STRONG_CLOSE_PCT * rng and structDir <= 0 and biasOkS   // FIX-V1
                 _ibStage := 0
             else if close > _ibHigh or bar_index - _ibStart > IB_WAIT_BARS
                 _ibStage := 0
@@ -2847,6 +2935,11 @@ inDemand   = not na(nbTop) and close <= nbTop
 nearDemand = not na(nbTop) and not inDemand and close - nbTop <= POI_NEAR_ATR * atr
 inSupply   = not na(nsBot) and close >= nsBot
 nearSupply = not na(nsBot) and not inSupply and nsBot - close <= POI_NEAR_ATR * atr
+// ◆ FIX-V4 (v3.3, audit F-4): the next demand and the next supply within one
+// ATR of each other is indecision, not a POI (a live USTEC chart had them 0.05%
+// apart and both sides scored "at POI"). Neither side earns POI points, the
+// machine may not tap, and the verdict says why.
+poiConflict = not na(nbTop) and not na(nsBot) and nsBot - nbTop <= atr
 
 // FIX-F4: chasing an exhausted day costs 10 context points (floored at 0)
 // FIX-T18: a NEUTRAL bias (structure vs EMA disagree) is less certainty, not
@@ -2857,8 +2950,8 @@ ctxShort = math.max(0, (htfB < 0 ? 10 : htfB == 0 ? 5 : 0) + (extDir < 0 ? 10 : 
 // every MSS handed itself these 5 points for free.
 liqLong  = (sslInPlay ? 10 : 0) + (recentEngLo ? 5 : 0) + (sslInPlay and lastSslQualRaw >= 3 ? 5 : 0)
 liqShort = (bslInPlay ? 10 : 0) + (recentEngHi ? 5 : 0) + (bslInPlay and lastBslQualRaw >= 3 ? 5 : 0)
-poiLong  = (inDemand ? 10 : nearDemand ? 5 : 0) + ((inDemand or nearDemand) and nbFresh ? 5 : 0) + (inOTEbuy ? 5 : 0)
-poiShort = (inSupply ? 10 : nearSupply ? 5 : 0) + ((inSupply or nearSupply) and nsFresh ? 5 : 0) + (inOTEsell ? 5 : 0)
+poiLong  = poiConflict ? 0 : (inDemand ? 10 : nearDemand ? 5 : 0) + ((inDemand or nearDemand) and nbFresh ? 5 : 0) + (inOTEbuy ? 5 : 0)     // FIX-V4
+poiShort = poiConflict ? 0 : (inSupply ? 10 : nearSupply ? 5 : 0) + ((inSupply or nearSupply) and nsFresh ? 5 : 0) + (inOTEsell ? 5 : 0)
 cisdSepUp = recentCisdUp and (na(lastChUpBar) or lastCisdUpBar != lastChUpBar)
 cisdSepDn = recentCisdDn and (na(lastChDnBar) or lastCisdDnBar != lastChDnBar)
 // ◆ FIX-F8 RECENCY DECAY. A shift used to be worth its full points for 10 bars
@@ -2936,6 +3029,46 @@ tierLong  = f_tierLong()
 tierShort = f_tierShort()
 minRank = tierMode == "A+ only" ? 4 : tierMode == "A and above" ? 3 : tierMode == "B and above" ? 2 : 1
 f_tierTxt(int t) => t == 4 ? "A+" : t == 3 ? "A" : t == 2 ? "B" : "C"
+
+// ═════════════════════════════════════════════════════════════════ MODULE 16A
+// ◆ FIX-V2 (v3.3) MASTER DIRECTION LOCK. The machine state and the tracked
+// trade are declared HERE (moved up from MODULES 17 / 19, values unchanged) so
+// that the trap engine, the machine arm and the final gate can all read the
+// previous bar's narrative: an open trade, or a setup AT POI or beyond, owns
+// the chart. The opposite side may not arm, fire or confirm a trap.
+// ═════════════════════════════════════════════════════════════════════════
+var int    suL       = 0
+var int    suLBar    = na
+var float  suLAnchorT = na    // retest anchor top (locked FVG or POI zone)
+var float  suLAnchorB = na
+var int    suLFvgBar  = na    // anchor creation bar (na = zone anchor)
+var float  suLSweepLvl = na
+var float  suLSweepExt = na
+var string suLReason  = ""    // last invalidation / expiry reason
+var int    suS       = 0
+var int    suSBar    = na
+var float  suSAnchorT = na
+var float  suSAnchorB = na
+var int    suSFvgBar  = na
+var float  suSSweepLvl = na
+var float  suSSweepExt = na
+var string suSReason  = ""
+var float trdEntry = na
+var float trdSL    = na
+var float trdTP1   = na
+var float trdTP2   = na
+var float trdTP3   = na
+var int   trdDir   = 0
+var bool  trdTp1Hit = false
+// ◆ SB-6 trade state: only an SB-tagged trade uses the extended exit engine
+var bool  trdTp2Hit = false
+var bool  trdIsSb   = false
+var int   trdSbWin  = 0     // the window whose close is this trade's time stop
+var int   trdShiftG = 0     // grade of the shift that produced the entry
+var float trdLiqTgt = na    // the planned liquidity target (TP3)
+dirLock = not oneDir ? 0 : trdDir != 0 ? trdDir : suL >= 2 ? 1 : suS >= 2 ? -1 : 0
+lockOkL = dirLock >= 0
+lockOkS = dirLock <= 0
 
 // ═════════════════════════════════════════════════════════════════ MODULE 16B
 // ◬ LIQUIDITY TRAP ENGINE — 7 breakout-trap patterns as an EXTRA layer
@@ -3053,8 +3186,10 @@ ltLowVol = ltAtrAvg > 0 and atr < 0.7 * ltAtrAvg
 // trap engine keeps its own `ltCd` cooldown.
 ltClsFloor  = ltMinCls == "VERY HIGH only" ? ltScoreVHigh : ltMinCls == "MEDIUM and above" ? ltScoreMed : ltScoreHigh
 ltCtxBase   = not ltCtxGate or (kzOK and newsOK and (not useRegime or regime != "CHOP"))
-ltCtxOKLong  = ltCtxBase and (not ltCtxGate or biasFilter == "Off" or htfB >= 0)
-ltCtxOKShort = ltCtxBase and (not ltCtxGate or biasFilter == "Off" or htfB <= 0)
+// FIX-V1 the shared bias permission · FIX-V5 (F-8) narrative gate: a trap against
+// a TRENDING external structure needs a RAW strong raid, or it is inducement
+ltCtxOKLong  = ltCtxBase and (not ltCtxGate or biasOkL) and not (regime == "TRENDING" and extDir == -1 and lastSslQualRaw < 3)
+ltCtxOKShort = ltCtxBase and (not ltCtxGate or biasOkS) and not (regime == "TRENDING" and extDir == 1 and lastBslQualRaw < 3)
 
 // significant-wick candles — context is judged later, NEVER a raw signal (§11)
 ltLoWickBar = rng > 0 and dnWick >= ltWickAtr * atr and dnWick >= ltWickRatio * body and dnWick > upWick
@@ -3191,7 +3326,8 @@ f_ltScore(bool isLong, bool retOk, int lState, int sState) =>
     s += retOk ? 10 : 0                                                                     // retest / failed-break done
     s += (isLong ? htfB > 0 : htfB < 0) ? 15 : 0                                            // MTF agreement
     s -= regime == "CHOP" ? 10 : 0                                                          // weak / unclear structure
-    s -= (isLong ? extDir == -1 : extDir == 1) ? 10 : 0                                     // counter-trend
+    s -= (isLong ? extDir == -1 : extDir == 1) ? 20 : 0                                     // counter-trend (FIX-V5: was 10)
+    s -= (isLong ? inOTEsell : inOTEbuy) ? 15 : 0                                           // FIX-V5: fighting the OTE of the other side
     s -= ltLowVol ? 5 : 0                                                                   // low volatility
     s -= not (isLong ? (sslInPlay or recentEngLo) : (bslInPlay or recentEngHi)) ? 10 : 0    // insufficient liquidity
     s -= lState >= 1 and sState >= 1 ? 15 : 0                                           // ambiguous — both directions armed
@@ -3213,10 +3349,19 @@ f_ltMachines() =>
     var string _ltSPats   = ""
     var bool   _ltSRetOk  = false
     var string _ltSReason = ""
+    // FIX-V6a (F-6): the retest bar may not also be the confirmation bar
+    var int    _ltLRetBar = na
+    var int    _ltSRetBar = na
+    // FIX-V6b (F-7): one signal per level — the cooldown alone let the same
+    // supply fire LT-7 twice ten bars apart
+    var float  _ltLDoneLvl = na
+    var float  _ltSDoneLvl = na
     bool _ltLongSig    = false
     bool _ltShortSig   = false
     int  _ltLongScore  = 0
     int  _ltShortScore = 0
+    float _ltSlL = na
+    float _ltSlS = na
     bool _ltArmLEvt = false
     bool _ltArmSEvt = false
     bool _ltRetLEvt = false
@@ -3236,13 +3381,15 @@ f_ltMachines() =>
                 _ltLReason := "breakout failed (bear displacement below level)"
         if _ltLState == 2 and bar_index - _ltLBar > ltCd
             _ltLState := 0
-        if _ltLArmTxt != ""
+        float _ltLLvlNow = p1Arm ? _ltBrkLvlNow : p4Lvl
+        if _ltLArmTxt != "" and (na(_ltLDoneLvl) or na(_ltLLvlNow) or math.abs(_ltLLvlNow - _ltLDoneLvl) > ltClusterTol * atr)   // FIX-V6b
             if _ltLState == 0
                 _ltLState  := 1
                 _ltLBar    := bar_index
-                _ltLLevel  := p1Arm ? _ltBrkLvlNow : p4Lvl
+                _ltLLevel  := _ltLLvlNow
                 _ltLPats   := _ltLArmTxt
                 _ltLRetOk  := false
+                _ltLRetBar := na
                 _ltArmLEvt := true
                 if ltShowSetup
                     f_chip(true, "◬ " + _ltLPats + " setup", color.new(color.orange, 45), color.white, mkSize)
@@ -3251,14 +3398,20 @@ f_ltMachines() =>
                 _ltLPats := p4Arm and not str.contains(_ltLPats, "LT-4") ? _ltLPats + "+LT-4" : _ltLPats
         if _ltLState == 1 and bar_index > _ltLBar and not na(_ltLLevel) and low <= _ltLLevel + ltRetestAtr * atr and not _ltLRetOk
             _ltLRetOk  := true
+            _ltLRetBar := bar_index
             _ltRetLEvt := true
-        bool ltBullConfNow = zoneBullConf or mssUp or chochUp or eChochUp or sslSweep
-        bool ltGatesL = (not ltReqMss or recentMssUp) and (not ltReqCh or recentChUp or recentMssUp) and (not ltReqSweep or sslInPlay) and (not ltReqFvg or not na(cFvgBTop)) and (not ltReqSD or inDemand or nearDemand) and (not ltReqOB or obNearL) and (not ltReqMtf or htfB >= 0)
-        if _ltLState == 1 and ltBullConfNow and ltGatesL and ltCtxOKLong and (not ltReqRetest or _ltLRetOk) and close > _ltLLevel - ltInvAtr * atr
+        // FIX-V6a: a raw `sslSweep` is no longer a confirmation — it was the retest
+        // bar confirming itself. Confirmation = rejection / IFC / CISD / shift, on a
+        // bar AFTER the retest bar.
+        bool ltBullConfNow = zoneBullConf or mssUp or chochUp or eChochUp
+        bool ltGatesL = (not ltReqMss or recentMssUp) and (not ltReqCh or recentChUp or recentMssUp) and (not ltReqSweep or sslInPlay) and (not ltReqFvg or not na(cFvgBTop)) and (not ltReqSD or inDemand or nearDemand) and (not ltReqOB or obNearL) and (not ltReqMtf or biasOkL)
+        if _ltLState == 1 and ltBullConfNow and ltGatesL and ltCtxOKLong and lockOkL and (not ltReqRetest or (_ltLRetOk and bar_index > _ltLRetBar)) and close > _ltLLevel - ltInvAtr * atr
             int scL = f_ltScore(true, _ltLRetOk, _ltLState, _ltSState)
             if scL >= ltClsFloor
                 _ltLongSig   := true
                 _ltLongScore := scL
+                _ltSlL       := math.min(low, _ltLLevel) - SL_PAD_ATR * atr
+                _ltLDoneLvl  := _ltLLevel
                 _ltLState    := 2
                 _ltLBar      := bar_index
         // ---- SHORT trap machine (LT-2 / LT-3 / LT-5 / LT-6 / LT-7) ------------------
@@ -3271,13 +3424,14 @@ f_ltMachines() =>
                 _ltSReason := "breakout accepted (bull displacement above level)"
         if _ltSState == 2 and bar_index - _ltSBar > ltCd
             _ltSState := 0
-        if _ltSArmTxt != ""
+        if _ltSArmTxt != "" and (na(_ltSDoneLvl) or na(_ltBrkLvlNow) or math.abs(_ltBrkLvlNow - _ltSDoneLvl) > ltClusterTol * atr)   // FIX-V6b
             if _ltSState == 0
                 _ltSState  := 1
                 _ltSBar    := bar_index
                 _ltSLevel  := _ltBrkLvlNow
                 _ltSPats   := _ltSArmTxt
                 _ltSRetOk  := p7Arm      // LT-7's supply tap IS its retest
+                _ltSRetBar := p7Arm ? bar_index : na
                 _ltArmSEvt := true
                 if ltShowSetup
                     f_chip(false, "◬ " + _ltSPats + " trap?", color.new(color.orange, 45), color.white, mkSize)
@@ -3287,46 +3441,38 @@ f_ltMachines() =>
                 _ltSPats  := p5Arm and not str.contains(_ltSPats, "LT-5") ? _ltSPats + "+LT-5" : _ltSPats
                 _ltSPats  := p6Arm and not str.contains(_ltSPats, "LT-6") ? _ltSPats + "+LT-6" : _ltSPats
                 _ltSPats  := p7Arm and not str.contains(_ltSPats, "LT-7") ? _ltSPats + "+LT-7" : _ltSPats
-                _ltSRetOk := p7Arm ? true : _ltSRetOk
+                _ltSRetOk  := p7Arm ? true : _ltSRetOk
+                _ltSRetBar := p7Arm and na(_ltSRetBar) ? bar_index : _ltSRetBar
         if _ltSState == 1 and bar_index > _ltSBar and not na(_ltSLevel) and close < _ltSLevel and not _ltSRetOk
             _ltSRetOk  := true
+            _ltSRetBar := bar_index
             _ltRetSEvt := true
-        bool ltBearConfNow = zoneBearConf or mssDn or chochDn or eChochDn or bslSweep
-        bool ltGatesS = (not ltReqMss or recentMssDn) and (not ltReqCh or recentChDn or recentMssDn) and (not ltReqSweep or bslInPlay) and (not ltReqFvg or not na(cFvgSTop)) and (not ltReqSD or inSupply or nearSupply) and (not ltReqOB or obNearS) and (not ltReqMtf or htfB <= 0)
+        bool ltBearConfNow = zoneBearConf or mssDn or chochDn or eChochDn           // FIX-V6a (no raw bslSweep)
+        bool ltGatesS = (not ltReqMss or recentMssDn) and (not ltReqCh or recentChDn or recentMssDn) and (not ltReqSweep or bslInPlay) and (not ltReqFvg or not na(cFvgSTop)) and (not ltReqSD or inSupply or nearSupply) and (not ltReqOB or obNearS) and (not ltReqMtf or biasOkS)
         bool ltSNeedBelow = str.contains(_ltSPats, "LT-6")    // LT-6 spec: close back below is mandatory
-        if _ltSState == 1 and ltBearConfNow and ltGatesS and ltCtxOKShort and (not ltReqRetest or _ltSRetOk) and (not ltSNeedBelow or close < _ltSLevel)
+        if _ltSState == 1 and ltBearConfNow and ltGatesS and ltCtxOKShort and lockOkS and (not ltReqRetest or (_ltSRetOk and bar_index > _ltSRetBar)) and (not ltSNeedBelow or close < _ltSLevel)
             int scS = f_ltScore(false, _ltSRetOk, _ltLState, _ltSState)
             if scS >= ltClsFloor
                 _ltShortSig   := true
                 _ltShortScore := scS
+                _ltSlS        := math.max(high, _ltSLevel) + SL_PAD_ATR * atr
+                _ltSDoneLvl   := _ltSLevel
                 _ltSState     := 2
                 _ltSBar       := bar_index
-    // ---- LT visuals -------------------------------------------------------------------
-    if ltEnable and ltShowSig and _ltLongSig
-        string clsL = f_ltCls(_ltLongScore)
-        color bgL = _ltLongScore >= ltScoreHigh ? color.new(COL_BULL, _ltLongScore >= ltScoreVHigh ? 0 : 15) : color.new(color.orange, 25)
-        label.new(bar_index, na, "◬ TRAP LONG · " + clsL + (ltShowScore ? " · " + str.tostring(_ltLongScore) : "") + "\n" + _ltLPats + (_ltLRetOk ? " · retest✓" : ""),
-             yloc = yloc.belowbar, style = label.style_label_up, color = bgL, textcolor = color.white, size = sigSize)
-    if ltEnable and ltShowSig and _ltShortSig
-        string clsS = f_ltCls(_ltShortScore)
-        color bgS = _ltShortScore >= ltScoreHigh ? color.new(COL_BEAR, _ltShortScore >= ltScoreVHigh ? 0 : 15) : color.new(color.orange, 25)
-        label.new(bar_index, na, "◬ TRAP SHORT · " + clsS + (ltShowScore ? " · " + str.tostring(_ltShortScore) : "") + "\n" + _ltSPats + (_ltSRetOk ? " · failed-break✓" : ""),
-             yloc = yloc.abovebar, style = label.style_label_down, color = bgS, textcolor = color.white, size = sigSize)
-    // ---- LT dynamic alerts (create one "Any alert() function call" alert) -------------
-    if ltDynAlert and _ltLongSig
-        string confTxtL = (bullEngulf ? "engulf " : "") + (bullPin ? "pin " : "") + (mssUp ? "MSS " : (chochUp or eChochUp) ? "CHoCH " : "") + (cisdUp ? "CISD " : "") + (sslSweep ? "sweep" : "")
-        alert("◬ LT BUY " + syminfo.ticker + " " + timeframe.period + " · " + _ltLPats + " · " + f_ltCls(_ltLongScore) + " " + str.tostring(_ltLongScore) + " · level " + str.tostring(_ltLLevel, format.mintick) + " · liquidity: sell-side taken · confirm: " + confTxtL, alert.freq_once_per_bar_close)
-    if ltDynAlert and _ltShortSig
-        string confTxtS = (bearEngulf ? "engulf " : "") + (bearPin ? "pin " : "") + (mssDn ? "MSS " : (chochDn or eChochDn) ? "CHoCH " : "") + (cisdDn ? "CISD " : "") + (bslSweep ? "sweep" : "")
-        alert("◬ LT SELL " + syminfo.ticker + " " + timeframe.period + " · " + _ltSPats + " · " + f_ltCls(_ltShortScore) + " " + str.tostring(_ltShortScore) + " · level " + str.tostring(_ltSLevel, format.mintick) + " · liquidity: buy-side trapped · confirm: " + confTxtS, alert.freq_once_per_bar_close)
-
-    // TOKEN: the intrabar PREVIEW alerts were removed — they repainted by
-    // definition and cost tokens the engine needs. Everything commits at close.
+    // FIX-V6 (F-5): the trap label and the alert() feed moved to MODULE 18 / 20 —
+    // a trap signal is now an ENGINE CANDIDATE (tier · score · cooldown · direction
+    // lock · viability gate · tracking), not a second unfiltered signal system.
     // the debug rows are built here, where the machine state lives
     string _ltDbgMach = "L " + f_ltStTxt(_ltLState) + (_ltLState >= 1 and _ltLPats != "" ? " [" + _ltLPats + "]" : "") + " · S " + f_ltStTxt(_ltSState) + (_ltSState >= 1 and _ltSPats != "" ? " [" + _ltSPats + "]" : "")
     string _ltDbgLast = "L: " + (_ltLReason != "" ? _ltLReason : "—") + " · S: " + (_ltSReason != "" ? _ltSReason : "—")
-    [_ltLongSig, _ltShortSig, _ltLongScore, _ltShortScore, _ltLState, _ltSState, _ltDbgMach, _ltDbgLast, _ltArmLEvt or _ltArmSEvt, _ltRetLEvt, _ltRetSEvt]
-[ltLongSig, ltShortSig, ltLongScore, ltShortScore, ltLState, ltSState, ltDbgMach, ltDbgLast, ltArmEvt, ltRetLEvt, ltRetSEvt] = f_ltMachines()
+    [_ltLongSig, _ltShortSig, _ltLongScore, _ltShortScore, _ltLState, _ltSState, _ltDbgMach, _ltDbgLast, _ltArmLEvt or _ltArmSEvt, _ltRetLEvt, _ltRetSEvt,
+     _ltSlL, _ltSlS, _ltLPats, _ltSPats, _ltLLevel, _ltSLevel, _ltLRetOk, _ltSRetOk]
+[ltLongSig, ltShortSig, ltLongScore, ltShortScore, ltLState, ltSState, ltDbgMach, ltDbgLast, ltArmEvt, ltRetLEvt, ltRetSEvt,
+ ltSlL, ltSlS, ltLPats, ltSPats, ltLLevel, ltSLevel, ltLRetOk, ltSRetOk] = f_ltMachines()
+slLTLong  := ltSlL
+slLTShort := ltSlS
+sigLTLong  = ltLongSig      // graded in MODULE 18 like every other engine candidate
+sigLTShort = ltShortSig
 
 plotchar(ltEnable and ltShowMarks and ltRetLEvt, "LT retest (long)",        "◦", location.belowbar, color.new(COL_BULL, 20), size = size.tiny)
 plotchar(ltEnable and ltShowMarks and ltRetSEvt, "LT failed break (short)", "◦", location.abovebar, color.new(COL_BEAR, 20), size = size.tiny)
@@ -3361,23 +3507,7 @@ f_ltPoolLines()
 // Edge-triggered, stage expiry, explicit invalidation with a reason string.
 // CHOP suppression with the institutional-sweep exception (ARCH-5).
 // ═════════════════════════════════════════════════════════════════════════
-var int    suL       = 0
-var int    suLBar    = na
-var float  suLAnchorT = na    // retest anchor top (locked FVG or POI zone)
-var float  suLAnchorB = na
-var int    suLFvgBar  = na    // anchor creation bar (na = zone anchor)
-var float  suLSweepLvl = na
-var float  suLSweepExt = na
-var string suLReason  = ""    // last invalidation / expiry reason
-var int    suS       = 0
-var int    suSBar    = na
-var float  suSAnchorT = na
-var float  suSAnchorB = na
-var int    suSFvgBar  = na
-var float  suSSweepLvl = na
-var float  suSSweepExt = na
-var string suSReason  = ""
-
+// (suL / suS state is declared above MODULE 16B — FIX-V2 reads it there)
 sigMCLong  = false
 sigMCShort = false
 // ◆ FIX-P0-4: the machine records the PRICE ITS PLAN IS BUILT ON — the CE of
@@ -3409,9 +3539,15 @@ var int sbArmedBslBar = na
 var int armedSslBar = na
 var int armedBslBar = na
 
+// ◆ FIX-V10 (F-13 companion): one SB entry per window per direction
+var int sbDoneWinL = 0
+var int sbDoneWinS = 0
+sbDoneWinL := sbCtxWin == 0 ? 0 : sbDoneWinL
+sbDoneWinS := sbCtxWin == 0 ? 0 : sbDoneWinS
+
 // arming gate: SB window + that window's own min sweep quality + preferred pool
-sbArmOkL = sbCtx and lastSslQual >= sbMinQual and sbPoolOkL
-sbArmOkS = sbCtx and lastBslQual >= sbMinQual and sbPoolOkS
+sbArmOkL = sbCtx and lastSslQual >= sbMinQual and sbPoolOkL and sbCtxWin != sbDoneWinL   // FIX-V10
+sbArmOkS = sbCtx and lastBslQual >= sbMinQual and sbPoolOkS and sbCtxWin != sbDoneWinS
 
 // ◆ SB-9 relaxed same-bar arming — SB PATH ONLY. The non-SB path still needs
 // the sweep stamped on THIS bar (`lastSslBar == bar_index`). A setup that
@@ -3439,6 +3575,11 @@ shiftDnOk = shiftSrc == "MSS only"             ? mssDn :
      shiftSrc == "MSS / external CHoCH" ? (mssDn or eChochDn) :
      shiftSrc == "+ internal CHoCH"     ? (mssDn or eChochDn or chochDn) :
      (mssDn or eChochDn or chochDn or cisdDn)
+
+// ◆ FIX-V9: the SB shift (LTF model) — the swing model keeps `shiftUpOk`
+sbDispNow = body >= sbDispAtr * atr
+sbShiftUp = sbShiftSrc == "Same as machine (v3.2.2)" ? shiftUpOk : (mssUp or eChochUp or ((chochUp or cisdUp) and bullBar and sbDispNow))
+sbShiftDn = sbShiftSrc == "Same as machine (v3.2.2)" ? shiftDnOk : (mssDn or eChochDn or ((chochDn or cisdDn) and bearBar and sbDispNow))
 
 // ◆ FIX-T8: a resting limit at the CE fills on the TOUCH
 ceFillReal = sbFillMode == "Limit touch (realistic)"
@@ -3481,6 +3622,11 @@ if confirmed
         else if bearBar and body >= dispFactor * atr and suL <= 3
             suL := 0
             suLReason := "opposing displacement"
+        // ◆ FIX-V2b (F-2): a quality raid of the OTHER side while still waiting
+        // for a POI means the range is being swept both ways — no narrative
+        else if suL == 1 and bslSweep and lastBslQual >= 2
+            suL := 0
+            suLReason := "range swept both ways"
     // ◆ FIX-T1 ONLY THE SETUP'S OWN ANCHOR MAY INVALIDATE IT. `zoneInvalidatedUp`
     // is a registry-wide flag: it fires when ANY demand zone is closed through,
     // including one far below price that this setup never touched. Valid setups
@@ -3508,7 +3654,7 @@ if confirmed
     // ◆ SB arming path: `or sbArmOkL` lets the SB gate arm a setup that the
     // generic minArmQual would reject, and the chop block may be waived for it.
     if suL == 0 and sslInPlay and sbArmBarL and (lastSslQual >= minArmQual or sbArmOkL)
-         and (not armNeedHtf or biasFilter == "Off" or htfB >= 0)
+         and (not armNeedHtf or biasOkL) and lockOkL                                   // FIX-V1 · FIX-V2
         bool chopBlock = useRegime and regime == "CHOP" and not instSweepL and not (sbArmOkL and sbChopBypass)   // FIX-T17
         if not chopBlock
             suL := 1
@@ -3523,8 +3669,17 @@ if confirmed
             armedSslBar := lastSslBar           // FIX-T3: this sweep is spent
             if sbArmOkL
                 sbArmedSslBar := lastSslBar     // SB-9: this sweep is spent
+    // ◆ FIX-V9b (F-10): in the SB model the raid IS the POI — a displaced shift
+    // while the sweep is in play goes straight to stage 3 (anchor = shift-leg FVG)
+    if suL == 1 and sbTagL != 0 and sslInPlay and (sbReqMss ? mssUp : sbShiftUp)
+        suL := 3
+        suLBar := bar_index
+        sbShiftGL := mssUp ? 2 : 1
+        suLAnchorT := na
+        suLAnchorB := na
+        suLFvgBar  := na
     if suL == 1
-        bool tapZone = inDemand and retestLong
+        bool tapZone = inDemand and retestLong and not poiConflict      // FIX-V4
         bool tapOte  = poiSrc != "Zone / HTF POI only" and inOTEbuy      // FIX-T5
         bool tapHtf  = htfLive and not na(hPoiBTop) and low <= hPoiBTop and close > hPoiBBot
         if tapZone or tapOte or tapHtf
@@ -3535,7 +3690,7 @@ if confirmed
     // ◆ SB: MSS preferred. With sbReqMss on, a tagged SB setup only shifts on a
     // true MSS; otherwise an external CHoCH or a CISD still qualifies (its lower
     // grade is recorded in sbShiftGL and costs a point in the SB score).
-    if suL == 2 and (sbTagL != 0 and sbReqMss ? mssUp : shiftUpOk)
+    if suL == 2 and (sbTagL != 0 ? (sbReqMss ? mssUp : sbShiftUp) : shiftUpOk)     // FIX-V9
         suL := 3
         suLBar := bar_index
         sbShiftGL := mssUp ? 2 : 1
@@ -3551,7 +3706,7 @@ if confirmed
             suLAnchorB := cFvgBBot
             suLFvgBar  := cFvgBBar
     if suL == 3
-        if na(suLFvgBar) and not na(cFvgBTop) and cFvgBBar > suLBar and (sbTagL == 0 or sbFvgOkL)
+        if na(suLFvgBar) and not na(cFvgBTop) and cFvgBBar >= suLBar and (sbTagL == 0 or sbFvgOkL)   // FIX-V9b: the shift bar's own gap counts
             suLAnchorT := cFvgBTop      // first FVG formed after the shift
             suLAnchorB := cFvgBBot
             suLFvgBar  := cFvgBBar
@@ -3574,7 +3729,7 @@ if confirmed
             bool  sbCeTapL  = sbCeTchL and (ceFillReal or close >= ceL or sbRejL)      // FIX-T8
             bool  sbPrxTapL = low <= suLAnchorT and sbRejL
             // ◆ SB-12: premium / discount off the LOCKED window range
-            bool  sbLocOkL  = (not sbReqHtf or htfB > 0) and (not sbReqPD or (sbPdOK and sbPdPos < 0.5))
+            bool  sbLocOkL  = (not sbReqHtf or htfB > 0 or (htfB == 0 and biasOkL)) and (not sbReqPD or (sbPdOK and sbPdPos < 0.5))   // FIX-V1: arm and entry agree on neutral
             bool  sbEnterL  = sbSetL and ripeL and sbLocOkL and (sbCeTapL or (sbEntryMode != "CE (50%) only" and sbPrxTapL))
             bool  stdEnterL = sbTagL == 0 and ripeL and low <= suLAnchorT and zoneBullConf
             if close < suLAnchorB
@@ -3606,6 +3761,9 @@ if confirmed
         else if bullBar and body >= dispFactor * atr and suS <= 3
             suS := 0
             suSReason := "opposing displacement"
+        else if suS == 1 and sslSweep and lastSslQual >= 2                          // FIX-V2b
+            suS := 0
+            suSReason := "range swept both ways"
     if suS >= 2 and na(suSFvgBar) and not na(suSAnchorT) and close > suSAnchorT      // FIX-T1
         suS := 0
         suSReason := "POI violated (own anchor)"
@@ -3620,7 +3778,7 @@ if confirmed
         suSReason := suS == 1 ? "sweep expired (no POI tap)" : suS == 2 ? "POI tap expired (no shift)" : "retest window expired"
         suS := 0
     if suS == 0 and bslInPlay and sbArmBarS and (lastBslQual >= minArmQual or sbArmOkS)
-         and (not armNeedHtf or biasFilter == "Off" or htfB <= 0)
+         and (not armNeedHtf or biasOkS) and lockOkS                                   // FIX-V1 · FIX-V2
         bool chopBlock = useRegime and regime == "CHOP" and not instSweepS and not (sbArmOkS and sbChopBypass)   // FIX-T17
         if not chopBlock
             suS := 1
@@ -3635,8 +3793,15 @@ if confirmed
             armedBslBar := lastBslBar           // FIX-T3: this sweep is spent
             if sbArmOkS
                 sbArmedBslBar := lastBslBar     // SB-9: this sweep is spent
+    if suS == 1 and sbTagS != 0 and bslInPlay and (sbReqMss ? mssDn : sbShiftDn)   // FIX-V9b
+        suS := 3
+        suSBar := bar_index
+        sbShiftGS := mssDn ? 2 : 1
+        suSAnchorT := na
+        suSAnchorB := na
+        suSFvgBar  := na
     if suS == 1
-        bool tapZone = inSupply and retestShort
+        bool tapZone = inSupply and retestShort and not poiConflict     // FIX-V4
         bool tapOte  = poiSrc != "Zone / HTF POI only" and inOTEsell     // FIX-T5
         bool tapHtf  = htfLive and not na(hPoiSTop) and high >= hPoiSBot and close < hPoiSTop
         if tapZone or tapOte or tapHtf
@@ -3644,7 +3809,7 @@ if confirmed
             suSBar := bar_index
             suSAnchorT := tapZone ? nsTop : suSAnchorT      // SCOPE
             suSAnchorB := tapZone ? nsBot : suSAnchorB
-    if suS == 2 and (sbTagS != 0 and sbReqMss ? mssDn : shiftDnOk)
+    if suS == 2 and (sbTagS != 0 ? (sbReqMss ? mssDn : sbShiftDn) : shiftDnOk)     // FIX-V9
         suS := 3
         suSBar := bar_index
         sbShiftGS := mssDn ? 2 : 1
@@ -3654,7 +3819,7 @@ if confirmed
             suSAnchorB := cFvgSBot
             suSFvgBar  := cFvgSBar
     if suS == 3
-        if na(suSFvgBar) and not na(cFvgSTop) and cFvgSBar > suSBar and (sbTagS == 0 or sbFvgOkS)
+        if na(suSFvgBar) and not na(cFvgSTop) and cFvgSBar >= suSBar and (sbTagS == 0 or sbFvgOkS)   // FIX-V9b
             suSAnchorT := cFvgSTop
             suSAnchorB := cFvgSBot
             suSFvgBar  := cFvgSBar
@@ -3669,7 +3834,7 @@ if confirmed
             bool  sbCeTapS  = sbCeTchS and (ceFillReal or close <= ceS or sbRejS)      // FIX-T8
             bool  sbPrxTapS = high >= suSAnchorB and sbRejS
             // ◆ SB-12: premium / discount off the LOCKED window range
-            bool  sbLocOkS  = (not sbReqHtf or htfB < 0) and (not sbReqPD or (sbPdOK and sbPdPos >= 0.5))
+            bool  sbLocOkS  = (not sbReqHtf or htfB < 0 or (htfB == 0 and biasOkS)) and (not sbReqPD or (sbPdOK and sbPdPos >= 0.5))   // FIX-V1
             bool  sbEnterS  = sbSetS and ripeS and sbLocOkS and (sbCeTapS or (sbEntryMode != "CE (50%) only" and sbPrxTapS))
             bool  stdEnterS = sbTagS == 0 and ripeS and high >= suSAnchorB and zoneBearConf
             if close > suSAnchorT
@@ -3711,8 +3876,13 @@ chopOKS = not useRegime or regime != "CHOP" or instSweepS
 // ◆ SB-only mode: nothing fires outside an SB context window
 sbOnlyOK = not (sbEnable and sbOnly and timeframe.isintraday) or sbCtx
 // FIX-F1: the block reads the COMBINED bias (`htfB`), not the raw EMA read
-longOK  = (biasFilter == "Off" or htfB >= 0) and kzOK and newsOK and longCdOK and chopOKL and sbOnlyOK and (minScore == 0 or scoreLong >= minScore)
-shortOK = (biasFilter == "Off" or htfB <= 0) and kzOK and newsOK and shortCdOK and chopOKS and sbOnlyOK and (minScore == 0 or scoreShort >= minScore)
+// FIX-V1 the shared bias permission · FIX-V2 the direction lock
+longOK  = biasOkL and lockOkL and kzOK and newsOK and longCdOK and chopOKL and sbOnlyOK and (minScore == 0 or scoreLong >= minScore)
+shortOK = biasOkS and lockOkS and kzOK and newsOK and shortCdOK and chopOKS and sbOnlyOK and (minScore == 0 or scoreShort >= minScore)
+// ◆ FIX-V7 (F-12): an SB entry outranks the same-direction COOLDOWN (SB-13 rank 3
+// is the highest claim on the bar) — every other gate still applies.
+longOK  := longOK  or (sbSigLong  and biasOkL and lockOkL and kzOK and newsOK and chopOKL and sbOnlyOK and (minScore == 0 or scoreLong  >= minScore))
+shortOK := shortOK or (sbSigShort and biasOkS and lockOkS and kzOK and newsOK and chopOKS and sbOnlyOK and (minScore == 0 or scoreShort >= minScore))
 
 // ◆ FIX-P1-2 MACHINE TIER IS GRADED, NOT ASSUMED.
 // The full chain (quality sweep → POI → shift → retest) genuinely is A-grade,
@@ -3747,6 +3917,18 @@ if not sigMCLong
     sbSigLong := false
 if not sigMCShort
     sbSigShort := false
+// ◆ FIX-V8 (v3.3, audit F-12) A FINAL-GATE MUTE IS A REASON AND A RETRY, NOT A
+// SILENT DEATH. MODULE 17 had already written stage 4; when `longOK` / the tier
+// floor refused the entry nothing was recorded, the stage fell to IDLE at the
+// end of the bar and the sweep was spent — an SB CE fill that scored 48 < 50
+// simply vanished. The stage now returns to SHIFTED (the anchor is still valid)
+// with the blocking gate named, and the retest window gets another chance.
+string gateKillL = suL == 4 and suLBar == bar_index and not sigMCLong ? (not longOK ? (minScore > 0 and scoreLong < minScore ? "gate: score " + str.tostring(scoreLong) + " < " + str.tostring(minScore) : not longCdOK ? "gate: cooldown" : not newsOK ? "gate: volatility window" : not chopOKL ? "gate: chop" : not lockOkL ? "gate: short narrative live" : "gate: bias / session") : "gate: tier " + f_tierTxt(mcTierL) + " below floor") : ""
+string gateKillS = suS == 4 and suSBar == bar_index and not sigMCShort ? (not shortOK ? (minScore > 0 and scoreShort < minScore ? "gate: score " + str.tostring(scoreShort) + " < " + str.tostring(minScore) : not shortCdOK ? "gate: cooldown" : not newsOK ? "gate: volatility window" : not chopOKS ? "gate: chop" : not lockOkS ? "gate: long narrative live" : "gate: bias / session") : "gate: tier " + f_tierTxt(mcTierS) + " below floor") : ""
+suL := gateKillL != "" ? 3 : suL
+suS := gateKillS != "" ? 3 : suS
+suLReason := gateKillL != "" ? gateKillL : suLReason
+suSReason := gateKillS != "" ? gateKillS : suSReason
 
 // engine trigger candidates: graded through the same layer model
 // ◆ SB precedence: while a clean SB setup is live (tagged and past its POI)
@@ -3768,6 +3950,7 @@ sigTBSLong  := sigTBSLong  and longOK and engTierOKL
 sigHCrtLong := sigHCrtLong and longOK and engTierOKL
 sigHTbsLong := sigHTbsLong and longOK and engTierOKL
 sigFEMLong  := sigFEMLong  and longOK and engTierOKL
+sigLTLong   := sigLTLong   and longOK and engTierOKL      // FIX-V6: the trap is an engine candidate
 sigSDShort   := sigSDShort   and shortOK and engTierOKS
 sig3Short    := sig3Short    and shortOK and engTierOKS
 sig4Short    := sig4Short    and shortOK and engTierOKS
@@ -3777,9 +3960,10 @@ sigTBSShort  := sigTBSShort  and shortOK and engTierOKS
 sigHCrtShort := sigHCrtShort and shortOK and engTierOKS
 sigHTbsShort := sigHTbsShort and shortOK and engTierOKS
 sigFEMShort  := sigFEMShort  and shortOK and engTierOKS
+sigLTShort   := sigLTShort   and shortOK and engTierOKS
 
-anyLong  = sigMCLong  or sigSDLong  or sig3Long  or sig4Long  or sigTLLong  or sigCRTLong  or sigTBSLong  or sigHCrtLong  or sigHTbsLong  or sigFEMLong
-anyShort = sigMCShort or sigSDShort or sig3Short or sig4Short or sigTLShort or sigCRTShort or sigTBSShort or sigHCrtShort or sigHTbsShort or sigFEMShort
+anyLong  = sigMCLong  or sigSDLong  or sig3Long  or sig4Long  or sigTLLong  or sigCRTLong  or sigTBSLong  or sigHCrtLong  or sigHTbsLong  or sigFEMLong  or sigLTLong
+anyShort = sigMCShort or sigSDShort or sig3Short or sig4Short or sigTLShort or sigCRTShort or sigTBSShort or sigHCrtShort or sigHTbsShort or sigFEMShort or sigLTShort
 
 // ◆ SB-13 conflict rule — a HIERARCHY, not a mutual kill. v3 muted BOTH sides
 // whenever the two directions fired on one bar, so a full SB narrative was
@@ -3842,9 +4026,9 @@ anyShort := ltEnable and ltVeto and ltLState == 1 and not sigMCShort ? false : a
 // ═════════════════════════════════════════════════════════════════════════
 // stop of the SURVIVING signal, highest-conviction engine first
 float selSLLong  = sigMCLong ? slMCLong : sigFEMLong ? slFEMLong : sigSDLong ? slSDLong :
-     sigCRTLong ? slCRTLong : sigTBSLong ? slTBSLong : sigTLLong ? slTLLong : na
+     sigCRTLong ? slCRTLong : sigTBSLong ? slTBSLong : sigTLLong ? slTLLong : sigLTLong ? slLTLong : na
 float selSLShort = sigMCShort ? slMCShort : sigFEMShort ? slFEMShort : sigSDShort ? slSDShort :
-     sigCRTShort ? slCRTShort : sigTBSShort ? slTBSShort : sigTLShort ? slTLShort : na
+     sigCRTShort ? slCRTShort : sigTBSShort ? slTBSShort : sigTLShort ? slTLShort : sigLTShort ? slLTShort : na
 
 // plan entry: the machine/SB plan price when the machine fired, else the close
 float planEntry = anyLong ? nz(mcPlanLong, close) : anyShort ? nz(mcPlanShort, close) : na
@@ -3910,6 +4094,8 @@ if not planOK
 // ◆ SB final fire flags — consumed by the label, the exit engine and the alert
 sbFireL = anyLong  and sigMCLong  and sbSigLong
 sbFireS = anyShort and sigMCShort and sbSigShort
+sbDoneWinL := sbFireL ? sbTagL : sbDoneWinL        // FIX-V10: this window is spent for longs
+sbDoneWinS := sbFireS ? sbTagS : sbDoneWinS
 
 // ◆ FIX-T7: this bar's signal is ENGINE-only, so the tracked fill waits for the
 // next bar's open. The label and the alert still print on this bar — that is
@@ -3938,19 +4124,7 @@ lastShortSigBar := anyShort ? bar_index : lastShortSigBar
 // ═════════════════════════════════════════════════════════════════ MODULE 19
 // TP / SL — structural stop + TP ladder + ACTIVE trade tracking (validation)
 // ═════════════════════════════════════════════════════════════════════════
-var float trdEntry = na
-var float trdSL    = na
-var float trdTP1   = na
-var float trdTP2   = na
-var float trdTP3   = na
-var int   trdDir   = 0
-var bool  trdTp1Hit = false
-// ◆ SB-6 trade state: only an SB-tagged trade uses the extended exit engine
-var bool  trdTp2Hit = false
-var bool  trdIsSb   = false
-var int   trdSbWin  = 0     // the window whose close is this trade's time stop
-var int   trdShiftG = 0     // grade of the shift that produced the entry
-var float trdLiqTgt = na    // the planned liquidity target (TP3)
+// (trd* tracker state is declared above MODULE 16B — FIX-V2 reads `trdDir` there)
 bool sbTimeExitEvt   = false
 bool sbStructExitEvt = false
 bool sbBeEvt         = false
@@ -4337,6 +4511,7 @@ f_sigLabels() =>
     longTxt := sigHCrtLong ? f_join(longTxt, "HTF " + htfTf + " CRT") : longTxt
     longTxt := sigHTbsLong ? f_join(longTxt, "HTF " + htfTf + " TSoup") : longTxt
     longTxt := sigFEMLong  ? f_join(longTxt, "◎ FEM " + htfTf + "→LTF") : longTxt
+    longTxt := sigLTLong and ltShowSig ? f_join(longTxt, "◬ TRAP " + ltLPats + " · " + f_ltCls(ltLongScore) + (ltLRetOk ? " · retest✓" : "")) : longTxt   // FIX-V6
 
     string shortTxt = ""
     shortTxt := sigMCShort   ? f_join(shortTxt, sbFireS ? "◆ SB " + f_sbWinTxt(sbTagS) + " · " + (sbCeFillS ? "CE" : "edge") + " " + f_tierTxt(mcTierS) : "◉ SETUP " + f_tierTxt(mcTierS)) : shortTxt
@@ -4349,6 +4524,7 @@ f_sigLabels() =>
     shortTxt := sigHCrtShort ? f_join(shortTxt, "HTF " + htfTf + " CRT") : shortTxt
     shortTxt := sigHTbsShort ? f_join(shortTxt, "HTF " + htfTf + " TSoup") : shortTxt
     shortTxt := sigFEMShort  ? f_join(shortTxt, "◎ FEM " + htfTf + "→LTF") : shortTxt
+    shortTxt := sigLTShort and ltShowSig ? f_join(shortTxt, "◬ TRAP " + ltSPats + " · " + f_ltCls(ltShortScore) + (ltSRetOk ? " · failed-break✓" : "")) : shortTxt
 
     if anyLong and longTxt != ""
         label.new(bar_index, na, f_tierTxt(finalTierL) + " · " + str.tostring(scoreLong) + "\n" + longTxt,
@@ -4639,7 +4815,7 @@ f_dash() =>
          border_color = color.new(color.gray, 70), border_width = 1)
     if showDash and barstate.islast
         rowBg = color.new(color.gray, 85)
-        table.cell(dash, 0, 0, "LQ-SD-PA v3.2.2", bgcolor = color.new(color.gray, 60), text_color = color.white, text_size = dashSize)
+        table.cell(dash, 0, 0, "LQ-SD-PA v3.3", bgcolor = color.new(color.gray, 60), text_color = color.white, text_size = dashSize)
         table.cell(dash, 1, 0, regime, bgcolor = regime == "TRENDING" ? f_biasCol(extDir) : regime == "CHOP" ? color.new(color.red, 70) : rowBg, text_color = color.white, text_size = dashSize)
         // bias: the timeframe the engine actually gates on, the daily context,
         // the HTF structure read and the combined verdict (FIX-F1)
@@ -4689,6 +4865,10 @@ f_dash() =>
         adrTxt = na(adrPct) ? "" : " · ADR " + str.tostring(adrPct * 100, "#") + "%" + (adrChaseL ? " no-chase▲" : adrChaseS ? " no-chase▼" : "")
         noTrade = anyLong or anyShort ? "" :
              planKill != "" ? "NO · " + planKill :
+             gateKillL != "" ? "NO · " + gateKillL : gateKillS != "" ? "NO · " + gateKillS :
+             dirLock != 0 ? "NO · " + (dirLock == 1 ? "long" : "short") + " narrative live" :
+             poiConflict ? "NO · POI conflict (demand / supply " + str.tostring(nsBot - nbTop, format.mintick) + " apart)" :
+             htfB == 0 and neutralMode == "Block both sides" ? "NO · neutral bias" :
              not sbOnlyOK ? "NO · outside SB windows" :
              regime == "CHOP" and not chopOKL and not chopOKS ? "NO · chop" :
              inNews and timeframe.isintraday and useNews and not newsOK ? "NO · volatility window" :
@@ -4794,11 +4974,16 @@ alertcondition(not inNews and inNews[1], "[CTX] Volatility window ended",   "Sch
 // 64-output limit). WHICH pattern armed / exact class (HIGH vs VERY HIGH) /
 // score / level come via the dynamic alert() messages: create ONE alert on
 // "Any alert() function call" for the detailed feed.
+// FIX-V6: a trap signal is a graded engine entry now — it also fires "Any LONG /
+// SHORT". The two HIGH+ conditions were dropped (class travels in the alert() feed).
 alertcondition(ltArmEvt, "[LT] Trap setup detected", "Liquidity-trap setup armed on {{ticker}} {{interval}} — waiting for confirmation (pattern in the alert() feed)")
-alertcondition(ltLongSig,  "[LT] Bullish trap confirmation", "Liquidity-trap LONG confirmed on {{ticker}} {{interval}} — see label for pattern + score")
-alertcondition(ltShortSig, "[LT] Bearish trap confirmation", "Liquidity-trap SHORT confirmed on {{ticker}} {{interval}} — see label for pattern + score")
-alertcondition(ltLongSig  and ltLongScore  >= ltScoreHigh, "[LT] HIGH+ confidence BUY",  "HIGH/VERY-HIGH-confidence liquidity-trap BUY on {{ticker}} {{interval}} — exact class in the alert() feed")
-alertcondition(ltShortSig and ltShortScore >= ltScoreHigh, "[LT] HIGH+ confidence SELL", "HIGH/VERY-HIGH-confidence liquidity-trap SELL on {{ticker}} {{interval}} — exact class in the alert() feed")
+alertcondition(sigLTLong  and anyLong,  "[LT] Bullish trap entry", "Liquidity-trap LONG entry on {{ticker}} {{interval}} — pattern + class in the label")
+alertcondition(sigLTShort and anyShort, "[LT] Bearish trap entry", "Liquidity-trap SHORT entry on {{ticker}} {{interval}} — pattern + class in the label")
+// ---- LT dynamic alerts (create one "Any alert() function call" alert) -------------
+if ltDynAlert and sigLTLong and anyLong
+    alert("◬ LT BUY " + syminfo.ticker + " " + timeframe.period + " · " + ltLPats + " · " + f_ltCls(ltLongScore) + " " + str.tostring(ltLongScore) + " · level " + str.tostring(ltLLevel, format.mintick) + " · E " + str.tostring(entryP, format.mintick) + " SL " + str.tostring(slP, format.mintick) + " TP2 " + str.tostring(tp2P, format.mintick), alert.freq_once_per_bar_close)
+if ltDynAlert and sigLTShort and anyShort
+    alert("◬ LT SELL " + syminfo.ticker + " " + timeframe.period + " · " + ltSPats + " · " + f_ltCls(ltShortScore) + " " + str.tostring(ltShortScore) + " · level " + str.tostring(ltSLevel, format.mintick) + " · E " + str.tostring(entryP, format.mintick) + " SL " + str.tostring(slP, format.mintick) + " TP2 " + str.tostring(tp2P, format.mintick), alert.freq_once_per_bar_close)
 
 // ◆ SILVER BULLET — ONE consolidated alertcondition. The 64-output plot budget
 // is FULL (8 plot + 14 plotchar + 5 bgcolor + 37 alertcondition = 64), so every
