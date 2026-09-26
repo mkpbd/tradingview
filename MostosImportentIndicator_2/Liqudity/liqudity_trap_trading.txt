@@ -670,7 +670,7 @@ sbTrail    = input.bool(true, "Trail behind the protected swing after TP2", grou
 grpSBv = "◆ Silver Bullet — visuals / alerts"
 sbPaint    = input.bool(true, "Highlight the active SB window", group = grpSBv)
 sbShowBox  = input.bool(true, "Draw the SB window range box", group = grpSBv)
-sbBoxKeep  = input.int(4, "SB window boxes kept", minval = 1, maxval = 10, group = grpSBv)
+sbBoxKeep  = input.int(2, "SB window boxes kept", minval = 1, maxval = 10, group = grpSBv)
 sbShowPlan = input.bool(true, "Show the locked SB FVG (CE) + the planned exit levels", group = grpSBv)
 sbDynAlert = input.bool(true, "Dynamic alert() messages for every SB event", group = grpSBv,
      tooltip = "The 64-output plot budget is FULL, so SB detail travels via alert(). Create ONE alert on Any alert() function call for the SB feed.")
@@ -1138,10 +1138,10 @@ if sbOn and sbShowBox
             sbBoxLo := math.min(nz(sbBoxLo, low),  low)
     else if confirmed and nz(sbWinNow[1]) != 0 and not na(sbBoxHi)
         array.push(sbBoxes, box.new(sbBoxX1, sbBoxHi, bar_index, sbBoxLo,
-             border_color = color.new(color.teal, 35), bgcolor = color.new(color.teal, 94),
+             border_color = color.new(color.teal, 55), bgcolor = color.new(color.teal, 97),
              border_style = line.style_dotted,
-             text = "◆ SB " + f_sbWinTxt(sbBoxWin), text_color = color.new(color.teal, 10),
-             text_size = drawSize, text_halign = text.align_left, text_valign = text.align_top))
+             text = "SB " + f_sbWinTxt(sbBoxWin), text_color = color.new(color.teal, 30),
+             text_size = size.tiny, text_halign = text.align_center, text_valign = text.align_top))
         sbBoxHi := na
         sbBoxLo := na
         if array.size(sbBoxes) > sbBoxKeep
