@@ -39,6 +39,11 @@
 //      sat in RANGE inside trends: displacement also = close beyond level by 0.3 ATR, range gate
 //      0.8 → 0.6 ATR, and only trend-aligned weak breaks feed the failed-follow-through counter ·
 //      opposite-side override needs +2 · weak RJB no longer created · panel prints KL not SR.
+//  R2  gold 5m failed-trade review: LH + close through the last pivot low (HL + close through the
+//      last pivot high) is now a CHoCH on LTF and HTF — the far-away leg-origin protected swing kept
+//      a two-week decline "BULLISH → RANGE" and let four M39 longs fire into it · fading the LTF
+//      trend costs −1 · continuation modules (M02 / M05 / M14 / M15) ignore internal breaks ·
+//      M10 will not fade a strong displacement younger than 10 bars.
 //  Removed inputs: Wyckoff lookback / width, hidden-liquidity candles / wick. New inputs: structure
 //      displacement gate, follow-through window, failed-follow-throughs, CISD sweep gate, session
 //      timezone, sweep qualification, grade thresholds, zone entry trigger + window.
@@ -495,6 +500,7 @@ type Sx
     float stBrkLvl = na
     int   stBrkBar = -999
     int   stFail = 0          // consecutive failed follow-throughs → RANGE at 2
+    bool  brkInternal = false // R2 — the last level break was a counter-trend internal one
     // S10 CISD reference = open of the series that delivered the leg extreme
     float cisdUpRef = na
     int   cisdUpRefBar = 0
@@ -1011,13 +1017,17 @@ f_structure(cf, cx, sx, swH, swL, aN, dispOk, dDist, pendBars, failMax) =>
             else
                 s.bearBOS := true
             sx.stPendDir := 0
-    chUp = cx.trend == "BEARISH" and not na(cx.majorHigh) and close > cx.majorHigh
-    chDn = cx.trend == "BULLISH" and not na(cx.majorLow)  and close < cx.majorLow
+    // R2 (gold review) — the protected swing is the leg ORIGIN, which after a long leg sits far away;
+    // a two-week decline of LH + LL never reached it, so every break stayed "internal" and the trend
+    // read BULLISH → RANGE. ICT rule: in a bull trend a LOWER high followed by a close through the
+    // last pivot low IS the change of character. Same for HL + close through the last pivot high.
+    chUp = cx.trend == "BEARISH" and ((not na(cx.majorHigh) and close > cx.majorHigh) or (brkUp and sx.loType == "HL"))
+    chDn = cx.trend == "BULLISH" and ((not na(cx.majorLow)  and close < cx.majorLow)  or (brkDn and sx.hiType == "LH"))
     // R1 — displacement = strong candle OR a close that clears the level by dDist
     dBrkUp = dispOk or (not na(cx.curHigh)   and close - cx.curHigh   >= dDist)
-    dChUp  = dispOk or (not na(cx.majorHigh) and close - cx.majorHigh >= dDist)
+    dChUp  = dispOk or (not na(cx.majorHigh) and close - cx.majorHigh >= dDist) or dBrkUp
     dBrkDn = dispOk or (not na(cx.curLow)    and cx.curLow  - close   >= dDist)
-    dChDn  = dispOk or (not na(cx.majorLow)  and cx.majorLow - close  >= dDist)
+    dChDn  = dispOk or (not na(cx.majorLow)  and cx.majorLow - close  >= dDist) or dBrkDn
     evtAny = s.bullBOS or s.bearBOS or s.bullCHoCH or s.bearCHoCH
     // bull side
     if (brkUp or chUp) and not evtAny
@@ -2053,8 +2063,12 @@ f_htf(cf, cx, fv, isNew, o1, h1, l1, c1, o2, h2, l2, c2, ph, pl) =>
         // Fall back to the last pivot as the protected swing.
         protH = nz(cx.hMajorHigh, cx.hCurHigh)
         protL = nz(cx.hMajorLow,  cx.hCurLow)
-        chUpH = cx.hTrend == "BEAR" and not na(protH) and c1 > protH
-        chDnH = cx.hTrend == "BULL" and not na(protL) and c1 < protL
+        // R2 — LH + close through the last pivot low (or HL + close through the last pivot high) is a
+        // change of character even when the protected swing sits far away
+        lhH = not na(cx.hPrevHigh) and not na(cx.hCurHigh) and cx.hCurHigh < cx.hPrevHigh
+        hlH = not na(cx.hPrevLow)  and not na(cx.hCurLow)  and cx.hCurLow  > cx.hPrevLow
+        chUpH = cx.hTrend == "BEAR" and ((not na(protH) and c1 > protH) or (bBrk and hlH))
+        chDnH = cx.hTrend == "BULL" and ((not na(protL) and c1 < protL) or (sBrk and lhH))
         if dispH
             if chUpH
                 cx.hTrend    := "BULL"
@@ -2303,6 +2317,10 @@ ft.breakUp := st.bullBOS or st.weakBullBOS or st.internalBullBOS or ft.runUp
 ft.breakDn := st.bearBOS or st.weakBearBOS or st.internalBearBOS or ft.runDn
 if ft.breakUp or ft.breakDn
     ctx.breakDir := ft.breakUp ? 1 : -1
+    // R2 — a counter-trend internal break is a trap candidate (M01 / M62 / M72), not a breakout to
+    // continue (M02 / M05 / M14 / M15): the gold review chart bought a bullish pin on an internal
+    // break inside a bear leg and got run over
+    sx.brkInternal := st.internalBullBOS or st.internalBearBOS
     // a RUN break carries its own level (runPrice); only a sweep carries sweptPrice
     stUp = st.bullBOS or st.weakBullBOS or st.internalBullBOS
     stDn = st.bearBOS or st.weakBearBOS or st.internalBearBOS
@@ -2316,8 +2334,9 @@ ft.breakAgo   := bar_index - ctx.breakBar
 ft.fakeBreak  := ft.breakAgo == 1 and not na(ctx.breakLvl) and (ctx.breakDir == 1 ? close < ctx.breakLvl : close > ctx.breakLvl)
 ft.insideOk   := ft.breakAgo == 1 and cd.insideBar and not na(ctx.breakLo) and
                  (ctx.breakDir == 1 ? low >= ctx.breakLo + (ctx.breakHi - ctx.breakLo) * 0.5 : high <= ctx.breakHi - (ctx.breakHi - ctx.breakLo) * 0.5)
-ft.breakPinBull := ft.breakUp and cd.pinBull and not na(ctx.breakLvl) and low < ctx.breakLvl
-ft.breakPinBear := ft.breakDn and cd.pinBear and not na(ctx.breakLvl) and high > ctx.breakLvl
+ft.breakPinBull := ft.breakUp and not sx.brkInternal and cd.pinBull and not na(ctx.breakLvl) and low < ctx.breakLvl
+ft.breakPinBear := ft.breakDn and not sx.brkInternal and cd.pinBear and not na(ctx.breakLvl) and high > ctx.breakLvl
+contBrk = not sx.brkInternal        // R2 — continuation-after-break modules need a structural break
 
 // wick dominance over the last 8 bars (M38 P3/P5)
 lowerCnt = 0
@@ -2677,9 +2696,9 @@ trigBear = immMode ? revBear : poiConfS
 // ── candidates: [cond, name, dir(+1/-1), base score, note] ───────────────────
 // A — price action
 s01 = en_M01 and ctx.breakDir == 1 and brkWin and brkTouchOk and ft.upWickInc and cd.isBear and cd.bodyRatio >= 0.5 and close < ctx.breakLvl
-s02 = en_M02 and ctx.breakDir == 1 and brkWin and brkTouchOk and ft.upWickDec and (cd.pinBull or cd.engulfBull)
+s02 = en_M02 and contBrk and ctx.breakDir == 1 and brkWin and brkTouchOk and ft.upWickDec and (cd.pinBull or cd.engulfBull)
 s01b = en_M01 and ctx.breakDir == -1 and brkWin and brkTouchOk and ft.dnWickInc and cd.isBull and cd.bodyRatio >= 0.5 and close > ctx.breakLvl
-s02b = en_M02 and ctx.breakDir == -1 and brkWin and brkTouchOk and ft.dnWickDec and (cd.pinBear or cd.engulfBear)
+s02b = en_M02 and contBrk and ctx.breakDir == -1 and brkWin and brkTouchOk and ft.dnWickDec and (cd.pinBear or cd.engulfBear)
 // M03 — inside bar after breakout, entry on close beyond the inside bar (state kept in ctx.breakHi/Lo of the IB)
 var float ibHigh = na
 var float ibLow  = na
@@ -2697,8 +2716,8 @@ if s03 or s03b
 s04  = en_M04 and zoneOkBear and ft.zs.depStrong and ft.dojiInLeg >= cfg.dojiCountMin and strongRevBear
 s04b = en_M04 and zoneOkBull and ft.zb.depStrong and ft.dojiInLeg >= cfg.dojiCountMin and strongRevBull
 // B — pin bars
-s05  = en_M05 and ctx.breakDir == 1  and ft.breakAgo == 1 and cd.pinBull
-s05b = en_M05 and ctx.breakDir == -1 and ft.breakAgo == 1 and cd.pinBear
+s05  = en_M05 and contBrk and ctx.breakDir == 1  and ft.breakAgo == 1 and cd.pinBull
+s05b = en_M05 and contBrk and ctx.breakDir == -1 and ft.breakAgo == 1 and cd.pinBear
 s06  = en_M06 and bullTrend and retrace and ft.pinBullInLeg >= cfg.pinCountMin and zoneOkBull and cd.pinBull
 s06b = en_M06 and bearTrend and retrace and ft.pinBearInLeg >= cfg.pinCountMin and zoneOkBear and cd.pinBear
 w07  = en_M07 and bullTrend and not retrace and ft.pinBullInLeg >= 2 and cd.pinBull
@@ -2711,8 +2730,12 @@ s09  = en_M09 and zoneOkBull and cd.pinBull and cd.dnWickRatio >= 0.65 and ft.bs
 s09b = en_M09 and zoneOkBear and cd.pinBear and cd.upWickRatio >= 0.65 and ft.sslBelow >= 2
 // C — liquidity hunting (IMMEDIATE mode: sweep candle itself rejects)
 // S5 — a qualified level stands on its own; a plain pivot sweep only counts inside a zone
-s10  = en_M10 and (ft.sweptLowQ  or (ft.sweptLow  and ft.zb.kind != "")) and cd.dnWickRatio >= cfg.sweepWickMin and close > ft.sweptPriceLo
-s10b = en_M10 and (ft.sweptHighQ or (ft.sweptHigh and ft.zs.kind != "")) and cd.upWickRatio >= cfg.sweepWickMin and close < ft.sweptPriceHi
+// R2 — do not fade a fresh STRONG displacement: the gold chart shorted a sweep 4 bars into a V-rally
+// that had just printed a displaced BOS with FVG, and the rally ran another 70 points
+freshDispUp = ctx.breakDir == 1  and bar_index - ctx.breakBar <= 10 and ctx.lastDepStrong
+freshDispDn = ctx.breakDir == -1 and bar_index - ctx.breakBar <= 10 and ctx.lastDepStrong
+s10  = en_M10 and not freshDispDn and (ft.sweptLowQ  or (ft.sweptLow  and ft.zb.kind != "")) and cd.dnWickRatio >= cfg.sweepWickMin and close > ft.sweptPriceLo
+s10b = en_M10 and not freshDispUp and (ft.sweptHighQ or (ft.sweptHigh and ft.zs.kind != "")) and cd.upWickRatio >= cfg.sweepWickMin and close < ft.sweptPriceHi
 // D — S/R
 var float dojiHi = na
 var float dojiLo = na
@@ -2731,8 +2754,8 @@ s11b = en_M11 and bar_index - dojiBar == 1 and close < dojiLo and close < dojiZb
 // §M12: trendline and a flipped S/R overlap (both are "at price" here) — or a key level as fallback
 s12  = en_M12 and zoneOkBull and ft.zb.flipped and (ft.atTLsup or ft.zb.kl >= 3) and trigBull
 s12b = en_M12 and zoneOkBear and ft.zs.flipped and (ft.atTLres or ft.zs.kl >= 3) and trigBear
-s14  = en_M14 and ctx.breakDir == 1  and ft.breakAgo == 1 and low  < ctx.breakLvl and cd.pinBull and close > ctx.breakLvl
-s14b = en_M14 and ctx.breakDir == -1 and ft.breakAgo == 1 and high > ctx.breakLvl and cd.pinBear and close < ctx.breakLvl
+s14  = en_M14 and contBrk and ctx.breakDir == 1  and ft.breakAgo == 1 and low  < ctx.breakLvl and cd.pinBull and close > ctx.breakLvl
+s14b = en_M14 and contBrk and ctx.breakDir == -1 and ft.breakAgo == 1 and high > ctx.breakLvl and cd.pinBear and close < ctx.breakLvl
 s15  = en_M15 and ft.breakPinBull
 s15b = en_M15 and ft.breakPinBear
 // E — volume
@@ -3271,6 +3294,8 @@ f_conf(fv, trendStr, isLong) =>
     sc = 1
     sc += (isLong and fv.htfBias == "BULL") or (not isLong and fv.htfBias == "BEAR") ? 1 : 0
     sc += (isLong and trendStr == "BULLISH") or (not isLong and trendStr == "BEARISH") ? 1 : 0
+    // R2 — fading the LTF trend costs a point (it used to be merely "no bonus")
+    sc -= (isLong and trendStr == "BEARISH") or (not isLong and trendStr == "BULLISH") ? 1 : 0
     sc += zz.depStrong and fv.arrivalWeak ? 1 : 0
     sc += (isLong and fv.bslAbove >= 1) or (not isLong and fv.sslBelow >= 1) ? 1 : 0
     sc += zz.kind != "" and zz.touches <= 1 ? 1 : 0
