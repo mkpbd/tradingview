@@ -422,6 +422,9 @@
 //   FIX-V13 (v3.3.1) An HTF gap taller than `hPoiNextMaxAtr` × ATR cannot be the
 //           NEXT level (a 2,900-pt 240m gap hijacked NEXT BUY on BTC 15m), and
 //           the POI-conflict test only compares chart-TF zones.
+//   FIX-V14 (v3.3.1) `fastShift`: the ordinary machine may go SWEPT → SHIFTED on
+//           a displaced shift while the sweep is in play (2022 model), anchoring
+//           on the shift-leg FVG — it no longer dies waiting for a POI tap.
 //   Budget  plot 8 + plotchar 14 + bgcolor 5 + alertcondition 35 = 62 of 64.
 indicator("Liquidity + S/D + Price Action [MTF] v3.3", "LQ-SD-PA v3.3", overlay = true,
      max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500)
@@ -732,6 +735,14 @@ armNeedHtf = input.bool(true, "Machine: do not arm against the HTF bias", group 
 // POI and a short arming three bars later was legal. One narrative at a time.
 oneDir = input.bool(true, "One direction at a time (machine · engines · traps)", group = grpQ,
      tooltip = "While a trade is open, or a setup is AT POI or beyond, the opposite side may not arm, fire or confirm a trap. Turn OFF for v3.2.2 behaviour.")
+// ◆ FIX-V14 (v3.3.1): the ordinary chain was sweep → POI → shift → retest, in
+// that order only. A live BTC 5m chart swept the high, printed a displaced
+// external CHoCH and fell 2,000 points — and the machine sat in SWEPT waiting
+// for a supply tap that never came ("sweep expired (no POI tap)"). Sweep →
+// displacement shift → retest of the shift-leg FVG is the 2022 model; the raid
+// IS the POI. Same rule the SB path already uses (FIX-V9b).
+fastShift = input.bool(true, "Machine: a displaced shift while the sweep is in play skips the POI stage", group = grpQ,
+     tooltip = "ON: sweep → shift goes straight to SHIFTED and anchors on the shift-leg FVG (2022 model). OFF: v3.3 order, the setup must tap a zone / HTF POI before the shift counts.")
 
 grpR = "Risk / TP / SL"
 showTrade = input.bool(true, "Show entry / SL / TP of last signal", group = grpR)
@@ -3685,7 +3696,7 @@ if confirmed
                 sbArmedSslBar := lastSslBar     // SB-9: this sweep is spent
     // ◆ FIX-V9b (F-10): in the SB model the raid IS the POI — a displaced shift
     // while the sweep is in play goes straight to stage 3 (anchor = shift-leg FVG)
-    if suL == 1 and sbTagL != 0 and sslInPlay and (sbReqMss ? mssUp : sbShiftUp)
+    if suL == 1 and sslInPlay and (sbTagL != 0 ? (sbReqMss ? mssUp : sbShiftUp) : (fastShift and shiftUpOk))   // FIX-V14
         suL := 3
         suLBar := bar_index
         sbShiftGL := mssUp ? 2 : 1
@@ -3807,7 +3818,7 @@ if confirmed
             armedBslBar := lastBslBar           // FIX-T3: this sweep is spent
             if sbArmOkS
                 sbArmedBslBar := lastBslBar     // SB-9: this sweep is spent
-    if suS == 1 and sbTagS != 0 and bslInPlay and (sbReqMss ? mssDn : sbShiftDn)   // FIX-V9b
+    if suS == 1 and bslInPlay and (sbTagS != 0 ? (sbReqMss ? mssDn : sbShiftDn) : (fastShift and shiftDnOk))   // FIX-V9b · FIX-V14
         suS := 3
         suSBar := bar_index
         sbShiftGS := mssDn ? 2 : 1
