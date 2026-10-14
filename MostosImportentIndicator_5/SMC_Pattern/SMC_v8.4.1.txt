@@ -2,20 +2,27 @@
 // =============================================================================
 //  SMC / ICT SUITE  —  v8.4.1  (single-file build)
 //
-//  ── v8.4.1 CHANGELOG (SMC_v8.4.0_FORENSIC_AUDIT.md — stage 1 of SMC_IMPROVEMENT_ROADMAP.md) ────
-//  F2   f_stop takes a reference low / high (the reaction candle's extreme kept by the POI state
-//       machine, sx.poiLowL / sx.poiHighS) and places the stop beyond min(zone edge, reaction wick).
-//       It used to read the zone edge alone, so a reaction wick that pierced the zone left the
-//       published SL INSIDE the wick while the engine's own invalidation (poiLowL) sat below it.
-//  F3   FVG-only taps (no zone in the slot) used the CONFIRM candle's low as the stop; same fix.
-//  F11  a two-bar sweep (close beyond the level, close back within failedCloseBars) is flagged on
-//       the second bar: M10's wick test now reads the better of this bar and the previous bar
-//       (ctx.dnR2 / upR2), and the stop reference covers the last three lows / highs in IMMEDIATE
-//       mode and for the non-POI modules.
-//       f_stop and f_sig gain two parameters (2 call sites each). No input, module or label changed.
-//  PERF-1 PD-array leg extremes carried in Sx instead of ta.highest / ta.lowest with a series length
-//       (up to 491) on every bar — the one unconditional O(500) scan in the build ("Calculation timed
-//       out" on a deep chart after the stage-1 compile). Full rescan only when the anchor moves.
+//  ── v8.4.1 CHANGELOG (REVIEW_v8.4.0_BN.md) ──────────────────────────────────────────────
+//  H1  R2 CHoCH (LH / HL form) recorded majorHigh / majorLow as the broken level, which in that form is
+//      the far-away protected swing (or na): the weak-form pending break could never be promoted, the
+//      failed-follow-through counter saw a bogus fail on the next bar, and the CHoCH line was drawn at
+//      the wrong price. Struct.chLvl / chIdx now carry the level the close actually went through; the
+//      pending break, stBrkLvl, the leg origin and the line read it. Side effect: in the LH/HL form the
+//      protected swing is the HL (LH) that produced the shift, not the leg's LL (HH).
+//  H2  CONFIRMED / MSS mode: zoneOkBull re-demanded ft.sweptLow on the CONFIRMING bar, but the §6.2
+//      sweep happened on the tap bar — every sweep-required zone was silent in the default mode. An
+//      armed POI (poiArmL / poiArmS) now satisfies the rule it already passed when it was armed.
+//  H3  zone-based SL ignored the reaction candle's wick through the zone (and, in CONFIRMED mode, the
+//      lows printed between tap and confirm). f_stop takes the setup extreme `x` (this candle in
+//      IMMEDIATE, lowest / highest since the tap otherwise) and stops beyond BOTH the zone and x.
+//  M1  min risk: 20 ticks is 0.2 pip on EURUSD. New input "… or × ATR" (0.3) — the floor is the larger.
+//  M2  alert message: grade, TP2, risk, R:R and TP1 provenance added.
+//  NEW ICT true-day open (00:00 New York): long below it / short above it = +1 in f_conf (input, on).
+//      Panel Session row shows the side of the open.
+//  CUT M44 M47 M48 M49 M50 M52 M53 (the v8.4.0 "next cuts" list; all default-OFF tier-1 modules, which
+//      at score = 2 + confluence cannot reach the minimum of 8 in practice) with their plumbing: M48 /
+//      M52 arming, §M49 internal-liquidity block, the range-break tracker, rngLr, i_m53Alt, 16 Ctx and
+//      3 Feat fields. Net token change is negative (estimate −1,400); compile to confirm.
 //
 //  ── v8.4.0 CHANGELOG (REVIEW_v8.3.2_BN.md — entry-accuracy pass) ──────────────────
 //  P0-A Zone entry trigger default CONFIRMED (+ new MSS mode). M08 / M09 / M36 now read trigBull
@@ -326,6 +333,8 @@ type Struct
     bool   pbValidDn = false
     bool   cisdBull  = false
     bool   cisdBear  = false
+    float  chLvl     = na     // v8.4.1 H1 — the level a CHoCH closed through (protected swing or last pivot)
+    int    chIdx     = 0
     string trend     = "RANGE"
     string movePhase = "IMPULSIVE"
 
@@ -468,37 +477,22 @@ type Ctx
     int   arrivalDir = 0
     float arrivalAvgBody = 0.0
     float arrivalMixed = 0.0
-    float rangeHi = na
-    float rangeLo = na
-    bool  inRangePrev = false
-    int   rangeBrkDir = 0
-    int   rangeBrkBar = -999
     int   m41Dir = 0
     int   m41Bar = -999
     int   m45Dir = 0
     int   m45Bar = -999
     int   m46Dir = 0
     int   m46Bar = -999
-    int   m48Dir = 0
-    int   m48Bar = -999
-    int   m52Dir = 0
-    int   m52Bar = -999
     int   m54Stage = 0
     int   m54Bar = -999
     int   m54StageB = 0
     int   m54BarB = -999
-    int   demandTouchBar = -999
-    int   supplyTouchBar = -999
     int   bullFvgBar = -999
     int   bearFvgBar = -999
     string lastEvt = "—"
     int   lastEvtBar = -999
     bool  fiftyPrev = false
     int   brkTouch = 0
-    float intLowB = na
-    float intHighB = na
-    int   intSwpBull = -999
-    int   intSwpBear = -999
     int   legIdx = 0
     float legPx = na
 
@@ -597,11 +591,6 @@ type Sx
     float hFvgBB = na
     float hFvgST = na
     float hFvgSB = na
-    // PERF-1 (v8.4.1) — running leg extremes for the PD array; rebuilt only when the anchor moves
-    float pdHiRun = na
-    int   pdHiFrom = -1
-    float pdLoRun = na
-    int   pdLoFrom = -1
 
 // L2..L5 per-bar flags (feature vector) — setups read ONLY cd / st / ft
 type Feat
@@ -673,7 +662,6 @@ type Feat
     bool   chochReal = false
     bool   retestValid = false
     bool   inRange = false
-    bool   rangeShrink = false
     bool   atBullFvg = false
     bool   atBearFvg = false
     // §M7 — these are sweep + BOS, not sweep + CHoCH. The old names claimed CHoCH and a BOS
@@ -690,8 +678,6 @@ type Feat
     bool   atTLres = false
     bool   incomplete = false
     int    brkTouches = 0
-    bool   intSweptBull = false
-    bool   intSweptBear = false
     bool   brkTimeOk = false
     int    cisdRel = 0
     string sessName = ""
@@ -811,7 +797,7 @@ i_sweepWick = input.float(0.50, "SWEEP min wick ratio", minval = 0.0, maxval = 1
 // S5 — which sweeps arm the sweep-based setups. A pivot that is merely the 50-bar extreme is the
 // common case on a low timeframe, so it is opt-in.
 i_sweepQual = input.string("Major only", "Sweep arms setups when the level is", options = ["Major only", "Include external"], group = gL,
-     tooltip = "Major only = pooled (EQH/EQL, ≥2 touches), PDH/PDL, PWH/PWL, SESH/SESL · Include external = also the ext-lookback extreme. Other pivot sweeps are 'internal' and only feed M49 / M53 / the zone sweep-required rule.")
+     tooltip = "Major only = pooled (EQH/EQL, ≥2 touches), PDH/PDL, PWH/PWL, SESH/SESL · Include external = also the ext-lookback extreme. Other pivot sweeps are 'internal' and only feed the zone sweep-required rule.")
 i_failBars  = input.int(2,   "Failed-close window (bars)", minval = 1, maxval = 5, group = gL)
 i_maxLevels = input.int(30,  "Max liquidity levels", minval = 5, maxval = 150, group = gL)
 
@@ -863,9 +849,9 @@ i_pinCnt    = input.int(2,   "Pin bars in leg (M06/M07)", minval = 1, group = gX
 i_dojiCnt   = input.int(2,   "Dojis in leg (M04)", minval = 1, group = gX, inline = "n")
 i_retestBR  = input.float(0.7, "Retest body ratio (M31)", minval = 0.2, maxval = 1.0, step = 0.05, group = gX)
 i_nearZone  = input.float(3.0, "Liquidity scan distance × ATR (M09)", minval = 0.5, step = 0.5, group = gX)
-i_rangeLen  = input.int(20,  "Range detection length (M50/M53)", minval = 5, group = gX, inline = "r")
+i_rangeLen  = input.int(20,  "Range detection length (panel regime row)", minval = 5, group = gX, inline = "r")
 i_rangeMax  = input.float(3.0, "Range max width × ATR", minval = 0.5, step = 0.5, group = gX, inline = "r")
-i_armBars   = input.int(30,  "Armed setup stays valid N bars (M41/45/46/48/52/54)", minval = 5, maxval = 200, group = gX)
+i_armBars   = input.int(30,  "Armed setup stays valid N bars (M41/45/46/54/58/62/68)", minval = 5, maxval = 200, group = gX)
 // S11 (audit RC4) — the zone modules used to fire on the first reversal candle inside the POI.
 // CONFIRMED waits for that candle's high to be closed through (micro-MSS) or for a fresh FVG in
 // the trade direction, within the window below; the zone snapshot is kept for the SL / score.
@@ -874,7 +860,6 @@ i_armBars   = input.int(30,  "Armed setup stays valid N bars (M41/45/46/48/52/54
 i_entryConfirm = input.string("CONFIRMED", "Zone entry trigger", options = ["IMMEDIATE", "CONFIRMED", "MSS"], group = gX, inline = "pc",
      tooltip = "IMMEDIATE = reversal candle at the POI (v8.2 behaviour) · CONFIRMED = reversal candle, then a close beyond its extreme or a displacement FVG away from the POI · MSS = same, but the close must clear the highest high (lowest low) of the 5 bars before the reaction candle. For MSS set the window to ~12.")
 i_poiBars   = input.int(8, "confirm within (bars)", minval = 2, maxval = 30, group = gX, inline = "pc")
-i_m53Alt    = input.bool(false, "M53 alternative entry: buy the range break-UP (lower win-rate)", group = gX)
 
 // ── NEW · Premium / Discount array (ICT) ─────────────────────────────────────
 gPD = "9a · Premium / Discount + Sessions"
@@ -901,6 +886,9 @@ i_ssnFx    = input.bool(true, "Killzone filter auto-on for forex / CFD symbols",
      tooltip = "P0-D. On a forex or CFD symbol (OANDA gold, indices) the 'Only signal inside a killzone' filter is applied even when that box is off. Crypto / stocks are not affected.")
 i_ssnLvl   = input.bool(true,  "Asia session high / low as liquidity levels (SESH / SESL)", group = gPD,
      tooltip = "Plotted when the Asia window ends and treated as external liquidity — the Asia-range sweep into a London reversal is the most repeatable ICT pattern.")
+// v8.4.1 — ICT true-day open
+i_nyOpen   = input.bool(true,  "Score NY midnight open (buy below it / sell above it)", group = gPD,
+     tooltip = "ICT true-day open = the 00:00 New York open. A long taken below it or a short above it earns a confluence point. Score only, never a gate. Intraday only.")
 
 i_cBull  = input.color(#089981, "Bull", group = gV, inline = "c1")
 i_cBear  = input.color(#F23645, "Bear", group = gV, inline = "c1")
@@ -1089,6 +1077,8 @@ f_structure(cf, cx, sx, swH, swL, aN, dispOk, dDist, pendBars, failMax) =>
             promUp := true
             if sx.stPendKind == 2
                 s.bullCHoCH := true
+                s.chLvl     := sx.stPendLvl
+                s.chIdx     := sx.stPendFrom
             else
                 s.bullBOS := true
             sx.stPendDir := 0
@@ -1096,6 +1086,8 @@ f_structure(cf, cx, sx, swH, swL, aN, dispOk, dDist, pendBars, failMax) =>
             promDn := true
             if sx.stPendKind == 2
                 s.bearCHoCH := true
+                s.chLvl     := sx.stPendLvl
+                s.chIdx     := sx.stPendFrom
             else
                 s.bearBOS := true
             sx.stPendDir := 0
@@ -1103,8 +1095,17 @@ f_structure(cf, cx, sx, swH, swL, aN, dispOk, dDist, pendBars, failMax) =>
     // a two-week decline of LH + LL never reached it, so every break stayed "internal" and the trend
     // read BULLISH → RANGE. ICT rule: in a bull trend a LOWER high followed by a close through the
     // last pivot low IS the change of character. Same for HL + close through the last pivot high.
-    chUp = cx.trend == "BEARISH" and ((not na(cx.majorHigh) and close > cx.majorHigh) or (brkUp and sx.loType == "HL"))
-    chDn = cx.trend == "BULLISH" and ((not na(cx.majorLow)  and close < cx.majorLow)  or (brkDn and sx.hiType == "LH"))
+    chUpMaj = cx.trend == "BEARISH" and not na(cx.majorHigh) and close > cx.majorHigh
+    chDnMaj = cx.trend == "BULLISH" and not na(cx.majorLow)  and close < cx.majorLow
+    chUp = chUpMaj or (cx.trend == "BEARISH" and brkUp and sx.loType == "HL")
+    chDn = chDnMaj or (cx.trend == "BULLISH" and brkDn and sx.hiType == "LH")
+    // v8.4.1 H1 — the level the CHoCH actually closed through: the protected swing, or in the R2 form the
+    // last pivot. Recording majorHigh for the R2 form left the pending break / failed-follow-through
+    // counter / CHoCH line pointing at a level far from price (or na).
+    chUpLvl = chUpMaj ? cx.majorHigh    : cx.curHigh
+    chUpIdx = chUpMaj ? cx.majorHighIdx : cx.curHighIdx
+    chDnLvl = chDnMaj ? cx.majorLow     : cx.curLow
+    chDnIdx = chDnMaj ? cx.majorLowIdx  : cx.curLowIdx
     // R1 — displacement = strong candle OR a close that clears the level by dDist
     dBrkUp = dispOk or (not na(cx.curHigh)   and close - cx.curHigh   >= dDist)
     dChUp  = dispOk or (not na(cx.majorHigh) and close - cx.majorHigh >= dDist) or dBrkUp
@@ -1116,9 +1117,11 @@ f_structure(cf, cx, sx, swH, swL, aN, dispOk, dDist, pendBars, failMax) =>
         if chUp
             if dChUp
                 s.bullCHoCH := true
+                s.chLvl     := chUpLvl
+                s.chIdx     := chUpIdx
             else
                 s.weakBullBOS := true
-                f_pend(sx, 1, 2, cx.majorHigh, cx.majorHighIdx)
+                f_pend(sx, 1, 2, chUpLvl, chUpIdx)
         else if cx.trend == "BEARISH"
             s.internalBullBOS := true
         else if dBrkUp
@@ -1132,9 +1135,11 @@ f_structure(cf, cx, sx, swH, swL, aN, dispOk, dDist, pendBars, failMax) =>
         if chDn
             if dChDn
                 s.bearCHoCH := true
+                s.chLvl     := chDnLvl
+                s.chIdx     := chDnIdx
             else
                 s.weakBearBOS := true
-                f_pend(sx, -1, 2, cx.majorLow, cx.majorLowIdx)
+                f_pend(sx, -1, 2, chDnLvl, chDnIdx)
         else if cx.trend == "BULLISH"
             s.internalBearBOS := true
         else if dBrkDn
@@ -1144,7 +1149,7 @@ f_structure(cf, cx, sx, swH, swL, aN, dispOk, dDist, pendBars, failMax) =>
             f_pend(sx, -1, 1, cx.curLow, cx.curLowIdx)
     // state changes — only a displaced (or promoted) BOS / CHoCH moves the trend and the protected swing
     if s.bullBOS or s.bullCHoCH
-        fromI = promUp ? sx.stPendFrom : s.bullCHoCH ? cx.majorHighIdx : cx.curHighIdx
+        fromI = promUp ? sx.stPendFrom : s.bullCHoCH ? s.chIdx : cx.curHighIdx
         [oi, op] = f_legOrigin(true, fromI)
         cx.legIdx       := oi
         cx.legPx        := op
@@ -1154,14 +1159,14 @@ f_structure(cf, cx, sx, swH, swL, aN, dispOk, dDist, pendBars, failMax) =>
         cx.barsSinceEvt := 0
         sx.stFail       := 0
         sx.stBrkDir     := 1
-        sx.stBrkLvl     := s.bullCHoCH ? cx.majorHigh : cx.curHigh
+        sx.stBrkLvl     := s.bullCHoCH ? s.chLvl : cx.curHigh
         sx.stBrkBar     := bar_index
         if s.bullCHoCH
             // §M2 — upside is taken, a fresh downside break is meaningful again
             cx.hiBroken := true
             cx.loBroken := false
     if s.bearBOS or s.bearCHoCH
-        fromI = promDn ? sx.stPendFrom : s.bearCHoCH ? cx.majorLowIdx : cx.curLowIdx
+        fromI = promDn ? sx.stPendFrom : s.bearCHoCH ? s.chIdx : cx.curLowIdx
         [oi, op] = f_legOrigin(false, fromI)
         cx.legIdx       := oi
         cx.legPx        := op
@@ -1171,7 +1176,7 @@ f_structure(cf, cx, sx, swH, swL, aN, dispOk, dDist, pendBars, failMax) =>
         cx.barsSinceEvt := 0
         sx.stFail       := 0
         sx.stBrkDir     := -1
-        sx.stBrkLvl     := s.bearCHoCH ? cx.majorLow : cx.curLow
+        sx.stBrkLvl     := s.bearCHoCH ? s.chLvl : cx.curLow
         sx.stBrkBar     := bar_index
         if s.bearCHoCH
             cx.loBroken := true
@@ -1533,15 +1538,11 @@ f_liq(cf, cx, v, fv, aV, swH, swL, eHi, eLo, pdh, pdl, pwh, pwl, nDay, nWeek, dr
                         if qual
                             fv.sweptHighQ   := true
                             cx.sweptHighBar := bar_index
-                        else
-                            cx.intSwpBear := bar_index
                     else
                         fv.sweptLow := true
                         if qual
                             fv.sweptLowQ   := true
                             cx.sweptLowBar := bar_index
-                        else
-                            cx.intSwpBull := bar_index
                     fv.sweptKind  := f_lvlText(L)
                     if L.isHigh
                         fv.sweptKindHi  := f_lvlText(L)
@@ -2221,8 +2222,6 @@ extLo   = ta.lowest(low,  i_extLB)
 volSma  = ta.sma(volume, i_volLen)
 rngHiN  = ta.highest(high, i_rangeLen)
 rngLoN  = ta.lowest(low,  i_rangeLen)
-rngLr   = ta.linreg(high - low, 8, 0)
-rangeShrinkG = rngLr < rngLr[1]
 [pdhRaw, pdlRaw] = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_on)
 [pwhRaw, pwlRaw] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_on)
 newDay  = i_showPD and timeframe.isintraday and timeframe.change("D")
@@ -2237,6 +2236,11 @@ inNY     = ssnIntra and not na(time(timeframe.period, i_ssnNY, ssnTz))
 // S3 — the Asia range is complete when the Asia window ENDS, not when London opens (the two used to
 // overlap, so SESH/SESL were placed from a partial range)
 asiaEnd  = ssnIntra and not inAsia and inAsia[1]
+// v8.4.1 — ICT true-day open: the open of the first bar at / after 00:00 New York
+nyMid    = ssnIntra and not na(time(timeframe.period, "0000-0005", "America/New_York"))
+var float nyOpen = na
+if nyMid and not nyMid[1]
+    nyOpen := open
 
 // ── ORCHESTRATION — every engine exactly once per bar, in layer order ────────
 ft = Feat.new(zb = ZS.new(), zs = ZS.new())
@@ -2254,12 +2258,6 @@ f_fvg(cfg, ctx, vis, ft, atrV, d_fvg, d_fvgMit)
 // S4 — displacement gate for structure: the breaking candle itself
 dispOk = i_dispGate == "Off" or (cd.bodyRatio >= i_dispBody and cd.rng >= atrV * i_dispRng)
 st = f_structure(cfg, ctx, sx, swingHi, swingLo, atrV, dispOk, atrV * i_dispDist, i_pendBars, i_failMax)
-// S5 — a wick through the last pivot is an INTERNAL sweep (M49 / M53); it no longer arms the
-// HP-OB / M41 / M45 / M54 chain, which wants a qualified liquidity level
-if st.bullSweep
-    ctx.intSwpBear := bar_index
-if st.bearSweep
-    ctx.intSwpBull := bar_index
 
 // L2 strength — only at BOS (departure) and CHoCH (M30 real/fake)
 var Move mv = Move.new()
@@ -2334,33 +2332,10 @@ ft.gateDn := f_gate(cfg, ft.htfBias, gateTrend, false)
 // a bull trend, the price origin of the leg per S4) to the extreme printed since it. The v8.2.1 pivot
 // pair was a few bars wide, so a trend spent most of its time "outside" and PD contributed nothing
 // exactly where buying premium is the mistake. In RANGE the last pivot pair is used.
-// PERF-1 (v8.4.1) — ta.highest / ta.lowest with a series length up to 491 ran on EVERY bar (~1000
-// reads per bar, the one unconditional O(500) cost in the build) and tripped "Calculation timed out"
-// on deep charts. The extreme since the anchor is now carried in Sx: a full scan only when the anchor
-// (majorLowIdx / majorHighIdx) moves, otherwise one max / min per bar. Same value while the leg is
-// shorter than 490 bars; beyond that the old call dropped bars from its window, this one does not.
 pdSpanB = math.min(math.max(bar_index - ctx.majorLowIdx, 0), 490) + 1
 pdSpanS = math.min(math.max(bar_index - ctx.majorHighIdx, 0), 490) + 1
-if sx.pdHiFrom != ctx.majorLowIdx or na(sx.pdHiRun)
-    sx.pdHiFrom := ctx.majorLowIdx
-    hh = high
-    if pdSpanB >= 2
-        for k = 1 to pdSpanB - 1
-            hh := math.max(hh, high[k])
-    sx.pdHiRun := hh
-else
-    sx.pdHiRun := math.max(sx.pdHiRun, high)
-if sx.pdLoFrom != ctx.majorHighIdx or na(sx.pdLoRun)
-    sx.pdLoFrom := ctx.majorHighIdx
-    ll = low
-    if pdSpanS >= 2
-        for k = 1 to pdSpanS - 1
-            ll := math.min(ll, low[k])
-    sx.pdLoRun := ll
-else
-    sx.pdLoRun := math.min(sx.pdLoRun, low)
-pdHiB   = sx.pdHiRun
-pdLoS   = sx.pdLoRun
+pdHiB   = ta.highest(high, pdSpanB)
+pdLoS   = ta.lowest(low, pdSpanS)
 bullPD  = st.trend == "BULLISH" and not na(ctx.majorLow)
 bearPD  = st.trend == "BEARISH" and not na(ctx.majorHigh)
 pdHi = bullPD ? pdHiB : bearPD ? ctx.majorHigh : ctx.curHigh
@@ -2474,26 +2449,6 @@ ctx.fiftyPrev := fiftyNow
 // ── P7b features ─────────────────────────────────────────────────────────────
 // range (§8 helper): no BOS/CHoCH for rangeLen bars AND width ≤ rangeMaxATR × ATR
 ft.inRange := ctx.barsSinceEvt >= cfg.rangeLen and (rngHiN - rngLoN) <= atrV * cfg.rangeMaxATR
-// rngHiN/rngLoN include THIS bar, so refreshing the stored levels before the break test made
-// `close > ctx.rangeHi` impossible on any bar where the range was still live
-prevRgHi = ctx.rangeHi
-prevRgLo = ctx.rangeLo
-if ft.inRange
-    ctx.rangeHi := rngHiN
-    ctx.rangeLo := rngLoN
-if ctx.inRangePrev and not na(prevRgLo) and close < prevRgLo
-    ctx.rangeBrkDir := -1
-    ctx.rangeBrkBar := bar_index
-if ctx.inRangePrev and not na(prevRgHi) and close > prevRgHi
-    ctx.rangeBrkDir := 1
-    ctx.rangeBrkBar := bar_index
-// §M12 — rangeBrkDir was set once and never cleared, so a fresh range inherited the direction of
-// the break that ended the PREVIOUS one; M50/M53 then read a stale polarity.
-if ft.inRange and not ctx.inRangePrev
-    ctx.rangeBrkDir := 0
-    ctx.rangeBrkBar := -999
-ctx.inRangePrev := ft.inRange
-ft.rangeShrink  := rangeShrinkG
 // price inside an unmitigated FVG (reaction zone for M46/M50/M52)
 nF = array.size(ctx.fvgs)
 if nF > 0
@@ -2508,10 +2463,6 @@ if ft.newBullFvg
     ctx.bullFvgBar := bar_index
 if ft.newBearFvg
     ctx.bearFvgBar := bar_index
-if ft.atDemand
-    ctx.demandTouchBar := bar_index
-if ft.atSupply
-    ctx.supplyTouchBar := bar_index
 // §3.4 · §M7 — these two are a sweep followed by a BOS, which is a continuation shape, and they
 // were named "sweepCHoCH" while never being able to coincide with a CHoCH (a BOS flips the trend
 // before the CHoCH test runs). Both forms are now detected under honest names and M45 arms off
@@ -2552,20 +2503,6 @@ if st.cisdBear and relBear
 if st.cisdBull and relBull
     ctx.m46Dir := 1
     ctx.m46Bar := bar_index
-// M48: fake CHoCH — LTF CHoCH against a still-aligned HTF bias
-if st.bearCHoCH and ft.htfBias == "BULL"
-    ctx.m48Dir := 1
-    ctx.m48Bar := bar_index
-if st.bullCHoCH and ft.htfBias == "BEAR"
-    ctx.m48Dir := -1
-    ctx.m48Bar := bar_index
-// M52: rejection from supply → CHoCH down (mirror: demand → CHoCH up)
-if st.bearCHoCH and bar_index - ctx.supplyTouchBar <= 20
-    ctx.m52Dir := -1
-    ctx.m52Bar := bar_index
-if st.bullCHoCH and bar_index - ctx.demandTouchBar <= 20
-    ctx.m52Dir := 1
-    ctx.m52Bar := bar_index
 // M54: demand touch → stop-hunt sweep → BOS up → retrace (bull) · mirror (bear)
 if ft.atDemand and ctx.m54Stage == 0
     ctx.m54Stage := 1
@@ -2590,18 +2527,7 @@ if ctx.m54StageB == 2 and bar_index > ctx.m54BarB and st.bearBOS
 if ctx.m54StageB > 0 and bar_index - ctx.m54BarB > cfg.armBars * 2
     ctx.m54StageB := 0
 
-// ── M49 · M01/M02 pre-conditions — structural counters (M38-P6 removed in v8.4.0 for tokens) ──
-// §M49 internal liquidity: a swing that sits INSIDE the leg (above the major low / below the major high)
-if st.swingLow and not na(ctx.curLow) and (na(ctx.majorLow) or ctx.curLow > ctx.majorLow)
-    ctx.intLowB := ctx.curLow
-if st.swingHigh and not na(ctx.curHigh) and (na(ctx.majorHigh) or ctx.curHigh < ctx.majorHigh)
-    ctx.intHighB := ctx.curHigh
-if not na(ctx.intLowB) and low < ctx.intLowB and close > ctx.intLowB
-    ctx.intSwpBull := bar_index
-if not na(ctx.intHighB) and high > ctx.intHighB and close < ctx.intHighB
-    ctx.intSwpBear := bar_index
-ft.intSweptBull := ctx.intSwpBull > 0 and bar_index - ctx.intSwpBull <= 15
-ft.intSweptBear := ctx.intSwpBear > 0 and bar_index - ctx.intSwpBear <= 15
+// ── M01/M02 pre-conditions — structural counters (M49 block removed in v8.4.1) ──
 // §M01/M02 pre-condition: how many separate times price rejected the level that just broke
 if (ft.breakUp or ft.breakDn) and not na(ctx.breakLvl)
     tCnt  = 0
@@ -2746,8 +2672,12 @@ retrace    = st.movePhase == "RETRACEMENT"
 // P0-B — the candle must close beyond the zone midpoint (or its far edge) to count as a rejection
 zMidB = ft.zb.kind == "" or i_zClose == "Off" or close >= (i_zClose == "Top" ? ft.zb.top : (ft.zb.top + ft.zb.bottom) * 0.5)
 zMidS = ft.zs.kind == "" or i_zClose == "Off" or close <= (i_zClose == "Top" ? ft.zs.bottom : (ft.zs.top + ft.zs.bottom) * 0.5)
-zoneOkBull = atBullZone and zMidB and (not fl_SwR or not ft.zb.sweepReq or ft.sweptLow) and (not fl_50 or ft.zb.kind == "SR" or ft.zb.fifty)
-zoneOkBear = atBearZone and zMidS and (not fl_SwR or not ft.zs.sweepReq or ft.sweptHigh) and (not fl_50 or ft.zs.kind == "SR" or ft.zs.fifty)
+// v8.4.1 H2 — in CONFIRMED / MSS mode the §6.2 sweep happened on the TAP bar; an armed POI passed the rule
+// there, so the confirming bar must not demand a second sweep
+poiArmL = not immMode and sx.poiDirL == 1 and not na(sx.poiZb) and ft.zb.top == sx.poiZb.top and ft.zb.bottom == sx.poiZb.bottom
+poiArmS = not immMode and sx.poiDirS == 1 and not na(sx.poiZs) and ft.zs.top == sx.poiZs.top and ft.zs.bottom == sx.poiZs.bottom
+zoneOkBull = atBullZone and zMidB and (not fl_SwR or not ft.zb.sweepReq or ft.sweptLow or poiArmL) and (not fl_50 or ft.zb.kind == "SR" or ft.zb.fifty)
+zoneOkBear = atBearZone and zMidS and (not fl_SwR or not ft.zs.sweepReq or ft.sweptHigh or poiArmS) and (not fl_50 or ft.zs.kind == "SR" or ft.zs.fifty)
 arrOkBull  = not fl_M19 or not ft.arrivalStrong
 arrOkBear  = arrOkBull
 pbOk       = not fl_M26 or not ft.arrivalStrong or ft.arrivalMixed >= 0.35   // §M10
@@ -2790,12 +2720,14 @@ if not immMode
         sx.poiZs    := ft.zs
 trigBull = immMode ? revBull : poiConfL
 trigBear = immMode ? revBear : poiConfS
-// F2 / F3 / F11 (v8.4.1) — stop reference. On the bar a POI reaction confirms, the reaction candle's
-// extreme (sx.poiLowL / poiHighS = min(reaction low, zone bottom)) is the invalidation the state machine
-// itself uses, so the stop is built against it. Otherwise (IMMEDIATE mode, M10, break / trap modules)
-// the last three bars cover the two-bar sweep and a reaction candle one bar before an engulfing confirm.
-slRefLo = not immMode and poiConfL ? math.min(low, sx.poiLowL)  : math.min(low, nz(low[1], low), nz(low[2], low))
-slRefHi = not immMode and poiConfS ? math.max(high, sx.poiHighS) : math.max(high, nz(high[1], high), nz(high[2], high))
+// v8.4.1 H3 — the extreme the stop must sit beyond: this candle in IMMEDIATE mode, otherwise the lowest low /
+// highest high from the POI tap through the confirming bar (the reaction wick through the zone included)
+poiNL   = math.min(math.max(bar_index - sx.poiBarL, 0), i_poiBars) + 1
+poiNS   = math.min(math.max(bar_index - sx.poiBarS, 0), i_poiBars) + 1
+lowTap  = ta.lowest(low, poiNL)
+highTap = ta.highest(high, poiNS)
+setLoL  = poiConfL ? lowTap  : low
+setHiS  = poiConfS ? highTap : high
 
 // ── candidates: [cond, name, dir(+1/-1), base score, note] ───────────────────
 // A — price action
@@ -2842,8 +2774,8 @@ s09b = en_M09 and zoneOkBear and trigBear and wickS >= 0.65 and ft.sslBelow >= 2
 freshDispUp = ctx.breakDir == 1  and bar_index - ctx.breakBar <= 10 and ctx.lastDepStrong
 freshDispDn = ctx.breakDir == -1 and bar_index - ctx.breakBar <= 10 and ctx.lastDepStrong
 // P0-E — the sweep candle must also close in its own upper (lower) half: a real rejection, not a drift back
-s10  = en_M10 and not freshDispDn and (ft.sweptLowQ  or (ft.sweptLow  and ft.zb.kind != "")) and math.max(cd.dnWickRatio, ctx.dnR2) >= cfg.sweepWickMin and close > ft.sweptPriceLo and close >= (high + low) * 0.5
-s10b = en_M10 and not freshDispUp and (ft.sweptHighQ or (ft.sweptHigh and ft.zs.kind != "")) and math.max(cd.upWickRatio, ctx.upR2) >= cfg.sweepWickMin and close < ft.sweptPriceHi and close <= (high + low) * 0.5
+s10  = en_M10 and not freshDispDn and (ft.sweptLowQ  or (ft.sweptLow  and ft.zb.kind != "")) and cd.dnWickRatio >= cfg.sweepWickMin and close > ft.sweptPriceLo and close >= (high + low) * 0.5
+s10b = en_M10 and not freshDispUp and (ft.sweptHighQ or (ft.sweptHigh and ft.zs.kind != "")) and cd.upWickRatio >= cfg.sweepWickMin and close < ft.sweptPriceHi and close <= (high + low) * 0.5
 // D — S/R
 var float dojiHi = na
 var float dojiLo = na
@@ -2960,23 +2892,15 @@ en_M39 = f_en(input.bool(true,  "M39 Reclaimed block retest", group = gM2, inlin
 en_M40 = f_en(input.bool(true,  "M40 Rejection block retest", group = gM2, inline = "a"), true)
 en_M41 = f_en(input.bool(true,  "M41 Sweep + FVG confluence", group = gM2, inline = "b"), true)
 en_M42 = f_en(input.bool(true,  "M42 High-probability S&D", group = gM2, inline = "b"), true)
-en_M44 = f_en(input.bool(false, "M44 Key level approach (C1/C2/C3)", group = gM2, inline = "c"), false)
 en_M45 = f_en(input.bool(true,  "M45 Sweep-based CHoCH retest", group = gM2, inline = "d"), true)
 en_M46 = f_en(input.bool(true,  "M46 CISD setup", group = gM2, inline = "d"), true)
-en_M47 = f_en(input.bool(false, "M47 Manipulated breakout (sweep of HH)", group = gM2, inline = "e"), false)
-en_M48 = f_en(input.bool(false, "M48 Fake CHoCH (HTF still aligned)", group = gM2, inline = "e"), false)
-en_M49 = f_en(input.bool(false, "M49 Internal liquidity gap", group = gM2, inline = "f"), false)
-en_M50 = f_en(input.bool(false, "M50 Range manipulation", group = gM2, inline = "f"), false)
 en_M51 = f_en(input.bool(true,  "M51 Smart BOS model", group = gM2, inline = "g"), true)
-en_M52 = f_en(input.bool(false, "M52 Smart reversal model", group = gM2, inline = "g"), false)
-en_M53 = f_en(input.bool(false, "M53 Smart pullback trap", group = gM2, inline = "h"), false)
 en_M54 = f_en(input.bool(true,  "M54 Smart S&D trap", group = gM2, inline = "h"), true)
 armed(dirWant, dirHave, atBar) => dirHave == dirWant and bar_index - atBar >= 1 and bar_index - atBar <= cfg.armBars
 // §M7 — M45 accepts both encodings: ±1 (sweep + BOS) and ±2 (sweep + real CHoCH, the stronger form)
 armedSw(dirWant, dirHave, atBar) => (dirHave == dirWant or dirHave == dirWant * 2) and bar_index - atBar >= 1 and bar_index - atBar <= cfg.armBars
 reactBull = zoneOkBull or ft.atBullFvg or (poiConfL and sx.poiFvgL)      // S11: FVG-only tap confirms too
 reactBear = zoneOkBear or ft.atBearFvg or (poiConfS and sx.poiFvgS)
-recentHi  = ctx.rangeBrkBar > 0 and bar_index - ctx.rangeBrkBar <= cfg.armBars
 
 // J — ICT blocks (zone engine already validated them; entry = retest + reversal)
 s39  = en_M39 and zoneOkBull and ft.zb.kind == "RCB" and trigBull
@@ -2990,11 +2914,6 @@ w41  = en_M41 and (ctx.m41Dir == 9 or ctx.m41Dir == -9) and bar_index == ctx.m41
 // L — high-probability S&D (5 criteria live in the zone: OB with depStrong, 50% rule, unmitigated) + strongest variant ★★
 s42  = en_M42 and zoneOkBull and ft.zb.kind == "OB" and ft.zb.depStrong and ft.zb.fifty and ft.arrivalWeak and trigBull
 s42b = en_M42 and zoneOkBear and ft.zs.kind == "OB" and ft.zs.depStrong and ft.zs.fifty and ft.arrivalWeak and trigBear
-// N — key level approach (KL ≥ 3): C1 choppy arrival · C2 liquidity build-up (trend into the level) · C3 depletion
-klBear = zoneOkBear and ft.zs.kl >= 3
-klBull = zoneOkBull and ft.zb.kl >= 3
-s44b = en_M44 and klBear and trigBear and (ft.arrivalWeak or bullTrend or ft.rangeShrink)
-s44  = en_M44 and klBull and trigBull and (ft.arrivalWeak or bearTrend or ft.rangeShrink)
 // O — sweep-based CHoCH → retest at breaker / OB
 s45  = en_M45 and armedSw(1, ctx.m45Dir, ctx.m45Bar)  and zoneOkBull and (ft.zb.kind == "BRK" or ft.zb.kind == "OB") and trigBull
 s45b = en_M45 and armedSw(-1, ctx.m45Dir, ctx.m45Bar) and zoneOkBear and (ft.zs.kind == "BRK" or ft.zs.kind == "OB") and trigBear
@@ -3002,28 +2921,11 @@ m45Strong = math.abs(ctx.m45Dir) == 2
 // P — CISD (armed with ≥1 reliability condition) → reversal at breaker / OB / FVG (harami counts here)
 s46  = en_M46 and armed(1, ctx.m46Dir, ctx.m46Bar)  and reactBull and (trigBull or (immMode and cd.harami))
 s46b = en_M46 and armed(-1, ctx.m46Dir, ctx.m46Bar) and reactBear and (trigBear or (immMode and cd.harami))
-// Q — smart money manipulation
-s47b = en_M47 and bullTrend and st.bullSweep and cd.upWickRatio >= cfg.sweepWickMin
-s47  = en_M47 and bearTrend and st.bearSweep and cd.dnWickRatio >= cfg.sweepWickMin
-s48  = en_M48 and armed(1, ctx.m48Dir, ctx.m48Bar)  and zoneOkBull and (ft.zb.kind == "OB" or ft.zb.kind == "BRK") and trigBull
-s48b = en_M48 and armed(-1, ctx.m48Dir, ctx.m48Bar) and zoneOkBear and (ft.zs.kind == "OB" or ft.zs.kind == "BRK") and trigBear
-// §M49: the swept low must be INTERNAL (inside the leg, above the major low) — not any swing low
-s49  = en_M49 and bullTrend and ft.intSweptBull and reactBull and trigBull
-s49b = en_M49 and bearTrend and ft.intSweptBear and reactBear and trigBear
-// the manipulation leg of a LONG range-trap is a stop hunt BELOW the range -> sweptLow (M53 below
-// has the same shape and gets it right); the zone terms were already polarised correctly
-s50  = en_M50 and bullTrend and recentHi and ctx.rangeBrkDir == -1 and (ft.atDemand or (ft.sweptLow and reactBull)) and trigBull
-s50b = en_M50 and bearTrend and recentHi and ctx.rangeBrkDir == 1  and (ft.atSupply or (ft.sweptHigh and reactBear)) and trigBear
 // R — golden strategies
 s51  = en_M51 and bullTrend and ctx.lastDepStrong and bar_index - ctx.lastBOSBar <= 40 and zoneOkBull and trigBull
 s51b = en_M51 and bearTrend and ctx.lastDepStrong and bar_index - ctx.lastBOSBar <= 40 and zoneOkBear and trigBear
 w51  = en_M51 and (st.weakBullBOS or (st.bullBOS and not mv.strong))
 w51b = en_M51 and (st.weakBearBOS or (st.bearBOS and not mv.strong))
-s52b = en_M52 and armed(-1, ctx.m52Dir, ctx.m52Bar) and reactBear and trigBear
-s52  = en_M52 and armed(1, ctx.m52Dir, ctx.m52Bar)  and reactBull and trigBull
-s53  = en_M53 and bearTrend and recentHi and ctx.rangeBrkDir == -1 and (ft.sweptLow or (not na(ctx.curLow) and low <= ctx.curLow + atrV * 0.2)) and revBull
-s53alt = en_M53 and i_m53Alt and bearTrend and ctx.rangeBrkDir == 1 and bar_index == ctx.rangeBrkBar and cd.isBull
-s53b = en_M53 and bullTrend and recentHi and ctx.rangeBrkDir == 1 and (ft.sweptHigh or (not na(ctx.curHigh) and high >= ctx.curHigh - atrV * 0.2)) and revBear
 s54  = en_M54 and ctx.m54Stage == 3 and zoneOkBull and trigBull
 s54b = en_M54 and ctx.m54StageB == 3 and zoneOkBear and trigBear
 // consume the latch: without this the machine stays at stage 3 and re-fires M54 on every zone
@@ -3038,16 +2940,9 @@ f_bid(bL, s39 and arrOkBull, "M39", 31, "Reclaimed block retest + bullish revers
 f_bid(bL, s40, "M40", 21, "Rejection block (wick zone) retest + reversal")
 f_bid(bL, s41, "M41", 43, "Sweep + FVG confluence: low swept, STRONG move left FVG, retrace reversal")
 f_bid(bL, s42, "M42", 43, "High-probability demand: strong departure · 50% tapped · weak arrival" + (ft.zb.nearSwept ? " · ★★ near-miss then sweep (strongest)" : ""))
-f_bid(bL, s44 and arrOkBull, "M44", 10, "Key level approach: choppy / build-up / depletion → reversal")
 f_bid(bL, s45, "M45", (m45Strong ? 4 : 3) * 10 + 3, "Qualified sweep → " + (m45Strong ? "CHoCH (reversal, tier 4)" : "BOS (continuation, tier 3)") + " → breaker/OB retest")
 f_bid(bL, s46, "M46", 32, "CISD (early reversal) with reliability → zone reaction. SL beyond zone")
-f_bid(bL, s47, "M47", 10, "Manipulated breakdown: sweep candle below LL in bearish trend → LONG, TP nearest reaction zone (trail after TP1)")
-f_bid(bL, s48, "M48", 10, "Fake CHoCH: LTF broke major low but HTF still BULL (inducement) → OB rejection LONG")
-f_bid(bL, s49, "M49", 10, "Internal liquidity gap: internal low swept, reaction zone reversal")
-f_bid(bL, s50, "M50", 10, "Range manipulation: range broke DOWN against trend → OB / FVG reversal. TP = external liquidity above range")
 f_bid(bL, s51 and pbOk, "M51", 32, "Smart BOS: aggressive BOS with FVG → OB/support retest")
-f_bid(bL, s52, "M52", 10, "Smart reversal (mirror): demand rejection → CHoCH up → retrace reversal")
-f_bid(bL, s53 or s53alt, "M53", 10, s53alt ? "Smart pullback trap — alternative range break-UP entry" : "Smart pullback trap: bearish pullback → range → break down → reversal at recent low")
 f_bid(bL, s54, "M54", 43, "Smart S&D trap: demand reject → stop hunt → BOS up → retrace reversal")
 
 // continue the SHORT bids
@@ -3055,16 +2950,9 @@ f_bid(bS, s39b and arrOkBear, "M39", 31, "Reclaimed block retest + bearish rever
 f_bid(bS, s40b, "M40", 21, "Rejection block (wick zone) retest + reversal")
 f_bid(bS, s41b, "M41", 43, "Sweep + FVG confluence: high swept, STRONG move left FVG, retrace reversal")
 f_bid(bS, s42b, "M42", 43, "High-probability supply: strong departure · 50% tapped · weak arrival" + (ft.zs.nearSwept ? " · ★★ near-miss then sweep (strongest)" : ""))
-f_bid(bS, s44b and arrOkBear, "M44", 10, "Key level approach: choppy / build-up / depletion → reversal")
 f_bid(bS, s45b, "M45", (m45Strong ? 4 : 3) * 10 + 3, "Qualified sweep → " + (m45Strong ? "CHoCH (reversal, tier 4)" : "BOS (continuation, tier 3)") + " → breaker/OB retest")
 f_bid(bS, s46b, "M46", 32, "CISD (early reversal) with reliability → zone reaction. SL beyond zone")
-f_bid(bS, s47b, "M47", 10, "Manipulated breakout: sweep candle above HH in bullish trend → SHORT, TP nearest reaction zone (trail after TP1)")
-f_bid(bS, s48b, "M48", 10, "Fake CHoCH (mirror): LTF broke major high but HTF still BEAR → OB rejection SHORT")
-f_bid(bS, s49b, "M49", 10, "Internal liquidity gap (mirror)")
-f_bid(bS, s50b, "M50", 10, "Range manipulation (mirror): range broke UP against trend → supply / FVG reversal")
 f_bid(bS, s51b and pbOk, "M51", 32, "Smart BOS (bearish): aggressive BOS with FVG → OB/resistance retest")
-f_bid(bS, s52b, "M52", 10, "Smart reversal: supply rejection → CHoCH down → retrace to FVG/supply/OB → SHORT")
-f_bid(bS, s53b, "M53", 10, "Smart pullback trap (mirror)")
 f_bid(bS, s54b, "M54", 43, "Smart S&D trap (mirror): supply reject → stop hunt → BOS down → retrace")
 
 // extra warnings from J–R
@@ -3287,6 +3175,8 @@ i_entryPx   = input.string("CLOSE", "Entry price", options = ["CLOSE", "CANDLE 5
      tooltip = "CLOSE = market at the confirming candle's close · CANDLE 50% = limit at the midpoint of that candle · ZONE EDGE = limit at the POI edge (zone top for a long, bottom for a short); falls back to CANDLE 50% when the setup has no zone.")
 // P2-B — a stop thinner than this many ticks is widened to it, so a spread-sized risk cannot inflate the R:R
 i_minRiskT  = input.int(20,     "Min risk (ticks)", minval = 0, maxval = 1000, group = gT, inline = "t4b")
+// v8.4.1 M1 — 20 ticks is 0.2 pip on a 5-digit pair; the ATR floor is what actually stops a spread-sized risk
+i_minRiskA  = input.float(0.3,  "… or × ATR", minval = 0.0, step = 0.05, group = gT, inline = "t4b")
 i_tradeLn   = input.bool(true,  "Draw entry / SL / TP lines", group = gT, inline = "t4")
 i_tradeBars = input.int(20,     "Trade line length (bars)", minval = 5, maxval = 100, group = gT, inline = "t4")
 
@@ -3406,37 +3296,41 @@ f_conf(fv, trendStr, isLong) =>
     // NEW · killzone — the London and NY windows are where the sweeps this engine hunts get run
     if i_ssnScore
         sc += fv.sessName == "London" or fv.sessName == "NY" ? 1 : 0
+    // v8.4.1 — ICT true-day open: buying under the 00:00 New York open / selling over it
+    if i_nyOpen and not na(nyOpen)
+        sc += (isLong and close < nyOpen) or (not isLong and close > nyOpen) ? 1 : 0
     sc
 
 // §9.2 SL: 1 zone-based → 2 sweep-based → 3 major HL/LH (if within maxSLATR) → fallback candle extreme
 // P0-2 (audit F3) — the stop takes the FINAL ENTRY price (`ep`), not `close`. It used to know only
 // the close, so a RETEST / BOTH entry moved to the swept level measured its invalidation, its
 // distance cap and its risk from a price the trade never used.
-f_stop(cf, cx, fv, isLong, aV, bufA, maxA, ep, refLo, refHi) =>
+// v8.4.1 H3 — `x` is the setup extreme (this candle's low / high in IMMEDIATE mode, the lowest low / highest
+// high from the POI tap to the confirming bar otherwise). The stop sits beyond the zone AND beyond x: a
+// reaction wick through the zone used to leave the stop inside a low the market had already printed.
+f_stop(cf, cx, fv, isLong, aV, bufA, maxA, ep, x) =>
     buf = aV * bufA
     sl = float(na)
     // S9 — the trade's own-side zone defines the stop (the slot is per side now)
     zz = isLong ? fv.zb : fv.zs
-    // F2 / F3 (v8.4.1) — refLo / refHi = the reaction / sweep extreme (see slRefLo in the main scope);
-    // the stop sits beyond BOTH the zone edge and that wick, so a wick that pierced the zone is covered
     if zz.kind != ""
-        sl := isLong ? math.min(zz.bottom, refLo) - buf : math.max(zz.top, refHi) + buf
+        sl := isLong ? math.min(zz.bottom, x) - buf : math.max(zz.top, x) + buf
     else if (isLong and fv.sweptLow) or (not isLong and fv.sweptHigh)
-        sl := isLong ? refLo - buf : refHi + buf
+        sl := isLong ? x - buf : x + buf
     else
         maj = isLong ? cx.majorLow : cx.majorHigh
         if not na(maj) and math.abs(ep - maj) <= aV * maxA
-            sl := isLong ? maj - buf : maj + buf
+            sl := isLong ? math.min(maj, x) - buf : math.max(maj, x) + buf
         else
-            sl := isLong ? refLo - buf : refHi + buf
+            sl := isLong ? x - buf : x + buf
     // sanity: SL must sit on the correct side of the ENTRY (a zone edge can be beyond it when the
     // touched zone is the opposite kind, or too wide vs maxA) -> fall back to the candle extreme
     if (isLong and (sl >= ep or ep - sl > aV * maxA * 2)) or (not isLong and (sl <= ep or sl - ep > aV * maxA * 2))
-        sl := isLong ? math.min(low, ep) - buf : math.max(high, ep) + buf
+        sl := isLong ? math.min(x, ep) - buf : math.max(x, ep) + buf
     sl
 
 // build one Sig (entry / SL / TP1 / TP2 / score / grade)
-f_sig(cf, cx, fv, trendStr, name, tier, note, isLong, aV, eMode, slBufA, maxSLA, fixedR, fixedRm, minRR, maxRR, rrReal, pathMode, ePx, minRiskT, refLo, refHi) =>
+f_sig(cf, cx, fv, trendStr, name, tier, note, isLong, aV, eMode, slBufA, maxSLA, fixedR, fixedRm, minRR, maxRR, rrReal, pathMode, ePx, minRiskT, minRiskA, x) =>
     g = Sig.new()
     g.name  := name
     g.dir   := isLong ? 1 : -1
@@ -3456,10 +3350,10 @@ f_sig(cf, cx, fv, trendStr, name, tier, note, isLong, aV, eMode, slBufA, maxSLA,
     // P0-2 (audit F3) — fixed order: FINAL ENTRY -> invalidation -> risk -> targets -> R:R.
     // f_stop now receives the entry, so the wrong-side re-check that used to patch up the RETEST
     // entry afterwards is gone: the stop is built against the price the trade actually uses.
-    g.sl := f_stop(cf, cx, fv, isLong, aV, slBufA, maxSLA, g.entry, refLo, refHi)
+    g.sl := f_stop(cf, cx, fv, isLong, aV, slBufA, maxSLA, g.entry, x)
     risk = math.abs(g.entry - g.sl)
     // P2-B — floor the risk at minRiskT ticks (and at 0.5 ATR when the stop collapsed onto the entry)
-    minR = math.max(syminfo.mintick * minRiskT, risk <= 0 ? aV * 0.5 : 0.0)
+    minR = math.max(syminfo.mintick * minRiskT, aV * minRiskA, risk <= 0 ? aV * 0.5 : 0.0)   // v8.4.1 M1
     if risk < minR
         risk := minR
         g.sl := isLong ? g.entry - risk : g.entry + risk
@@ -3485,7 +3379,7 @@ f_sig(cf, cx, fv, trendStr, name, tier, note, isLong, aV, eMode, slBufA, maxSLA,
         if na(tpA) and g.entry != close
             g.entry := close
             g.note  := g.note + "R:R fallback → IMMEDIATE entry · "
-            g.sl    := f_stop(cf, cx, fv, isLong, aV, slBufA, maxSLA, g.entry, refLo, refHi)
+            g.sl    := f_stop(cf, cx, fv, isLong, aV, slBufA, maxSLA, g.entry, x)
             risk    := math.abs(g.entry - g.sl)
             if risk <= 0
                 risk := aV * 0.5
@@ -3556,7 +3450,7 @@ contL = bL.n == "M02" or bL.n == "M05" or bL.n == "M08" or bL.n == "M15" or bL.n
 contS = bS.n == "M02" or bS.n == "M05" or bS.n == "M08" or bS.n == "M15" or bS.n == "M33" or bS.n == "M36" or bS.n == "M42" or bS.n == "M51" or bS.n == "M73"
 rejL := bL.n == "" ? 1 : ft.gateUp == 0 or (ft.gateUp == 1 and contL) ? 2 : not ft.sbSessOk ? 3 : 0
 if rejL == 0
-    sigL := f_sig(cfg, ctx, ft, gateTrend, bL.n, int(bL.s / 10), bL.t, true, atrV, i_entryMode, i_slBuf, i_maxSL, i_fixedR, i_fixedRm, i_minRR, i_maxRR, i_rrReal, i_tpPath, i_entryPx, i_minRiskT, slRefLo, slRefHi)
+    sigL := f_sig(cfg, ctx, ft, gateTrend, bL.n, int(bL.s / 10), bL.t, true, atrV, i_entryMode, i_slBuf, i_maxSL, i_fixedR, i_fixedRm, i_minRR, i_maxRR, i_rrReal, i_tpPath, i_entryPx, i_minRiskT, i_minRiskA, setLoL)
     if sigL.name == ""
         rejL := 4
     if ft.gateUp == 1
@@ -3575,7 +3469,7 @@ if rejL == 0
         sigL := Sig.new()
 rejS := bS.n == "" ? 1 : ft.gateDn == 0 or (ft.gateDn == 1 and contS) ? 2 : not ft.sbSessOk ? 3 : 0
 if rejS == 0
-    sigS := f_sig(cfg, ctx, ft, gateTrend, bS.n, int(bS.s / 10), bS.t, false, atrV, i_entryMode, i_slBuf, i_maxSL, i_fixedR, i_fixedRm, i_minRR, i_maxRR, i_rrReal, i_tpPath, i_entryPx, i_minRiskT, slRefLo, slRefHi)
+    sigS := f_sig(cfg, ctx, ft, gateTrend, bS.n, int(bS.s / 10), bS.t, false, atrV, i_entryMode, i_slBuf, i_maxSL, i_fixedR, i_fixedRm, i_minRR, i_maxRR, i_rrReal, i_tpPath, i_entryPx, i_minRiskT, i_minRiskA, setHiS)
     if sigS.name == ""
         rejS := 4
     if ft.gateDn == 1
@@ -3798,10 +3692,11 @@ if d_struct and barstate.isconfirmed
         f_evLine(lns, preHighIdx, preHigh, color.new(vis.inv, 30), line.style_dashed, cfg.maxLines)
     if st.bearSweep and not na(preLow)
         f_evLine(lns, preLowIdx, preLow, color.new(vis.inv, 30), line.style_dashed, cfg.maxLines)
-    if st.bullCHoCH and not na(ctx.majorHigh)
-        f_evLine(lns, ctx.majorHighIdx, ctx.majorHigh, color.new(ft.chochReal ? vis.bull : vis.inv, 10), ft.chochReal ? line.style_solid : line.style_dashed, cfg.maxLines)
-    if st.bearCHoCH and not na(ctx.majorLow)
-        f_evLine(lns, ctx.majorLowIdx, ctx.majorLow, color.new(ft.chochReal ? vis.bear : vis.inv, 10), ft.chochReal ? line.style_solid : line.style_dashed, cfg.maxLines)
+    // v8.4.1 H1 — drawn at the level the close went through, not always the protected swing
+    if st.bullCHoCH and not na(st.chLvl)
+        f_evLine(lns, st.chIdx, st.chLvl, color.new(ft.chochReal ? vis.bull : vis.inv, 10), ft.chochReal ? line.style_solid : line.style_dashed, cfg.maxLines)
+    if st.bearCHoCH and not na(st.chLvl)
+        f_evLine(lns, st.chIdx, st.chLvl, color.new(ft.chochReal ? vis.bear : vis.inv, 10), ft.chochReal ? line.style_solid : line.style_dashed, cfg.maxLines)
     if st.cisdBear and not na(sx.cisdUpRef)
         f_evLine(lns, math.max(sx.cisdUpRefBar, bar_index - 30), sx.cisdUpRef, color.new(vis.bear, 40), line.style_dotted, cfg.maxLines)
     if st.cisdBull and not na(sx.cisdDnRef)
@@ -3878,7 +3773,7 @@ f_panel(tb, cx, fv, stc, v, sgl, sgs, hL, hS, tfHtf) =>
     table.cell(tb, 0, 12, "PD array",      text_color = v.txt, bgcolor = lab)
     table.cell(tb, 1, 12, pdTxt, text_color = fv.pdPct > 0.5 ? v.bear : fv.pdPct < 0.5 ? v.bull : chart.fg_color)
     table.cell(tb, 0, 13, "Session",       text_color = v.txt, bgcolor = lab)
-    table.cell(tb, 1, 13, fv.sessName == "" ? "— (outside killzones)" : fv.sessName + (fv.sbSessOk ? "" : " ⛔"), text_color = chart.fg_color)
+    table.cell(tb, 1, 13, (fv.sessName == "" ? "— (outside killzones)" : fv.sessName + (fv.sbSessOk ? "" : " ⛔")) + (na(nyOpen) ? "" : close > nyOpen ? " · >00:00 open" : " · <00:00 open"), text_color = chart.fg_color)
     // P0-4 / F7 — TP1 provenance and the HTF gate category of the signal on display
     gateN = isL ? fv.gateUp : fv.gateDn
     table.cell(tb, 0, 14, "TP1 / gate",    text_color = v.txt, bgcolor = lab)
@@ -3915,11 +3810,12 @@ if d_legend and barstate.islast
 
 // ── §12 ALERTS ───────────────────────────────────────────────────────────────
 // 12.1 dynamic alert() per signal (once per bar close)
+// v8.4.1 M2 — grade, TP2, risk distance, R:R and TP1 provenance, so a webhook can size and place the trade
 f_alertMsg(g, bias) =>
-    str.format("{0} | {1} {2} | Score {3} | Entry {4} SL {5} TP {6} | TF {7} | HTF {8}",
-     syminfo.ticker, g.name, g.dir == 1 ? "LONG" : "SHORT", g.score,
-     str.tostring(g.entry, format.mintick), str.tostring(g.sl, format.mintick), str.tostring(g.tp1, format.mintick),
-     timeframe.period, bias)
+    str.format("{0} | {1} {2} | {3}{4} | Entry {5} SL {6} TP1 {7} TP2 {8} | risk {9} · {10}R | TF {11} | HTF {12} | TP1 {13}",
+     syminfo.ticker, g.name, g.dir == 1 ? "LONG" : "SHORT", f_gradeTxt(g.score), str.tostring(g.score),
+     str.tostring(g.entry, format.mintick), str.tostring(g.sl, format.mintick), str.tostring(g.tp1, format.mintick), str.tostring(g.tp2, format.mintick),
+     str.tostring(math.abs(g.entry - g.sl), format.mintick), str.tostring(g.rr, "#.#"), timeframe.period, bias, g.tgt)
 if barstate.isconfirmed and hasL
     alert(f_alertMsg(sigL, ft.htfBias), alert.freq_once_per_bar_close)
 if barstate.isconfirmed and hasS
@@ -3951,7 +3847,7 @@ plot(array.size(ctx.zones), "zones", display = display.data_window)
 plot(array.size(ctx.lv),    "liq levels", display = display.data_window)
 // diagnostics for the gates that are otherwise invisible on the chart
 plot(ft.brkTouches, "M01/M02 · level rejections (needs ≥2)", display = display.data_window)
-plot(sx.brkTimeAt,  "M22/M71 · bars at level before break",  display = display.data_window)
+plot(sx.brkTimeAt,  "M71 · bars at level before break",      display = display.data_window)
 plot(ft.cisdRel,    "M46 · CISD reliability 0-3",            display = display.data_window)
 plot(ft.zb.depStrong ? 1 : ft.zs.depStrong ? -1 : 0, "zone departure STRONG (M04/M21/M33/M42 gate)", display = display.data_window)
 // v8.2.0 — PD position and displacement quality. The per-module hit counter lives in the strategy
